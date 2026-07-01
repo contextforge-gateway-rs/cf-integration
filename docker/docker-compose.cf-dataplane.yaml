@@ -10,7 +10,10 @@
 #     up
 
 services:
-  # cf-controlplane's upstream compose service key is gateway; expose it as cf-controlplane on mcpnet.
+  # cf-controlplane's upstream compose service key is gateway; expose it as
+  # cf-controlplane on mcpnet. DATAPLANE_PUBLISHER is the only behavioral
+  # change to the upstream gateway: it publishes virtual server configs to
+  # Redis for cf-dataplane.
   gateway:
     networks:
       mcpnet:
@@ -18,17 +21,6 @@ services:
           - cf-controlplane
     environment:
       DATAPLANE_PUBLISHER: "true"
-      GUNICORN_WORKERS: ${CF_CONTROLPLANE_GUNICORN_WORKERS:-2}
-    deploy:
-      mode: replicated
-      replicas: 1
-      resources:
-        limits:
-          cpus: "${CF_CONTROLPLANE_CPU_LIMIT:-2}"
-          memory: ${CF_CONTROLPLANE_MEM_LIMIT:-2G}
-        reservations:
-          cpus: "${CF_CONTROLPLANE_CPU_RESERVATION:-1}"
-          memory: ${CF_CONTROLPLANE_MEM_RESERVATION:-512M}
 
   cf-dataplane:
     image: ${CF_DATAPLANE_IMAGE:?Set CF_DATAPLANE_IMAGE to the cf-dataplane image tag}

@@ -3,31 +3,15 @@
 # Combine with cf-controlplane docker-compose.yml and docker-compose.cf-dataplane.yaml.
 
 services:
+  # Fast Time registration is stock upstream (register_fast_time and
+  # register_fast_time_sse run unchanged); the dataplane just waits for it so
+  # the publisher has the fixed virtual server to publish.
   cf-dataplane:
     depends_on:
       redis:
         condition: service_started
       register_fast_time:
         condition: service_completed_successfully
-
-  fast_time_server:
-    image: ${FAST_TIME_IMAGE:-ghcr.io/ibm/cfex-mcp-fast-time-server:latest}
-    build: !reset null
-    command: !reset null
-
-  register_fast_time:
-    volumes:
-      - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/scripts/register-fast-time.py:/opt/cf-integration/register-fast-time.py:ro
-      - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/scripts/cf-jwt.py:/opt/cf-integration/cf_jwt.py:ro
-    entrypoint:
-      - python3
-      - /opt/cf-integration/register-fast-time.py
-    command: !reset []
-
-  # The Fast Time image used here serves /mcp only; skip the upstream SSE registration.
-  register_fast_time_sse:
-    entrypoint: ["echo", "cf-integration: skipping SSE registration (Fast Time image serves /mcp)"]
-    command: !reset []
 
   # Run the upstream fast-test fixture services in the base stack (upstream
   # gates them behind profiles) so the fast-test-* tools that live-mcp's

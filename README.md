@@ -4,6 +4,8 @@ Reusable integration harness for wiring `cf-controlplane` to the Rust `cf-datapl
 
 Nginx routes only `/servers/{virtual_host_id}/mcp` to `cf-dataplane` as `/contextforge-rs/servers/{virtual_host_id}/mcp`. Raw `/mcp` and all UI/API traffic stay on `cf-controlplane`.
 
+The stack is the stock upstream `docker-compose.yml` (including its Fast Time image, registrations, and fast-test fixtures) with exactly two intentional differences: the nginx routing split above, and `DATAPLANE_PUBLISHER=true` on the gateway so virtual server configs reach `cf-dataplane` via Redis. Any test failure should therefore be attributable to `cf-dataplane` behavior, not stack configuration drift.
+
 ## Quick Start
 
 ```bash
@@ -12,7 +14,7 @@ scripts/cf-integration.sh up
 
 The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers.
 
-The Fast Time helper uses the published `ghcr.io/ibm/cfex-mcp-fast-time-server:latest` image and registers its Streamable HTTP MCP endpoint at `/mcp`.
+Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged.
 
 Open `http://localhost:8080/admin` and log in with:
 
@@ -70,7 +72,7 @@ scripts/cf-integration.sh live-protocol
 scripts/cf-integration.sh live-all
 ```
 
-`live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. `live-rbac` and `live-all` stay red on this stack: they register `http://fast_time_server:8080/sse`, and the GHCR Fast Time image serves `/mcp` only. `live-protocol` fails on an upstream async fixture bug that reproduces on the gateway-independent `reference-stdio` target.
+`live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
 ## Configuration
 
@@ -85,11 +87,12 @@ CF_DATAPLANE_PLATFORM=linux/amd64
 CF_COMPOSE_BUILD=false
 CF_INTEGRATION_DIR=.integration
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
-FAST_TIME_IMAGE=ghcr.io/ibm/cfex-mcp-fast-time-server:latest
 NGINX_PORT=8080
 ```
 
 `CF_COMPOSE_BUILD` defaults to `false`; published images are used and local builds happen only when an image is missing or `CF_COMPOSE_BUILD=true` forces `--build`.
+
+The upstream gateway sizing knobs (`GATEWAY_REPLICAS`, `GATEWAY_CPU_LIMIT`, `GATEWAY_CPU_RESERVATION`, `GATEWAY_MEM_LIMIT`, `GATEWAY_MEM_RESERVATION`, `GUNICORN_WORKERS`) are defaulted to fit the local Docker engine (upstream assumes a large CI host); override them to match upstream sizing on bigger hardware.
 
 If `CF_DATAPLANE_IMAGE` is not set, the script uses:
 
@@ -122,6 +125,5 @@ scripts/cf-jwt.py                            local HS256 JWT helper (CLI + impor
 scripts/cf-probe.py                          end-to-end dataplane route probe
 scripts/locustfile_cf_dataplane.py           harness Locust file for the dataplane route
 scripts/mcp_http.py                          shared MCP streamable-HTTP helpers
-scripts/register-fast-time.py                Fast Time gateway/virtual-server registration
 reports/                                     curated run reports (YYYY-MM-DD-<topic>.md)
 ```

@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -88,7 +89,15 @@ def main() -> None:
     token = os.environ.get("MCPGATEWAY_BEARER_TOKEN") or cf_jwt.make_token(
         JWT_SECRET_KEY, ADMIN_EMAIL, scopes=cf_jwt.DEFAULT_SCOPES
     )
-    status, headers, message = mcp_post(init_payload, token)
+    # The DATAPLANE_PUBLISHER pushes virtual server configs to Redis on a 60s
+    # cycle, so right after `up` the dataplane may not have the config yet.
+    deadline = time.time() + int(os.environ.get("CF_PROBE_CONFIG_TIMEOUT", "120"))
+    while True:
+        status, headers, message = mcp_post(init_payload, token)
+        if status == 200 or time.time() >= deadline:
+            break
+        print(f"initialize=RETRY status={status} (waiting for dataplane config)")
+        time.sleep(5)
     result_of("initialize", status, message)
     session_id = headers.get("Mcp-Session-Id")
     if not session_id:
