@@ -1,0 +1,61 @@
+# Integration overlay for cf-controlplane + cf-dataplane.
+#
+# Usage from this repo:
+#   export CF_INTEGRATION_ROOT="$PWD"
+#   export CF_DATAPLANE_IMAGE="ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0"
+#   export CF_DATAPLANE_PLATFORM="linux/amd64"
+#   docker compose \
+#     -f /path/to/cf-controlplane/docker-compose.yml \
+#     -f "$CF_INTEGRATION_ROOT/docker/docker-compose.cf-dataplane.yaml" \
+#     up
+
+services:
+  # cf-controlplane's upstream compose service key is gateway; expose it as cf-controlplane on mcpnet.
+  gateway:
+    networks:
+      mcpnet:
+        aliases:
+          - cf-controlplane
+    environment:
+      DATAPLANE_PUBLISHER: "true"
+      GUNICORN_WORKERS: ${CF_CONTROLPLANE_GUNICORN_WORKERS:-2}
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          cpus: "${CF_CONTROLPLANE_CPU_LIMIT:-2}"
+          memory: ${CF_CONTROLPLANE_MEM_LIMIT:-2G}
+        reservations:
+          cpus: "${CF_CONTROLPLANE_CPU_RESERVATION:-1}"
+          memory: ${CF_CONTROLPLANE_MEM_RESERVATION:-512M}
+
+  cf-dataplane:
+    image: ${CF_DATAPLANE_IMAGE:?Set CF_DATAPLANE_IMAGE to the cf-dataplane image tag}
+    platform: ${CF_DATAPLANE_PLATFORM:?Set CF_DATAPLANE_PLATFORM to the cf-dataplane image platform}
+    restart: unless-stopped
+    networks: [mcpnet]
+    expose:
+      - "4445"
+    environment:
+      CONTEXTFORGE_GATEWAY_RS_ADDRESS: 0.0.0.0:4445
+      CONTEXTFORGE_GATEWAY_RS_REDIS_HOSTNAME: redis
+      CONTEXTFORGE_GATEWAY_RS_REDIS_PORT: "6379"
+      CONTEXTFORGE_GATEWAY_RS_REDIS_CONNECTION_MODE: plain-text
+      CONTEXTFORGE_GATEWAY_RS_TOKEN_SECRET: ${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}
+      CONTEXTFORGE_GATEWAY_RS_UPSTREAM_CONNECTION_MODE: plain-text-or-tls
+      RUST_LOG: ${CF_DATAPLANE_LOG:-info}
+    depends_on:
+      redis:
+        condition: service_started
+    deploy:
+      replicas: 1
+
+  nginx:
+    volumes:
+      - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/docker/nginx.cf-dataplane.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+      cf-dataplane:
+        condition: service_started
