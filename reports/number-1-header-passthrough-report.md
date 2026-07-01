@@ -1,191 +1,120 @@
-# Number 1 Test Report: Header Passthrough
+# Number 1 Test Report: GHCR Fast Time Dataplane Run
 
 Run date: 2026-07-01, Europe/Dublin.
 
-## Executive Summary
+Repo HEAD: `5d9a0eb`
 
-The header-passthrough fix is verified on the real nginx -> `cf-dataplane` route. It is not the reason the current full run is red.
+## Scope
 
-The remaining red results are useful, but they point elsewhere:
-
-1. `scripts/cf-integration.sh smoke` fails because the locust MCP client sends `Accept: application/json` on a streamable HTTP endpoint that requires `text/event-stream` to be acceptable.
-2. `scripts/cf-integration.sh live-all` is too broad for this harness as-is. It includes suites that expect unregistered `fast-test-*` tools, Keycloak/SSO services, Rust runtime modes that are booted off, and protocol-compliance async fixtures that error before gateway behavior is tested.
-3. The direct dataplane path works with auth, session propagation, tool listing, and tool calls.
-
-So: number 1 is fixed. The next work is not more nginx header passthrough work. It is test-client compatibility and live-suite scope/configuration.
-
-## Environment
-
-- `cf-integration`: `40e3936`
-- `cf-controlplane`: `a8f786b7f`
-- `cf-dataplane`: `ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0`, image id `7f8abb166c17`
-- `nginx`: `mcpgateway/nginx-cache:latest`, image id `9dfdbad545d2`
-- `cf-integration-mcp-counter`: `cf-integration-mcp-counter:local`, image id `958e590b5ded`
-- Public test URL: `http://127.0.0.1:8080`
-
-Started with:
-
-```bash
-scripts/cf-integration.sh up
-```
-
-Result: pass. `/health` returned healthy. Running stack after tests:
-
-- `cf-integration-nginx-1`: healthy
-- `cf-integration-gateway-1`: healthy
-- `cf-integration-postgres-1`: healthy
-- `cf-integration-pgbouncer-1`: healthy
-- `cf-integration-fast_time_server-1`: healthy
-- `cf-integration-redis-1`: healthy
-- `cf-integration-cf-dataplane-1`: running
-- `cf-integration-cf-integration-mcp-counter-1`: running
-
-Registered virtual servers:
-
-- `9779b6698cbd4b4995ee04a4fab38737`: `Fast Time Server`
-- `a88e2c3f5d7b4a9e8f1c6d2e3b4a5f6e`: `Fast Time SSE Server`
-
-Registered tools are from `fast_time` and `fast_time_sse`; no `fast-test-*` tools were registered in this run.
-
-## What Was Proven
-
-The repo nginx config forwards these headers on the dataplane route:
-
-- `Authorization`
-- `Mcp-Session-Id`
-- `Mcp-Protocol-Version`
-- `Host`
-- `X-Forwarded-Proto`
-- `X-Forwarded-Host`
-
-The route rewrite also works:
+This report replaces the prior header-passthrough report. It is based on a fresh run against the current stack after switching Fast Time to the published GHCR image:
 
 ```text
-/servers/{virtual_host_id}/mcp
--> /contextforge-rs/servers/{virtual_host_id}/mcp
+ghcr.io/ibm/cfex-mcp-fast-time-server:latest
+sha256:65b5977ba69bfb12fab5c71c445c8328934911430f1cedd9b07eadbe30fa57c0
+created: 2026-06-29T13:45:21.322469287Z
 ```
 
-### Real Dataplane Initialize
-
-Command shape:
-
-```bash
-curl -i \
-  -H "Authorization: Bearer <generated-token>" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Protocol-Version: 2025-06-18" \
-  --data '{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cf-integration-report","version":"1.0"}}}' \
-  http://127.0.0.1:8080/servers/9779b6698cbd4b4995ee04a4fab38737/mcp
-```
-
-Result:
+Evidence files from the run are under:
 
 ```text
-HTTP/1.1 200 OK
-Content-Type: text/event-stream
-mcp-session-id: <returned>
-"protocolVersion":"2025-06-18"
-"serverInfo":{"name":"rust-conformance-server","version":"0.1.0"}
+.integration/mcp-context-forge/reports/ghcr-fast-time-run/
 ```
 
-### Auth Negative Control
+## Verdict
 
-Same request without `Authorization`:
+The nginx to `cf-dataplane` route works for the real Fast Time server on `/servers/{virtual_host_id}/mcp`.
 
-```text
-HTTP/1.1 401 Unauthorized
-```
+Verified through nginx:
 
-This matters because it proves the passing initialize was not anonymous fallback behavior. The dataplane saw auth state.
+- `Authorization` reached the dataplane.
+- `Mcp-Session-Id` worked on follow-up requests.
+- Streamable HTTP content negotiation worked when the client accepted `text/event-stream`.
+- `initialize`, `tools/list`, and `tools/call` all passed.
 
-### Session Follow-Up
+The full stack is still red. The new failures are not the old number 1 header-passthrough issue:
 
-After initialize, a `tools/list` call with the returned `Mcp-Session-Id` succeeded through nginx.
+- `smoke` fails because the Locust MCP client sends `Accept: application/json` against a streamable HTTP endpoint that returns SSE.
+- `live-all` fails because the suite still assumes `/sse`, `fast-test-*` fixtures, optional SSO/runtime services, and protocol-compliance async fixtures that do not match this harness run.
 
-Result:
-
-```text
-PASS real session follow-up
-tools/list returned 6 tools
-```
-
-Returned tools included:
-
-- `6e74192d84014a9fb8efe7e5822b5be8-echo`
-- `6e74192d84014a9fb8efe7e5822b5be8-get_stats`
-- `6e74192d84014a9fb8efe7e5822b5be8-schema_success`
-
-### Real Tool Call
-
-Tool call through the same dataplane route:
-
-```text
-tools/call name=6e74192d84014a9fb8efe7e5822b5be8-echo
-```
-
-Result:
-
-```text
-PASS real echo tool call
-"text":"header passthrough real run"
-"isError":false
-```
-
-### Raw Upstream Header Probe
-
-A throwaway Docker network ran this repo's nginx config with a mock `cf-dataplane` upstream that echoed received headers.
-
-Result:
-
-```text
-PASS header passthrough
-path=/contextforge-rs/servers/header-pass/mcp?probe=1
-authorization=Bearer header-pass-token
-host=integration.example.test
-mcp-protocol-version=2025-06-18
-mcp-session-id=session-123
-x-forwarded-host=public.example.test
-x-forwarded-proto=https
-```
-
-This is the direct proof that nginx does not drop the number 1 headers.
-
-## Full Run Results
-
-### `live-all`
+## Current Stack State
 
 Command:
 
 ```bash
-MCP_CLI_BASE_URL=http://127.0.0.1:8080 scripts/cf-integration.sh live-all
+scripts/cf-integration.sh ps
 ```
 
-Result: fail.
-
-Summary:
+Relevant services:
 
 ```text
-270 collected
-80 passed
-68 failed
-42 errors
-75 skipped
-5 xfailed
-4 rerun
+cf-integration-nginx-1              mcpgateway/nginx-cache:latest                         Up, healthy
+cf-integration-gateway-1            mcpgateway/mcpgateway:latest                          Up, healthy
+cf-integration-cf-dataplane-1       ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0 Up
+cf-integration-fast_time_server-1   ghcr.io/ibm/cfex-mcp-fast-time-server:latest          Up, healthy
+cf-integration-postgres-1           postgres:18                                           Up, healthy
+cf-integration-redis-1              redis:latest                                          Up, healthy
 ```
 
-This is not a header passthrough failure.
+The current Fast Time registration is STREAMABLEHTTP on `/mcp`; the stale `/sse` registration from the old report is not present.
 
-Useful triage:
+DB evidence:
 
-- `tests/live_gateway/mcp/test_mcp_protocol_e2e.py` calls `fast-test-echo`, `fast-test-get-stats`, `fast-test-schema-error`, and `fast-test-schema-success`.
-- The actual stack registered only `fast_time` and `fast_time_sse` tool sets. The missing `fast-test-*` fixtures explain the MCP tool-call failures.
-- Many protocol-compliance tests error with `RuntimeError: Runner.run() cannot be called from a running event loop`, including `reference-stdio` cases. Those errors happen before any nginx/dataplane header behavior can be inferred.
-- SSO tests skipped because Keycloak/Azure credentials were not available.
-- Rust-mode tests skipped because the gateway booted with `boot_mode='off'`, so runtime-mode flips were refused.
+```text
+fast_time|http://fast_time_server:8080/mcp|STREAMABLEHTTP|true|active
+9779b6698cbd4b4995ee04a4fab38737|Fast Time Server|6
+```
 
-### `smoke`
+The virtual server under test is:
+
+```text
+9779b6698cbd4b4995ee04a4fab38737
+```
+
+## Direct Dataplane Probe
+
+Command shape:
+
+```bash
+TOKEN=$(scripts/cf-integration.sh token)
+SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
+URL="http://127.0.0.1:8080/servers/${SERVER_ID}/mcp"
+
+curl \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Protocol-Version: 2025-06-18" \
+  --data '{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cf-integration-report","version":"2.0"}}}' \
+  "$URL"
+```
+
+Fresh result after the broad test run:
+
+```text
+auth_negative=PASS status=401
+initialize=PASS status=200 session=c54f1adb-3533-4970-a35f-de9bc575fcdb
+tools_list=PASS count=6
+tool=e3c164982fd04edf835cd1e0ef3223da-convert_time
+tool=e3c164982fd04edf835cd1e0ef3223da-echo
+tool=e3c164982fd04edf835cd1e0ef3223da-get_stats
+tool=e3c164982fd04edf835cd1e0ef3223da-get_system_time
+tool=e3c164982fd04edf835cd1e0ef3223da-schema_error
+tool=e3c164982fd04edf835cd1e0ef3223da-schema_success
+echo_call=PASS
+```
+
+The `401` negative control used the same initialize request without `Authorization`. The passing initialize used the bearer token.
+
+This is the main pass signal. It exercises the real public route:
+
+```text
+nginx :8080
+-> /servers/9779b6698cbd4b4995ee04a4fab38737/mcp
+-> cf-dataplane
+-> ghcr.io/ibm/cfex-mcp-fast-time-server:latest /mcp
+```
+
+## Smoke Run
 
 Command:
 
@@ -193,50 +122,138 @@ Command:
 MCP_VIRTUAL_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737 scripts/cf-integration.sh smoke
 ```
 
-Result: fail.
+Exit code: `1`
 
-Summary:
+Result:
 
 ```text
-Total Requests: 14
-Total Failures: 14 (100.00%)
+Total Requests: 19
+Total Failures: 19 (100.00%)
+Requests/sec (RPS): 2.00
+
+Error report
 1 POST MCP initialize: HTTP 406
-9 POST MCP tools/list: HTTP 406
-2 POST MCP resources/list: HTTP 406
-2 POST MCP prompts/list: HTTP 406
+8 POST MCP tools/list: HTTP 406
+7 POST MCP prompts/list: HTTP 406
+2 POST MCP ping: HTTP 406
+1 POST MCP resources/list: HTTP 406
 ```
 
-Root cause found in the run:
+Diagnosis:
+
+The load test client sends `Accept: application/json` for MCP streamable HTTP calls:
 
 ```text
-Accept: application/json            -> HTTP 406
-Accept: application/json, text/event-stream -> HTTP 200
+.integration/mcp-context-forge/tests/loadtest/locustfile_mcp_protocol.py:260
+.integration/mcp-context-forge/tests/loadtest/locustfile_mcp_protocol.py:542
+.integration/mcp-context-forge/tests/loadtest/locustfile_mcp_protocol.py:918
 ```
 
-The locust file sends the bad header for MCP discovery and requests:
+That is incompatible with the endpoint in this run. The successful direct probe used:
 
-```python
-headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-...
-"Content-Type": "application/json",
-"Accept": "application/json",
+```text
+Accept: application/json, text/event-stream
 ```
 
-That matches the failure. It does not implicate nginx header passthrough.
+The smoke failure is therefore a client/content-negotiation bug in the load-test path. It is not evidence that nginx is dropping the number 1 headers.
 
-## Recommended Next Fixes
+## Full Live Run
 
-1. Update `tests/loadtest/locustfile_mcp_protocol.py` to send `Accept: application/json, text/event-stream` on streamable HTTP MCP requests, and parse SSE responses instead of assuming `response.json()`.
-2. Split `live-all` for this integration harness into supported lanes:
-   - dataplane `/servers/{id}/mcp` smoke
-   - control-plane `/mcp/` live tests that match registered fixtures
-   - optional SSO/Keycloak lane
-   - optional Rust runtime mode lane
-3. Either register the `fast_test_server` fixture in this harness or stop running tests that require `fast-test-*` tools.
-4. Triage the protocol-compliance async fixture error separately, since it reproduces for `reference-stdio` and is not specific to nginx or dataplane.
+Command:
+
+```bash
+MCP_CLI_BASE_URL=http://127.0.0.1:8080 scripts/cf-integration.sh live-all
+```
+
+Exit code: `2`
+
+Result:
+
+```text
+270 collected
+65 failed
+70 passed
+75 skipped
+5 xfailed
+109 warnings
+55 errors
+7 rerun
+runtime: 30.28s
+```
+
+Important failure buckets:
+
+1. RBAC transport tests still try to register `http://fast_time_server:8080/sse`.
+
+   The GHCR Fast Time image used by this harness exposes `/mcp`. The suite gets:
+
+   ```text
+   Failed to initialize gateway at http://fast_time_server:8080/sse:
+   Client error '404 Not Found'
+   ```
+
+   This accounts for the RBAC `/sse` setup errors. It is a suite expectation mismatch for this image.
+
+2. MCP protocol E2E tool-call tests expect `fast-test-*` tools.
+
+   Examples from the run:
+
+   ```text
+   Tool not found: fast-test-echo
+   Tool not found: fast-test-get-stats
+   Tool 'fast-test-schema-error' is not registered in the gateway
+   Tool 'fast-test-schema-success' is not registered in the gateway
+   ```
+
+   The actual registered tools are the six GHCR Fast Time tools listed in the direct probe.
+
+3. Protocol-compliance setup errors occur before gateway behavior is tested.
+
+   The repeated error is:
+
+   ```text
+   RuntimeError: Runner.run() cannot be called from a running event loop
+   ```
+
+   It appears for `reference-stdio`, `gateway_proxy-http`, and `gateway_virtual-http` targets. That points at the suite fixture/runtime setup, not nginx passthrough.
+
+4. Optional lanes are not configured in this stack.
+
+   Skips include:
+
+   ```text
+   Azure credentials not configured
+   Keycloak not reachable at http://localhost:8180
+   runtime-mode flip refused because boot_mode='off'
+   ```
+
+## What This Run Proves
+
+Proven:
+
+- The current harness uses `ghcr.io/ibm/cfex-mcp-fast-time-server:latest`.
+- The control plane registers Fast Time at `http://fast_time_server:8080/mcp` with `STREAMABLEHTTP`.
+- The dataplane can initialize a session through nginx.
+- The dataplane can use the returned `Mcp-Session-Id` through nginx.
+- The dataplane can list and call Fast Time tools through nginx.
+
+Not proven green:
+
+- `scripts/cf-integration.sh smoke`
+- `scripts/cf-integration.sh live-all`
+- `/sse` compatibility for the GHCR Fast Time image
+- `fast-test-*` fixture coverage
+- optional SSO and runtime-mode rails
+
+## Next Fixes
+
+1. Fix `tests/loadtest/locustfile_mcp_protocol.py` to use `Accept: application/json, text/event-stream` for streamable HTTP and parse SSE responses. Then rerun `scripts/cf-integration.sh smoke`.
+2. Update the RBAC transport tests or harness config so this GHCR Fast Time lane does not register `/sse` unless the image actually exposes it.
+3. Either register the `fast_test_server` fixture for `live-all`, or exclude tests that require `fast-test-*` tools from this GHCR Fast Time lane.
+4. Triage the protocol-compliance async fixture error separately. It reproduces on `reference-stdio`, so it should not be treated as a dataplane routing failure.
 
 ## Final Status
 
-Number 1 is fixed and verified by real traffic.
+Number 1 header passthrough is fixed on the real dataplane route.
 
-The test report should not be read as "the integration stack is green." It is not green. The remaining failures have different causes and need separate fixes.
+The report should not be read as "the whole integration stack is green." It is not. The next work is load-test content negotiation and live-suite scope/config alignment for the GHCR Fast Time image.
