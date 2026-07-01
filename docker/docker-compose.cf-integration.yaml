@@ -29,6 +29,15 @@ services:
     entrypoint: ["echo", "cf-integration: skipping SSE registration (Fast Time image serves /mcp)"]
     command: !reset []
 
+  # Run the upstream fast-test fixture services in the base stack (upstream
+  # gates them behind profiles) so the fast-test-* tools that live-mcp's
+  # TestToolCalls expects are always registered.
+  fast_test_server:
+    profiles: !reset []
+
+  register_fast_test:
+    profiles: !reset []
+
   cf-integration-mcp-counter:
     image: cf-integration-mcp-counter:local
     build:

@@ -50,7 +50,6 @@ Commands:
   probe          Verify the nginx -> cf-dataplane MCP route (init/tools/call + 401 negative)
   locust         Run the harness Locust test against /servers/\$MCP_VIRTUAL_SERVER_ID/mcp
   smoke          Same as locust with 1 user for 10s
-  live-core      Run cf-controlplane live MCP protocol E2E tests minus fixture-bound tool-call tests
   live-mcp       Run cf-controlplane live MCP protocol E2E tests
   live-rbac      Run cf-controlplane live MCP RBAC/multi-transport tests
   live-protocol  Run cf-controlplane live protocol-compliance tests
@@ -187,9 +186,6 @@ EOF
     export LOCUST_SPAWN_RATE="${LOCUST_SPAWN_RATE:-1}"
     export LOCUST_RUN_TIME="${LOCUST_RUN_TIME:-10s}"
     run_locust
-    ;;
-  live-core)
-    run_cf_controlplane_make test-mcp-protocol-e2e K="not TestToolCalls"
     ;;
   live-mcp)
     run_cf_controlplane_make test-mcp-protocol-e2e

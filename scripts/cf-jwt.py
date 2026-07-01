@@ -15,7 +15,7 @@ import uuid
 
 DEFAULT_SCOPES = {
     "server_id": None,
-    "permissions": ["servers.use", "tools.read", "tools.call"],
+    "permissions": ["servers.read", "servers.use", "tools.read", "tools.call"],
     "ip_restrictions": [],
     "time_restrictions": None,
 }

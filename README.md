@@ -64,14 +64,13 @@ Locust HTML/CSV output is written under `.integration/mcp-context-forge/reports/
 Run control-plane live test targets against the same running stack:
 
 ```bash
-scripts/cf-integration.sh live-core
 scripts/cf-integration.sh live-mcp
 scripts/cf-integration.sh live-rbac
 scripts/cf-integration.sh live-protocol
 scripts/cf-integration.sh live-all
 ```
 
-`live-core` is the curated green lane for this harness: the MCP protocol E2E suite minus `TestToolCalls`, which is bound to upstream `fast-time-*`/`fast-test-*` fixture tool names that this stack does not register. `live-rbac` and `live-all` still assume upstream fixtures (`/sse` registration, `fast-test-*` tools, SSO services) and stay red on this stack until those expectations are aligned upstream.
+`live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. `live-rbac` and `live-all` stay red on this stack: they register `http://fast_time_server:8080/sse`, and the GHCR Fast Time image serves `/mcp` only. `live-protocol` fails on an upstream async fixture bug that reproduces on the gateway-independent `reference-stdio` target.
 
 ## Configuration
 
