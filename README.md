@@ -12,6 +12,8 @@ scripts/cf-integration.sh up
 
 The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers.
 
+The Fast Time helper uses the published `ghcr.io/ibm/cfex-mcp-fast-time-server:latest` image and registers its Streamable HTTP MCP endpoint at `/mcp`.
+
 Open `http://localhost:8080/admin` and log in with:
 
 ```text
@@ -68,6 +70,7 @@ CF_DATAPLANE_VERSION=0.1.0
 CF_DATAPLANE_PLATFORM=linux/amd64
 CF_COMPOSE_BUILD=false
 CF_INTEGRATION_DIR=.integration
+FAST_TIME_IMAGE=ghcr.io/ibm/cfex-mcp-fast-time-server:latest
 NGINX_PORT=8080
 ```
 
