@@ -17,8 +17,10 @@ import os
 import sys
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from mcp_http import ACCEPT, PROTOCOL_VERSION, jsonrpc, parse_mcp_body, tool_call_args
 
 _spec = importlib.util.spec_from_file_location("cf_jwt", Path(__file__).with_name("cf-jwt.py"))
 cf_jwt = importlib.util.module_from_spec(_spec)
@@ -33,7 +35,6 @@ SERVER_ID = (
 JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "my-test-key-but-now-longer-than-32-bytes")
 ADMIN_EMAIL = os.environ.get("PLATFORM_ADMIN_EMAIL", "admin@example.com")
 URL = f"{BASE_URL}/servers/{SERVER_ID}/mcp"
-PROTOCOL_VERSION = "2025-06-18"
 
 
 def fail(step: str, detail: str) -> None:
@@ -41,25 +42,11 @@ def fail(step: str, detail: str) -> None:
     sys.exit(1)
 
 
-def parse_mcp_body(body: str, content_type: str):
-    """Return the JSON-RPC message from a JSON or SSE response body."""
-    if "text/event-stream" in content_type:
-        message = None
-        for line in body.splitlines():
-            if line.startswith("data:"):
-                try:
-                    message = json.loads(line[len("data:"):].strip())
-                except ValueError:
-                    pass
-        return message
-    return json.loads(body) if body else None
-
-
 def mcp_post(payload: dict, token: str | None, session_id: str | None = None):
     """POST a JSON-RPC payload. Returns (status, headers, message)."""
     req = urllib.request.Request(URL, method="POST", data=json.dumps(payload).encode("utf-8"))
     req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json, text/event-stream")
+    req.add_header("Accept", ACCEPT)
     req.add_header("Mcp-Protocol-Version", PROTOCOL_VERSION)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -72,10 +59,6 @@ def mcp_post(payload: dict, token: str | None, session_id: str | None = None):
             return response.status, response.headers, message
     except urllib.error.HTTPError as exc:
         return exc.code, exc.headers, None
-
-
-def jsonrpc(method: str, params: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": method, "params": params}
 
 
 def result_of(step: str, status: int, message) -> dict:
@@ -103,14 +86,7 @@ def main() -> None:
     print(f"auth_negative=PASS status={status}")
 
     token = os.environ.get("MCPGATEWAY_BEARER_TOKEN") or cf_jwt.make_token(
-        JWT_SECRET_KEY,
-        ADMIN_EMAIL,
-        scopes={
-            "server_id": None,
-            "permissions": ["servers.use", "tools.read", "tools.call"],
-            "ip_restrictions": [],
-            "time_restrictions": None,
-        },
+        JWT_SECRET_KEY, ADMIN_EMAIL, scopes=cf_jwt.DEFAULT_SCOPES
     )
     status, headers, message = mcp_post(init_payload, token)
     result_of("initialize", status, message)
@@ -127,17 +103,12 @@ def main() -> None:
     for tool in tools:
         print(f"tool={tool.get('name')}")
 
-    tool_names = [tool.get("name", "") for tool in tools]
-    call_name, call_args = None, {}
-    for name in tool_names:
-        if name.endswith("echo"):
-            call_name, call_args = name, {"message": "cf-probe"}
-            break
-        if name.endswith("get_system_time"):
-            call_name, call_args = name, {"timezone": "UTC"}
-    if call_name is None:
+    callable_tools = {name: tool_call_args(name) for name in (tool.get("name", "") for tool in tools)}
+    callable_tools = {name: args for name, args in callable_tools.items() if args is not None}
+    if not callable_tools:
         print("tool_call=SKIP no echo/get_system_time tool available")
         return
+    call_name, call_args = next(iter(callable_tools.items()))
 
     status, _, message = mcp_post(jsonrpc("tools/call", {"name": call_name, "arguments": call_args}), token, session_id)
     result = result_of("tool_call", status, message)

@@ -13,6 +13,14 @@ import time
 import uuid
 
 
+DEFAULT_SCOPES = {
+    "server_id": None,
+    "permissions": ["servers.use", "tools.read", "tools.call"],
+    "ip_restrictions": [],
+    "time_restrictions": None,
+}
+
+
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -69,12 +77,7 @@ def main() -> None:
     parser.add_argument("--server-id", default=None)
     args = parser.parse_args()
 
-    scopes = {
-        "server_id": args.server_id,
-        "permissions": ["servers.use", "tools.read", "tools.call"],
-        "ip_restrictions": [],
-        "time_restrictions": None,
-    }
+    scopes = {**DEFAULT_SCOPES, "server_id": args.server_id}
     print(
         make_token(
             args.secret,

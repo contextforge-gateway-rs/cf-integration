@@ -122,6 +122,7 @@ scripts/cf-integration.sh                    orchestration wrapper
 scripts/cf-jwt.py                            local HS256 JWT helper (CLI + importable make_token)
 scripts/cf-probe.py                          end-to-end dataplane route probe
 scripts/locustfile_cf_dataplane.py           harness Locust file for the dataplane route
+scripts/mcp_http.py                          shared MCP streamable-HTTP helpers
 scripts/register-fast-time.py                Fast Time gateway/virtual-server registration
 reports/                                     curated run reports (YYYY-MM-DD-<topic>.md)
 ```

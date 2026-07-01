@@ -15,35 +15,17 @@ from __future__ import annotations
 import json
 import os
 import random
-import uuid
+import sys
 
 from locust import HttpUser, between, task
+
+# The compose overlay mounts scripts/mcp_http.py next to this file.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mcp_http import ACCEPT, PROTOCOL_VERSION, jsonrpc, parse_mcp_body, tool_call_args
 
 MCP_SERVER_ID = os.environ.get("MCP_SERVER_ID") or os.environ.get("MCP_VIRTUAL_SERVER_ID", "")
 BEARER_TOKEN = os.environ.get("MCPGATEWAY_BEARER_TOKEN", "")
 TOOL_NAMES = [name.strip() for name in os.environ.get("MCP_TOOL_NAMES", "").split(",") if name.strip()]
-PROTOCOL_VERSION = "2025-06-18"
-
-
-def _jsonrpc(method: str, params: dict | None = None) -> dict:
-    payload = {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": method}
-    if params is not None:
-        payload["params"] = params
-    return payload
-
-
-def _parse_mcp_body(text: str, content_type: str):
-    """Return the JSON-RPC message from a JSON or SSE response body."""
-    if "text/event-stream" in content_type:
-        message = None
-        for line in text.splitlines():
-            if line.startswith("data:"):
-                try:
-                    message = json.loads(line[len("data:"):].strip())
-                except ValueError:
-                    pass
-        return message
-    return json.loads(text) if text else None
 
 
 class MCPDataplaneUser(HttpUser):
@@ -80,7 +62,7 @@ class MCPDataplaneUser(HttpUser):
     def _headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
+            "Accept": ACCEPT,
             "Authorization": f"Bearer {BEARER_TOKEN}",
             "Mcp-Protocol-Version": PROTOCOL_VERSION,
         }
@@ -92,7 +74,7 @@ class MCPDataplaneUser(HttpUser):
         """Send an MCP JSON-RPC request; return the result field or None."""
         with self.client.post(
             f"/servers/{MCP_SERVER_ID}/mcp",
-            data=json.dumps(_jsonrpc(method, params)),
+            data=json.dumps(jsonrpc(method, params)),
             headers=self._headers(),
             name=name,
             catch_response=True,
@@ -105,7 +87,7 @@ class MCPDataplaneUser(HttpUser):
                 response.failure(f"HTTP {response.status_code}")
                 return None
             try:
-                message = _parse_mcp_body(response.text, response.headers.get("Content-Type", ""))
+                message = parse_mcp_body(response.text, response.headers.get("Content-Type", ""))
             except ValueError as exc:
                 response.failure(f"Invalid body: {exc}")
                 return None
@@ -125,11 +107,11 @@ class MCPDataplaneUser(HttpUser):
 
     @task(10)
     def tools_call(self):
-        candidates = [name for name in self._tool_names if name.endswith(("echo", "get_system_time"))]
+        candidates = [(name, tool_call_args(name)) for name in self._tool_names]
+        candidates = [(name, args) for name, args in candidates if args is not None]
         if not candidates:
             return
-        tool = random.choice(candidates)
-        args = {"message": "cf-integration-locust"} if tool.endswith("echo") else {"timezone": "UTC"}
+        tool, args = random.choice(candidates)
         self._mcp_request("tools/call", {"name": tool, "arguments": args}, name=f"MCP tools/call {tool.rsplit('-', 1)[-1]}")
 
     @task(2)

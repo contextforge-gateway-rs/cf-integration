@@ -52,6 +52,7 @@ services:
       # and gets HTTP 406 from the dataplane route. Mounted in its own
       # directory because /mnt/locust is a read-only bind mount.
       - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/scripts/locustfile_cf_dataplane.py:/mnt/locust-cf/locustfile_cf_dataplane.py:ro
+      - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/scripts/mcp_http.py:/mnt/locust-cf/mcp_http.py:ro
     environment:
       - MCPGATEWAY_BEARER_TOKEN=${MCPGATEWAY_BEARER_TOKEN:-}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}
@@ -73,20 +74,19 @@ services:
           exit 2
         fi
 
-        LOCUSTFILE="$${LOCUST_LOCUSTFILE:-locustfile_cf_dataplane.py}"
-        if [ -f "/mnt/locust-cf/$$LOCUSTFILE" ]; then
-          LOCUSTFILE="/mnt/locust-cf/$$LOCUSTFILE"
+        # Defaults come from the environment section above.
+        if [ -f "/mnt/locust-cf/$$LOCUST_LOCUSTFILE" ]; then
+          LOCUSTFILE="/mnt/locust-cf/$$LOCUST_LOCUSTFILE"
         else
-          LOCUSTFILE="/mnt/locust/$$LOCUSTFILE"
+          LOCUSTFILE="/mnt/locust/$$LOCUST_LOCUSTFILE"
         fi
 
-        MODE="$${LOCUST_MODE:-headless}"
-        if [ "$$MODE" = "headless" ]; then
+        if [ "$$LOCUST_MODE" = "headless" ]; then
           exec locust -f "$$LOCUSTFILE" \
             --host=http://nginx:80 \
-            --users="$${LOCUST_USERS:-100}" \
-            --spawn-rate="$${LOCUST_SPAWN_RATE:-10}" \
-            --run-time="$${LOCUST_RUN_TIME:-5m}" \
+            --users="$$LOCUST_USERS" \
+            --spawn-rate="$$LOCUST_SPAWN_RATE" \
+            --run-time="$$LOCUST_RUN_TIME" \
             --headless \
             --html=/mnt/reports/locust_report.html \
             --csv=/mnt/reports/locust \

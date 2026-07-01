@@ -123,11 +123,10 @@ export_server_id() {
   export MCP_SERVER_ID="${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
 }
 
+# LOCUST_MODE/LOCUST_LOCUSTFILE defaults live in the compose overlay.
 run_locust() {
   ensure_checkout
   export_server_id
-  export LOCUST_MODE="${LOCUST_MODE:-headless}"
-  export LOCUST_LOCUSTFILE="${LOCUST_LOCUSTFILE:-locustfile_cf_dataplane.py}"
   export_locust_token
   compose --profile testing run --rm --no-deps locust
 }
