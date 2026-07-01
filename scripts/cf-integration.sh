@@ -16,7 +16,8 @@ JWT_SECRET_KEY="${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}"
 ADMIN_SUBJECT="${MCP_JWT_SUBJECT:-admin@example.com}"
 CF_DATAPLANE_IMAGE="${CF_DATAPLANE_IMAGE:-$(default_dataplane_image)}"
 CF_DATAPLANE_PLATFORM="${CF_DATAPLANE_PLATFORM:-linux/amd64}"
-CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-true}"
+CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-false}"
+FAST_TIME_SERVER_ID="${CF_FAST_TIME_SERVER_ID:-9779b6698cbd4b4995ee04a4fab38737}"
 
 export CF_INTEGRATION_ROOT="$ROOT"
 export CF_DATAPLANE_IMAGE
@@ -46,12 +47,17 @@ Commands:
   logs [svc...]  Follow compose logs
   config         Render merged compose config
   token          Print an HS256 JWT for $ADMIN_SUBJECT
-  locust         Run cf-controlplane's MCP protocol Locust test against /servers/\$MCP_VIRTUAL_SERVER_ID/mcp
-  smoke          Run cf-controlplane's MCP protocol Locust test with 1 user for 10s
+  probe          Verify the nginx -> cf-dataplane MCP route (init/tools/call + 401 negative)
+  locust         Run the harness Locust test against /servers/\$MCP_VIRTUAL_SERVER_ID/mcp
+  smoke          Same as locust with 1 user for 10s
+  live-core      Run cf-controlplane live MCP protocol E2E tests minus fixture-bound tool-call tests
   live-mcp       Run cf-controlplane live MCP protocol E2E tests
   live-rbac      Run cf-controlplane live MCP RBAC/multi-transport tests
   live-protocol  Run cf-controlplane live protocol-compliance tests
   live-all       Run cf-controlplane's full tests/live_gateway suite
+
+MCP_VIRTUAL_SERVER_ID defaults to the auto-registered Fast Time server:
+  $FAST_TIME_SERVER_ID
 
 UI:
   http://localhost:\${NGINX_PORT:-8080}/admin
@@ -113,16 +119,17 @@ map_compose_services() {
   done
 }
 
-require_virtual_server_id() {
-  if [[ -z "${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-}}" ]]; then
-    cat >&2 <<EOF
-MCP_VIRTUAL_SERVER_ID or MCP_SERVER_ID is required.
-Create a virtual server in the cf-controlplane UI, copy its id, then run:
-  MCP_VIRTUAL_SERVER_ID=<id> $0 locust
-EOF
-    exit 2
-  fi
-  export MCP_SERVER_ID="${MCP_SERVER_ID:-$MCP_VIRTUAL_SERVER_ID}"
+export_server_id() {
+  export MCP_SERVER_ID="${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+}
+
+run_locust() {
+  ensure_checkout
+  export_server_id
+  export LOCUST_MODE="${LOCUST_MODE:-headless}"
+  export LOCUST_LOCUSTFILE="${LOCUST_LOCUSTFILE:-locustfile_cf_dataplane.py}"
+  export_locust_token
+  compose --profile testing run --rm --no-deps locust
 }
 
 case "${1:-}" in
@@ -144,9 +151,11 @@ Login: admin@example.com / changeme
 CF-dataplane image: $CF_DATAPLANE_IMAGE
 CF-dataplane platform: $CF_DATAPLANE_PLATFORM
 Add MCP backend URL in cf-controlplane UI: http://cf-integration-mcp-counter:5555/mcp
-After creating the virtual server:
-  MCP_VIRTUAL_SERVER_ID=<id> $0 smoke
-  MCP_VIRTUAL_SERVER_ID=<id> $0 locust
+Fast Time is auto-registered as virtual server $FAST_TIME_SERVER_ID, so these work directly:
+  $0 probe
+  $0 smoke
+  $0 locust
+Override with MCP_VIRTUAL_SERVER_ID=<id> to target a UI-created virtual server.
 EOF
     ;;
   down)
@@ -167,24 +176,21 @@ EOF
   token)
     make_token
     ;;
+  probe)
+    export_server_id
+    "$ROOT/scripts/cf-probe.py"
+    ;;
   locust)
-    ensure_checkout
-    require_virtual_server_id
-    export LOCUST_MODE="${LOCUST_MODE:-headless}"
-    export LOCUST_LOCUSTFILE="${LOCUST_LOCUSTFILE:-locustfile_mcp_protocol.py}"
-    export_locust_token
-    compose --profile testing run --rm --no-deps locust
+    run_locust
     ;;
   smoke)
-    ensure_checkout
-    require_virtual_server_id
-    export LOCUST_MODE="${LOCUST_MODE:-headless}"
-    export LOCUST_LOCUSTFILE="${LOCUST_LOCUSTFILE:-locustfile_mcp_protocol.py}"
     export LOCUST_USERS="${LOCUST_USERS:-1}"
     export LOCUST_SPAWN_RATE="${LOCUST_SPAWN_RATE:-1}"
     export LOCUST_RUN_TIME="${LOCUST_RUN_TIME:-10s}"
-    export_locust_token
-    compose --profile testing run --rm --no-deps locust
+    run_locust
+    ;;
+  live-core)
+    run_cf_controlplane_make test-mcp-protocol-e2e K="not TestToolCalls"
     ;;
   live-mcp)
     run_cf_controlplane_make test-mcp-protocol-e2e

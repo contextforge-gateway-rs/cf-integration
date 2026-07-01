@@ -3,20 +3,19 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 
 import msgpack
 import redis
 
+# The compose overlay mounts scripts/cf-jwt.py as cf_jwt.py next to this file.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cf_jwt import make_token
 
 GATEWAY_BASE_URL = os.environ.get("CF_CONTROLPLANE_INTERNAL_URL", "http://gateway:4444")
 FAST_TIME_BASE_URL = os.environ.get("CF_FAST_TIME_INTERNAL_URL", "http://fast_time_server:8080")
@@ -27,43 +26,7 @@ VIRTUAL_SERVER_ID = os.environ.get("CF_FAST_TIME_SERVER_ID", "9779b6698cbd4b4995
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 DATAPLANE_CONFIG_TTL = int(os.environ.get("CF_DATAPLANE_CONFIG_TTL", "3600"))
 
-
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def make_token() -> str:
-    now = int(time.time())
-    header = {"alg": "HS256", "typ": "JWT"}
-    payload = {
-        "username": ADMIN_EMAIL,
-        "sub": ADMIN_EMAIL,
-        "jti": str(uuid.uuid4()),
-        "token_use": "api",
-        "iss": "mcpgateway",
-        "aud": "mcpgateway-api",
-        "iat": now,
-        "nbf": now,
-        "exp": now + 7 * 24 * 60 * 60,
-        "teams": None,
-        "user": {
-            "email": ADMIN_EMAIL,
-            "full_name": "CLI User",
-            "is_admin": True,
-            "auth_provider": "cli",
-        },
-    }
-    signing_input = ".".join(
-        [
-            b64url(json.dumps(header, separators=(",", ":")).encode("utf-8")),
-            b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
-        ]
-    )
-    sig = hmac.new(JWT_SECRET_KEY.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
-    return f"{signing_input}.{b64url(sig)}"
-
-
-TOKEN = make_token()
+TOKEN = make_token(JWT_SECRET_KEY, ADMIN_EMAIL, ttl_seconds=7 * 24 * 60 * 60)
 
 
 def request_json(method: str, path: str, data: dict | None = None, timeout: int = 60):
@@ -136,6 +99,10 @@ def items_for_gateway(path: str, gateway_id: str) -> list[dict]:
     ]
 
 
+# Warm-up publish only: the DATAPLANE_PUBLISHER in cf-controlplane republishes
+# this config every 60s and keeps the key refreshed past DATAPLANE_CONFIG_TTL.
+# Writing it here just lets cf-dataplane serve the virtual server immediately
+# instead of waiting for the first publisher cycle.
 def publish_dataplane_config(
     gateway_id: str,
     tool_names: list[str],

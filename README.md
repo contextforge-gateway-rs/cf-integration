@@ -26,37 +26,52 @@ Add this MCP backend in the UI:
 http://cf-integration-mcp-counter:5555/mcp
 ```
 
-Create a virtual server from that backend's tools. The overlay enables `DATAPLANE_PUBLISHER`, so `cf-controlplane` publishes the virtual server config to Redis for `cf-dataplane`. The publisher runs every 60 seconds.
+Optionally create a virtual server from that backend's tools in the UI. The overlay enables `DATAPLANE_PUBLISHER`, so `cf-controlplane` publishes the virtual server config to Redis for `cf-dataplane`. The publisher runs every 60 seconds.
+
+The Fast Time backend is registered automatically as virtual server `9779b6698cbd4b4995ee04a4fab38737`, so `probe`, `smoke`, and `locust` work with no manual UI step.
+
+## Probe
+
+Verify the public nginx -> `cf-dataplane` route end to end (401 negative, `initialize`, session reuse, `tools/list`, `tools/call`):
+
+```bash
+scripts/cf-integration.sh probe
+```
 
 ## Locust
 
-Run the control-plane MCP protocol Locust file against the public nginx URL:
+Run the harness Locust file (`scripts/locustfile_cf_dataplane.py`, streamable-HTTP aware) against the public nginx URL:
 
 ```bash
-MCP_VIRTUAL_SERVER_ID=<virtual-server-id-from-ui> scripts/cf-integration.sh smoke
-MCP_VIRTUAL_SERVER_ID=<virtual-server-id-from-ui> scripts/cf-integration.sh locust
+scripts/cf-integration.sh smoke    # 1 user, 10s
+scripts/cf-integration.sh locust   # full load run
 ```
+
+Both default to the auto-registered Fast Time virtual server; set `MCP_VIRTUAL_SERVER_ID=<id>` to target a UI-created one.
 
 Load settings:
 
 ```bash
 LOCUST_USERS=20 LOCUST_SPAWN_RATE=5 LOCUST_RUN_TIME=2m \
 MCP_TOOL_NAMES=<comma-separated-listed-tool-names> \
-MCP_VIRTUAL_SERVER_ID=<virtual-server-id-from-ui> scripts/cf-integration.sh locust
+scripts/cf-integration.sh locust
 ```
 
-Reports are written under `.integration/mcp-context-forge/reports/`.
+Locust HTML/CSV output is written under `.integration/mcp-context-forge/reports/`. Curated run reports live in `reports/` in this repo, named `YYYY-MM-DD-<topic>.md`.
 
 ## Live Tests
 
 Run control-plane live test targets against the same running stack:
 
 ```bash
+scripts/cf-integration.sh live-core
 scripts/cf-integration.sh live-mcp
 scripts/cf-integration.sh live-rbac
 scripts/cf-integration.sh live-protocol
 scripts/cf-integration.sh live-all
 ```
+
+`live-core` is the curated green lane for this harness: the MCP protocol E2E suite minus `TestToolCalls`, which is bound to upstream `fast-time-*`/`fast-test-*` fixture tool names that this stack does not register. `live-rbac` and `live-all` still assume upstream fixtures (`/sse` registration, `fast-test-*` tools, SSO services) and stay red on this stack until those expectations are aligned upstream.
 
 ## Configuration
 
@@ -70,9 +85,12 @@ CF_DATAPLANE_VERSION=0.1.0
 CF_DATAPLANE_PLATFORM=linux/amd64
 CF_COMPOSE_BUILD=false
 CF_INTEGRATION_DIR=.integration
+CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
 FAST_TIME_IMAGE=ghcr.io/ibm/cfex-mcp-fast-time-server:latest
 NGINX_PORT=8080
 ```
+
+`CF_COMPOSE_BUILD` defaults to `false`; published images are used and local builds happen only when an image is missing or `CF_COMPOSE_BUILD=true` forces `--build`.
 
 If `CF_DATAPLANE_IMAGE` is not set, the script uses:
 
@@ -89,6 +107,7 @@ scripts/cf-integration.sh ps
 scripts/cf-integration.sh logs nginx cf-dataplane cf-controlplane
 scripts/cf-integration.sh config
 scripts/cf-integration.sh token
+scripts/cf-integration.sh probe
 scripts/cf-integration.sh down
 ```
 
@@ -100,5 +119,9 @@ docker/docker-compose.cf-integration.yaml    integration MCP backend and Locust 
 docker/nginx.cf-dataplane.conf               public routing split
 docker/mcp_counter.Dockerfile                local MCP counter backend
 scripts/cf-integration.sh                    orchestration wrapper
-scripts/cf-jwt.py                            local HS256 JWT helper
+scripts/cf-jwt.py                            local HS256 JWT helper (CLI + importable make_token)
+scripts/cf-probe.py                          end-to-end dataplane route probe
+scripts/locustfile_cf_dataplane.py           harness Locust file for the dataplane route
+scripts/register-fast-time.py                Fast Time gateway/virtual-server registration
+reports/                                     curated run reports (YYYY-MM-DD-<topic>.md)
 ```
