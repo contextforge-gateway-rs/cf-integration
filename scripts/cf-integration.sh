@@ -103,13 +103,22 @@ compose() {
 make_token() {
   "$ROOT/scripts/cf-jwt.py" \
     --secret "$JWT_SECRET_KEY" \
-    --subject "$ADMIN_SUBJECT"
+    --subject "$ADMIN_SUBJECT" \
+    "$@"
 }
 
+# The dataplane locustfile needs the scoped token (cf-dataplane rejects
+# tokens without a scopes claim); upstream locustfiles exercise admin/RBAC
+# control-plane surfaces that reject scoped tokens, so they get the same
+# admin token upstream's locust_token service would mint.
 export_locust_token() {
   if [[ -z "${MCPGATEWAY_BEARER_TOKEN:-}" ]]; then
     export MCPGATEWAY_BEARER_TOKEN
-    MCPGATEWAY_BEARER_TOKEN="$(make_token)"
+    if [[ "${LOCUST_LOCUSTFILE:-locustfile_cf_dataplane.py}" == "locustfile_cf_dataplane.py" ]]; then
+      MCPGATEWAY_BEARER_TOKEN="$(make_token)"
+    else
+      MCPGATEWAY_BEARER_TOKEN="$(make_token --admin)"
+    fi
   fi
 }
 

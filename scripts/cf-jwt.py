@@ -75,9 +75,14 @@ def main() -> None:
     parser.add_argument("--audience", default="mcpgateway-api")
     parser.add_argument("--ttl-seconds", type=int, default=86400)
     parser.add_argument("--server-id", default=None)
+    parser.add_argument(
+        "--admin",
+        action="store_true",
+        help="omit the scopes claim: full control-plane admin access, but cf-dataplane rejects such tokens",
+    )
     args = parser.parse_args()
 
-    scopes = {**DEFAULT_SCOPES, "server_id": args.server_id}
+    scopes = None if args.admin else {**DEFAULT_SCOPES, "server_id": args.server_id}
     print(
         make_token(
             args.secret,
