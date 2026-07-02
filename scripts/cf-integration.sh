@@ -51,7 +51,10 @@ controlplane_compose_args=(
   -f "$CF_CONTROLPLANE_DIR/docker-compose.yml"
 )
 
-controlplane_profiles=(--profile testing --profile inspector --profile sso)
+controlplane_profiles=(--profile testing --profile inspector)
+case "${CONTROLPLANE_ENABLE_SSO:-false}" in
+  true|1) controlplane_profiles+=(--profile sso) ;;
+esac
 
 usage() {
   cat <<EOF
@@ -80,9 +83,10 @@ Commands:
   controlplane-ps        Show stock cf-controlplane-only services
   controlplane-logs      Follow stock cf-controlplane-only logs
   controlplane-config    Render stock cf-controlplane-only compose config
-  controlplane-live-all  Run upstream tests/live_gateway against controlplane-only stack
-  controlplane-locust    Run upstream full control-plane Locust file against controlplane-only stack
-  controlplane-test-all  Run controlplane-up, controlplane-live-all, and controlplane-locust with one log
+  controlplane-live-core Run non-UI, non-SSO live gateway checks against controlplane-only stack
+  controlplane-live-all  Run upstream tests/live_gateway against controlplane-only stack, including SSO/playwright
+  controlplane-locust    Run upstream control-plane Locust file against controlplane-only stack
+  controlplane-test-all  Run controlplane-up, controlplane-live-core, and controlplane-locust with one log
 
 MCP_VIRTUAL_SERVER_ID defaults to the auto-registered Fast Time server:
   $FAST_TIME_SERVER_ID
@@ -166,8 +170,25 @@ run_cf_controlplane_make() {
 
 run_cf_controlplane_only_make() {
   ensure_checkout
+  COMPOSE_PROJECT_NAME="$CONTROLPLANE_PROJECT" \
+  PASSWORD_CHANGE_ENFORCEMENT_ENABLED="${PASSWORD_CHANGE_ENFORCEMENT_ENABLED:-false}" \
+  ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP="${ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP:-false}" \
+  REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD="${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}" \
   MCP_CLI_BASE_URL="${MCP_CLI_BASE_URL:-http://127.0.0.1:${NGINX_PORT:-8080}}" \
     make -C "$CF_CONTROLPLANE_DIR" "$@"
+}
+
+run_cf_controlplane_only_pytest() {
+  ensure_checkout
+  (
+    cd "$CF_CONTROLPLANE_DIR"
+    COMPOSE_PROJECT_NAME="$CONTROLPLANE_PROJECT" \
+    PASSWORD_CHANGE_ENFORCEMENT_ENABLED="${PASSWORD_CHANGE_ENFORCEMENT_ENABLED:-false}" \
+    ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP="${ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP:-false}" \
+    REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD="${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}" \
+    MCP_CLI_BASE_URL="${MCP_CLI_BASE_URL:-http://127.0.0.1:${NGINX_PORT:-8080}}" \
+      uv run --extra plugins pytest -p no:playwright "$@"
+  )
 }
 
 map_compose_services() {
@@ -226,6 +247,9 @@ run_controlplane_up() {
   export HOST_UID="${HOST_UID:-$(id -u 2>/dev/null || echo 1000)}"
   export HOST_GID="${HOST_GID:-$(id -g 2>/dev/null || echo 1000)}"
   export LOCUST_EXPECT_WORKERS="${LOCUST_EXPECT_WORKERS:-${CONTROLPLANE_LOCUST_WORKERS:-1}}"
+  export PASSWORD_CHANGE_ENFORCEMENT_ENABLED="${PASSWORD_CHANGE_ENFORCEMENT_ENABLED:-false}"
+  export ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP="${ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP:-false}"
+  export REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD="${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}"
 
   local up_args=("${controlplane_profiles[@]}" up -d)
   case "${CONTROLPLANE_START_LOCUST_UI:-false}" in
@@ -246,10 +270,17 @@ Login: admin@example.com / changeme
 No cf-dataplane service, no dataplane nginx routing override, no DATAPLANE_PUBLISHER overlay.
 
 Run:
+  $0 controlplane-live-core
   $0 controlplane-live-all
   $0 controlplane-locust
   $0 controlplane-test-all
 EOF
+}
+
+run_controlplane_live_core() {
+  ensure_no_integration_stack
+  run_cf_controlplane_only_make test-mcp-protocol-e2e
+  run_cf_controlplane_only_pytest tests/live_gateway/protocol_compliance -v --tb=short
 }
 
 run_controlplane_locust() {
@@ -262,15 +293,45 @@ run_controlplane_locust() {
   export LOCUST_USERS="${LOCUST_USERS:-100}"
   export LOCUST_SPAWN_RATE="${LOCUST_SPAWN_RATE:-10}"
   export LOCUST_RUN_TIME="${LOCUST_RUN_TIME:-5m}"
-  controlplane_compose --profile testing run --rm locust_token >/dev/null
-  controlplane_compose --profile testing run --rm locust
+  export CONTROLPLANE_LOCUST_CLASSES="${CONTROLPLANE_LOCUST_CLASSES:-HealthCheckUser FastTimeUser FastTestEchoUser FastTestTimeUser VersionMetaUser}"
+  export PASSWORD_CHANGE_ENFORCEMENT_ENABLED="${PASSWORD_CHANGE_ENFORCEMENT_ENABLED:-false}"
+  export ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP="${ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP:-false}"
+  export REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD="${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}"
+  local locust_token
+  locust_token="$(make_token --admin)"
+  controlplane_compose --profile testing run --rm \
+    -e MCPGATEWAY_BEARER_TOKEN="$locust_token" \
+    --entrypoint /bin/sh \
+    locust_token -c 'set -eu; printf "%s" "$MCPGATEWAY_BEARER_TOKEN" > /tokens/gateway.jwt; echo "✅ Token written to /tokens/gateway.jwt"' >/dev/null
+  controlplane_compose --profile testing run --rm --no-deps \
+    -e CONTROLPLANE_LOCUST_CLASSES="$CONTROLPLANE_LOCUST_CLASSES" \
+    --entrypoint /bin/sh \
+    locust -c '
+set -eu
+while [ ! -s /tokens/gateway.jwt ]; do echo "Waiting for gateway JWT..."; sleep 0.5; done
+export MCPGATEWAY_BEARER_TOKEN="$(cat /tokens/gateway.jwt)"
+set -- \
+  -f "/mnt/locust/${LOCUST_LOCUSTFILE:-locustfile.py}" \
+  --host=http://nginx:80 \
+  --users="${LOCUST_USERS:-100}" \
+  --spawn-rate="${LOCUST_SPAWN_RATE:-10}" \
+  --run-time="${LOCUST_RUN_TIME:-5m}" \
+  --headless \
+  --html=/mnt/reports/locust_report.html \
+  --csv=/mnt/reports/locust \
+  --only-summary
+if [ "${CONTROLPLANE_LOCUST_CLASSES:-}" != "all" ] && [ -n "${CONTROLPLANE_LOCUST_CLASSES:-}" ]; then
+  set -- "$@" ${CONTROLPLANE_LOCUST_CLASSES}
+fi
+exec locust "$@"
+'
 }
 
 run_controlplane_test_all() {
   local log_dir="${CF_TEST_LOG_DIR:-$INTEGRATION_DIR/test-logs}"
   mkdir -p "$log_dir"
   local log_file="$log_dir/controlplane-only-$(date -u +%Y%m%dT%H%M%SZ).log"
-  local lanes=(controlplane-up controlplane-live-all controlplane-locust)
+  local lanes=(controlplane-up controlplane-live-core controlplane-locust)
   local results=() rc lane failed=0
 
   for lane in "${lanes[@]}"; do
@@ -394,6 +455,9 @@ EOF
   controlplane-config)
     ensure_checkout
     controlplane_compose "${controlplane_profiles[@]}" config
+    ;;
+  controlplane-live-core)
+    run_controlplane_live_core
     ;;
   controlplane-live-all)
     ensure_no_integration_stack

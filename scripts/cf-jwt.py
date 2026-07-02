@@ -32,6 +32,7 @@ def make_token(
     issuer: str = "mcpgateway",
     audience: str = "mcpgateway-api",
     ttl_seconds: int = 86400,
+    token_use: str = "api",
     scopes: dict | None = None,
 ) -> str:
     now = int(time.time())
@@ -40,7 +41,7 @@ def make_token(
         "username": subject,
         "sub": subject,
         "jti": str(uuid.uuid4()),
-        "token_use": "api",
+        "token_use": token_use,
         "iss": issuer,
         "aud": audience,
         "iat": now,
@@ -75,14 +76,16 @@ def main() -> None:
     parser.add_argument("--audience", default="mcpgateway-api")
     parser.add_argument("--ttl-seconds", type=int, default=86400)
     parser.add_argument("--server-id", default=None)
+    parser.add_argument("--token-use", choices=("api", "session"), default=None)
     parser.add_argument(
         "--admin",
         action="store_true",
-        help="omit the scopes claim: full control-plane admin access, but cf-dataplane rejects such tokens",
+        help="omit the scopes claim and default to a session token for control-plane admin access",
     )
     args = parser.parse_args()
 
     scopes = None if args.admin else {**DEFAULT_SCOPES, "server_id": args.server_id}
+    token_use = args.token_use or ("session" if args.admin else "api")
     print(
         make_token(
             args.secret,
@@ -90,6 +93,7 @@ def main() -> None:
             issuer=args.issuer,
             audience=args.audience,
             ttl_seconds=args.ttl_seconds,
+            token_use=token_use,
             scopes=scopes,
         )
     )

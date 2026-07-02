@@ -91,16 +91,20 @@ scripts/cf-integration.sh down
 scripts/cf-integration.sh controlplane-test-all
 ```
 
-This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack, so stop the integration stack first. `controlplane-test-all` starts the stock testing stack, runs `tests/live_gateway`, then runs the upstream full control-plane Locust file (`locustfile.py`). Output is logged under `.integration/test-logs/`.
+This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack, so stop the integration stack first. `controlplane-test-all` starts the stock testing stack, runs non-UI live gateway checks without SSO/playwright, then runs upstream `locustfile.py` with the non-UI Fast Time/Fast Test/health class subset. Output is logged under `.integration/test-logs/`.
 
 Useful individual commands:
 
 ```bash
 scripts/cf-integration.sh controlplane-up
+scripts/cf-integration.sh controlplane-live-core
 scripts/cf-integration.sh controlplane-live-all
 scripts/cf-integration.sh controlplane-locust
 scripts/cf-integration.sh controlplane-down
 ```
+
+Set `CONTROLPLANE_ENABLE_SSO=true` only when explicitly validating SSO-dependent tests.
+Set `CONTROLPLANE_LOCUST_CLASSES=all` to run the full upstream Locust class mix, including admin/UI/mutating surfaces.
 
 ## Configuration
 
