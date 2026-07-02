@@ -111,15 +111,30 @@ Verified by hand against the live stack:
 
 ## Dataplane findings (current 0.1.0, digest `cb5a64fe`)
 
-### D3 — tokens without a `scopes` claim rejected 401 (still open)
+### D3 — strict JWT claim requirements still 401 compliance tokens (partially fixed)
 
-Unchanged. All 18 `gateway_virtual-http` live-protocol rows fail because
-upstream's compliance harness mints one admin JWT (no `scopes`) for both
-planes; the control plane accepts it, the dataplane 401s it. The inverse
-also still holds (dataplane-scoped token rejected by control-plane admin
-REST), so no single token works across both planes. Preferred fix remains:
-treat a missing `scopes` claim as unrestricted for platform-admin tokens.
-Largest single test unlock available.
+The `scopes` requirement itself was fixed by
+[contextforge-gateway-rs #51](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/51)
+(merged 14:51 UTC, in today's image): a scopes-less `cf-jwt.py --admin`
+token now gets 200. But all 18 `gateway_virtual-http` live-protocol rows
+still 401, because the dataplane's JWT deserialization hard-requires two
+more claims the upstream compliance token does not carry. Verified by
+claim-stripping a working token against the live vhost:
+
+| Claim removed | Result |
+|---|---|
+| `username` | 200 |
+| `nbf` | 200 |
+| `token_use` | **401** |
+| `user.full_name` | **401** |
+
+Upstream's `make_test_jwt` admin token has no `token_use` and its `user`
+object is `{email, is_admin, auth_provider}` (no `full_name`) → 401.
+Follow-up fix (cf-dataplane): make `token_use` and the `user` sub-fields
+optional in the claims struct (`Option<>` / serde defaults) instead of
+required. Still the largest single test unlock available. The inverse gap
+also still holds: the dataplane-scoped token is rejected by control-plane
+admin REST, so no single token works across both planes.
 
 ### D5 — SSE upstream transports not honored (new)
 
@@ -198,8 +213,9 @@ Unchanged from the morning report, re-confirmed in this run's log:
 
 ### cf-dataplane (priority order)
 
-1. **Accept admin tokens without `scopes`** (D3) — unblocks all 18
-   `gateway_virtual` compliance rows with zero test changes.
+1. **Relax remaining required JWT claims** (D3) — `scopes` is done
+   (rs#51); making `token_use` and `user.full_name` optional unblocks all
+   18 `gateway_virtual` compliance rows with zero test changes.
 2. **Honor backend `transport` / support SSE upstreams** (D5) — without it
    every SSE-backed virtual server is a silent no-op through the dataplane.
 3. **Error on zero-backends-initialized instead of empty success** (D6).
