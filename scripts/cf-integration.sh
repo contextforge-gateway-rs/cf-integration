@@ -708,7 +708,7 @@ case "${1:-}" in
     if [[ "$CF_COMPOSE_BUILD" == "true" || "$CF_COMPOSE_BUILD" == "1" ]]; then
       up_args+=(--build)
     fi
-    compose pull cf-dataplane
+    compose pull gateway cf-dataplane
     compose up "${up_args[@]}"
     print_info_box "Integration stack started." "$(cat <<EOF
 UI: http://localhost:${NGINX_PORT:-8080}/admin
