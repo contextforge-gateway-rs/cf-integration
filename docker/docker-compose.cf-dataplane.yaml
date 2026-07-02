@@ -35,12 +35,6 @@ services:
       CONTEXTFORGE_GATEWAY_RS_REDIS_PORT: "6379"
       CONTEXTFORGE_GATEWAY_RS_REDIS_CONNECTION_MODE: plain-text
       CONTEXTFORGE_GATEWAY_RS_TOKEN_SECRET: ${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}
-      # The user-config cache TTL is sliding (lru_time_cache resets the entry
-      # timestamp on every hit), so under steady traffic a subject's config
-      # never refreshes and runtime-created virtual servers stay invisible.
-      # 0 reads Redis on every request; benchmarked at 100 users / 90s with
-      # no throughput or latency regression vs the 60s default.
-      CONTEXTFORGE_GATEWAY_RS_USER_CONFIG_CACHE_EXPIRY_SECONDS: ${CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS:-0}
       CONTEXTFORGE_GATEWAY_RS_UPSTREAM_CONNECTION_MODE: plain-text-or-tls
       RUST_LOG: ${CF_DATAPLANE_LOG:-info}
     depends_on:
