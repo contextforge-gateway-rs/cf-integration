@@ -72,7 +72,7 @@ scripts/cf-integration.sh live-protocol
 scripts/cf-integration.sh live-all
 ```
 
-Run everything in one shot with per-lane PASS/FAIL and full output captured to a timestamped log file (default `.integration/test-logs/`, override with `CF_TEST_LOG_DIR`):
+Run everything in one shot with neutral lane sections, nextest-style per-test result rows, and full output captured to a timestamped log file (default `.integration/test-logs/`, override with `CF_TEST_LOG_DIR`):
 
 ```bash
 scripts/cf-integration.sh test-all
@@ -87,8 +87,9 @@ scripts/cf-integration.sh test-all-up       # no full locust lane
 scripts/cf-integration.sh test-all-up-load  # includes full locust lane
 ```
 
-These commands print a lane-by-lane demo summary to the terminal while
-writing full pytest/locust output to the timestamped log.
+These commands stream stack startup output, then print colored section headers
+and every recorded pytest result row to the terminal while writing full
+pytest/locust output to the timestamped log.
 
 `live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
@@ -165,6 +166,7 @@ docker/docker-compose.cf-integration.yaml    integration MCP backend and Locust 
 docker/nginx.cf-dataplane.conf               public routing split
 docker/mcp_counter.Dockerfile                local MCP counter backend
 scripts/cf-integration.sh                    orchestration wrapper
+scripts/cf_pytest_result_recorder.py         pytest result recorder for test-all display
 scripts/cf-jwt.py                            local HS256 JWT helper (CLI + importable make_token)
 scripts/cf-probe.py                          end-to-end dataplane route probe
 scripts/locustfile_cf_dataplane.py           harness Locust file for the dataplane route

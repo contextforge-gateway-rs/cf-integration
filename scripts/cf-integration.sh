@@ -38,6 +38,7 @@ export CF_INTEGRATION_DIR="$INTEGRATION_DIR"
 export JWT_SECRET_KEY
 export MCP_CLI_BASE_URL="${MCP_CLI_BASE_URL:-http://127.0.0.1:${NGINX_PORT:-8080}}"
 export PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-$ADMIN_SUBJECT}"
+export KEY_FILE_PASSWORD="${KEY_FILE_PASSWORD:-}"
 
 compose_args=(
   -p "$PROJECT"
@@ -58,33 +59,81 @@ esac
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   bold=$'\033[1m'
+  header=$'\033[1;36m'
   green=$'\033[32m'
   red=$'\033[31m'
-  cyan=$'\033[36m'
+  grey=$'\033[90m'
   reset=$'\033[0m'
 else
   bold=""
+  header=""
   green=""
   red=""
-  cyan=""
+  grey=""
   reset=""
 fi
 
+section_rule="================================================================================"
+lane_rule="--------------------------------------------------------------------------------"
+
 print_section() {
-  printf '\n%s==> %s%s\n' "$bold" "$1" "$reset"
+  printf '\n%s%s\n==> %s\n%s%s\n' "$header" "$section_rule" "$1" "$section_rule" "$reset"
 }
 
 print_detail() {
   printf '    %s\n' "$1"
 }
 
+print_header_detail() {
+  local text="$1"
+  while IFS= read -r line; do
+    printf '    %s\n' "$line"
+  done <<<"$text"
+}
+
+print_lane_header() {
+  printf '\n%s%s\n[%s/%s] %s\n' "$header" "$lane_rule" "$1" "$2" "$3"
+  print_header_detail "$4"
+  print_header_detail "Command: $5"
+  print_header_detail "Streaming summary here; full output goes to the log."
+  printf '%s%s\n' "$lane_rule" "$reset"
+}
+
+print_lane_summary() {
+  local status="$1"
+  local lane="$2"
+  local summary_part="$3"
+  local duration="$4"
+  local color="$green"
+  [[ "$status" == "FAIL" ]] && color="$red"
+  printf '\n%s%s\n%s summary: %s%s (%ss)\n%s%s\n' "$color" "$lane_rule" "$status" "$lane" "$summary_part" "$duration" "$lane_rule" "$reset"
+}
+
+print_log_footer() {
+  printf '\n%s%s\nLog: %s\n%s%s\n' "$header" "$section_rule" "$1" "$section_rule" "$reset"
+}
+
+print_info_box() {
+  local title="$1"
+  local body="$2"
+  printf '\n%s%s\n%s\n' "$header" "$section_rule" "$title"
+  print_header_detail "$body"
+  printf '%s%s\n' "$section_rule" "$reset"
+}
+
 lane_description() {
   case "$1" in
     probe)
-      printf 'Route check: unauthenticated 401, initialize, tools/list, tools/call through nginx -> cf-dataplane.\n'
+      cat <<'EOF'
+Dataplane route probe against /servers/{virtual_host_id}/mcp.
+Checks: unauthenticated initialize -> 401, authenticated initialize -> session, tools/list -> tools, tools/call -> successful tool result.
+EOF
       ;;
     smoke)
-      printf 'Small locust run: 1 user for 10s against the Fast Time virtual server.\n'
+      cat <<EOF
+Locust smoke against /servers/{virtual_host_id}/mcp on the Fast Time virtual server.
+Settings: users=${LOCUST_USERS:-1}, spawn_rate=${LOCUST_SPAWN_RATE:-1}, run_time=${LOCUST_RUN_TIME:-10s}. Flow: initialize, tools/list, ping, tools/call.
+EOF
       ;;
     live-mcp)
       printf 'Control-plane live MCP protocol E2E suite against the running stack.\n'
@@ -103,6 +152,175 @@ lane_description() {
       ;;
     *)
       printf 'Run %s.\n' "$1"
+      ;;
+  esac
+}
+
+format_test_summary() {
+  local lane_log="$1"
+  local summary
+  summary="$(grep -E '^=+ .* (failed|passed|error|errors|skipped|xfailed|xpassed|warnings|deselected).* =+$' "$lane_log" | tail -n 1 || true)"
+  if [[ -n "$summary" ]]; then
+    printf '%s\n' "$summary" | sed -E 's/^=+ +//; s/ +=+$//'
+  fi
+}
+
+is_pytest_lane() {
+  case "$1" in
+    live-mcp|live-rbac|live-protocol|live-all)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+print_result_line() {
+  local status="$1"
+  local duration="$2"
+  local name="$3"
+  case "$status" in
+    PASS|XFAIL)
+      printf '    %s%-5s%s [%7s] %s\n' "$green" "$status" "$reset" "$duration" "$name"
+      ;;
+    FAIL|ERROR|XPASS)
+      printf '    %s%-5s%s [%7s] %s\n' "$red" "$status" "$reset" "$duration" "$name"
+      ;;
+    SKIP)
+      printf '    %s%-5s%s [%7s] %s\n' "$grey" "$status" "$reset" "$duration" "$name"
+      ;;
+    *)
+      printf '    %-5s [%7s] %s\n' "$status" "$duration" "$name"
+      ;;
+  esac
+}
+
+print_recorded_results() {
+  local result_file="$1"
+  local printed=0 status duration name
+  if [[ ! -s "$result_file" ]]; then
+    return 1
+  fi
+
+  while IFS=$'\t' read -r status duration name; do
+    [[ -n "$status" && -n "$name" ]] || continue
+    print_result_line "$status" "$duration" "$name"
+    printed=1
+  done <"$result_file"
+
+  [[ $printed -eq 1 ]]
+}
+
+print_summary_results() {
+  local lane_log="$1"
+  local printed=0 line status name
+
+  while IFS= read -r line; do
+    case "$line" in
+      PASSED\ *)
+        status="PASS"
+        name="${line#PASSED }"
+        ;;
+      FAILED\ *)
+        status="FAIL"
+        name="${line#FAILED }"
+        name="${name%% - *}"
+        ;;
+      ERROR\ *)
+        status="ERROR"
+        name="${line#ERROR }"
+        name="${name%% - *}"
+        ;;
+      XPASS\ *)
+        status="XPASS"
+        name="${line#XPASS }"
+        name="${name%% - *}"
+        ;;
+      XFAIL\ *)
+        status="XFAIL"
+        name="${line#XFAIL }"
+        name="${name%% - *}"
+        ;;
+      SKIPPED\ *)
+        status="SKIP"
+        name="${line#SKIPPED }"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    print_result_line "$status" "-" "$name"
+    printed=1
+  done < <(grep -E '^(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED) ' "$lane_log" || true)
+
+  [[ $printed -eq 1 ]]
+}
+
+print_probe_results() {
+  local lane_log="$1"
+  local printed=0 line step status detail
+
+  while IFS= read -r line; do
+    case "$line" in
+      auth_negative=PASS*|auth_negative=FAIL*|initialize=PASS*|initialize=FAIL*|tools_list=PASS*|tools_list=FAIL*|tool_call=PASS*|tool_call=FAIL*|tool_call=SKIP*)
+        step="${line%%=*}"
+        detail="${line#*=}"
+        status="${detail%% *}"
+        detail="${detail#"$status"}"
+        detail="${detail# }"
+        print_result_line "$status" "-" "probe/$step${detail:+ $detail}"
+        printed=1
+        ;;
+    esac
+  done <"$lane_log"
+
+  [[ $printed -eq 1 ]]
+}
+
+print_locust_results() {
+  local lane="$1"
+  local lane_log="$2"
+  local rc="$3"
+  local printed=0 line name reqs fails status
+  local locust_row_re='^POST[[:space:]]+(.+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)\([^)]+\)[[:space:]]+\|'
+
+  if [[ "$rc" -eq 0 ]]; then
+    print_result_line "PASS" "-" "$lane/config users=${LOCUST_USERS:-1} spawn_rate=${LOCUST_SPAWN_RATE:-1} run_time=${LOCUST_RUN_TIME:-10s} server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+  else
+    print_result_line "FAIL" "-" "$lane/config users=${LOCUST_USERS:-1} spawn_rate=${LOCUST_SPAWN_RATE:-1} run_time=${LOCUST_RUN_TIME:-10s} server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+  fi
+  printed=1
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ $locust_row_re ]]; then
+      name="${BASH_REMATCH[1]}"
+      reqs="${BASH_REMATCH[2]}"
+      fails="${BASH_REMATCH[3]}"
+      name="$(printf '%s' "$name" | sed -E 's/[[:space:]]+$//')"
+      status="PASS"
+      [[ "$fails" != "0" ]] && status="FAIL"
+      print_result_line "$status" "-" "$lane/$name reqs=$reqs fails=$fails"
+    fi
+  done <"$lane_log"
+
+  [[ $printed -eq 1 ]]
+}
+
+print_lane_results() {
+  local lane="$1"
+  local lane_log="$2"
+  local rc="$3"
+
+  case "$lane" in
+    probe)
+      print_probe_results "$lane_log"
+      ;;
+    smoke|locust)
+      print_locust_results "$lane" "$lane_log" "$rc"
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -127,7 +345,7 @@ Commands:
   live-protocol  Run cf-controlplane live protocol-compliance tests
   live-all       Run cf-controlplane's full tests/live_gateway suite
   test-all       Run every lane (probe smoke live-mcp live-rbac live-protocol live-all)
-                 and log all output + per-lane PASS/FAIL to a timestamped log file;
+                 with lane sections, per-test result rows, and full output logs;
                  CF_TEST_ALL_LOCUST=true appends the full locust load run
   test-all-up    Start/update the integration stack, then run test-all without locust
   test-all-up-load
@@ -272,6 +490,8 @@ run_test_all() {
   esac
   local results=() rc lane failed=0
   local total_lanes="${#lanes[@]}"
+  local started_at finished_at duration lane_log result_file summary summary_part
+  local idx=0
 
   print_section "Dataplane integration test run"
   print_detail "Project: $PROJECT"
@@ -280,52 +500,75 @@ run_test_all() {
   print_detail "Full output log: $log_file"
   print_detail "Lanes: ${lanes[*]}"
 
-  local idx=0 started_at finished_at duration
   for lane in "${lanes[@]}"; do
     idx=$((idx + 1))
+    lane_log="$(mktemp "$log_dir/cf-${lane}.XXXXXX.log")"
+    result_file="$(mktemp "$log_dir/cf-${lane}-results.XXXXXX.tsv")"
+    print_lane_header "$idx" "$total_lanes" "$lane" "$(lane_description "$lane")" "$0 $lane"
     started_at="$(date +%s)"
-    printf '\n%s[%d/%d] %s%s\n' "$cyan" "$idx" "$total_lanes" "$lane" "$reset"
-    print_detail "$(lane_description "$lane")"
-    print_detail "Command: $0 $lane"
-    print_detail "Streaming summary here; full output goes to the log."
-    printf '===== BEGIN %s %s =====\n' "$lane" "$(date -u +%FT%TZ)" >>"$log_file"
     rc=0
-    "$0" "$lane" >>"$log_file" 2>&1 || rc=$?
+    if is_pytest_lane "$lane"; then
+      PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+      PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA -p cf_pytest_result_recorder" \
+      CF_TEST_RESULT_FILE="$result_file" \
+        "$0" "$lane" >"$lane_log" 2>&1 || rc=$?
+    else
+      "$0" "$lane" >"$lane_log" 2>&1 || rc=$?
+    fi
     finished_at="$(date +%s)"
     duration=$((finished_at - started_at))
+    summary="$(format_test_summary "$lane_log")"
+    summary_part="${summary:+ - $summary}"
+
+    {
+      printf '===== BEGIN %s %s =====\n' "$lane" "$(date -u +%FT%TZ)"
+      printf 'Command: %s %s\n' "$0" "$lane"
+      printf 'Description: '
+      lane_description "$lane"
+      cat "$lane_log"
+      if [[ -s "$result_file" ]]; then
+        printf 'Recorded results:\n'
+        cat "$result_file"
+      fi
+      printf '===== END %s =====\n\n' "$lane"
+    } >>"$log_file"
+
     if [[ $rc -eq 0 ]]; then
-      results+=("PASS $lane")
-      printf '    %sPASS%s %s (%ss)\n' "$green" "$reset" "$lane" "$duration"
+      results+=("PASS $lane$summary_part")
+      print_lane_results "$lane" "$lane_log" "$rc" || print_recorded_results "$result_file" || print_summary_results "$lane_log" || print_result_line "PASS" "${duration}s" "$lane"
+      print_lane_summary "PASS" "$lane" "$summary_part" "$duration"
     else
-      results+=("FAIL $lane exit=$rc")
-      printf '    %sFAIL%s %s exit=%s (%ss)\n' "$red" "$reset" "$lane" "$rc" "$duration"
+      results+=("FAIL $lane exit=$rc$summary_part")
+      print_lane_results "$lane" "$lane_log" "$rc" || print_recorded_results "$result_file" || print_summary_results "$lane_log" || print_result_line "FAIL" "${duration}s" "$lane"
+      print_lane_summary "FAIL" "$lane" "$summary_part" "$duration"
       failed=1
     fi
-    printf '===== END %s =====\n\n' "$lane" >>"$log_file"
+    rm -f "$lane_log" "$result_file"
   done
 
-  print_section "Summary"
   {
     echo "===== SUMMARY $(date -u +%FT%TZ) ====="
     printf '%s\n' "${results[@]}"
-  } | tee -a "$log_file"
-  printf 'Log: %s\n' "$log_file"
+  } >>"$log_file"
+  print_log_footer "$log_file"
   return "$failed"
 }
 
-run_test_all_up() {
+run_stack_up_for_test_all() {
   print_section "Step 1/2: start or update integration stack"
   print_detail "Command: $0 up"
   "$0" up
+}
+
+run_test_all_up() {
+  run_stack_up_for_test_all
   print_section "Step 2/2: run report lanes without full locust"
   print_detail "Command: CF_TEST_ALL_LOCUST=false $0 test-all"
   CF_TEST_ALL_LOCUST=false "$0" test-all
 }
 
 run_test_all_up_load() {
-  print_section "Step 1/2: start or update integration stack"
-  print_detail "Command: $0 up"
-  "$0" up
+  run_stack_up_for_test_all
   print_section "Step 2/2: run report lanes with full locust"
   print_detail "Command: CF_TEST_ALL_LOCUST=true $0 test-all"
   CF_TEST_ALL_LOCUST=true "$0" test-all
@@ -467,19 +710,13 @@ case "${1:-}" in
     fi
     compose pull cf-dataplane
     compose up "${up_args[@]}"
-    cat <<EOF
-Integration stack started.
+    print_info_box "Integration stack started." "$(cat <<EOF
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
 CF-dataplane image: $CF_DATAPLANE_IMAGE
 CF-dataplane platform: $CF_DATAPLANE_PLATFORM
-Add MCP backend URL in cf-controlplane UI: http://cf-integration-mcp-counter:5555/mcp
-Fast Time is auto-registered as virtual server $FAST_TIME_SERVER_ID, so these work directly:
-  $0 probe
-  $0 smoke
-  $0 locust
-Override with MCP_VIRTUAL_SERVER_ID=<id> to target a UI-created virtual server.
 EOF
+)"
     ;;
   down)
     compose down --remove-orphans
