@@ -56,6 +56,57 @@ case "${CONTROLPLANE_ENABLE_SSO:-false}" in
   true|1) controlplane_profiles+=(--profile sso) ;;
 esac
 
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  bold=$'\033[1m'
+  green=$'\033[32m'
+  red=$'\033[31m'
+  cyan=$'\033[36m'
+  reset=$'\033[0m'
+else
+  bold=""
+  green=""
+  red=""
+  cyan=""
+  reset=""
+fi
+
+print_section() {
+  printf '\n%s==> %s%s\n' "$bold" "$1" "$reset"
+}
+
+print_detail() {
+  printf '    %s\n' "$1"
+}
+
+lane_description() {
+  case "$1" in
+    probe)
+      printf 'Route check: unauthenticated 401, initialize, tools/list, tools/call through nginx -> cf-dataplane.\n'
+      ;;
+    smoke)
+      printf 'Small locust run: 1 user for 10s against the Fast Time virtual server.\n'
+      ;;
+    live-mcp)
+      printf 'Control-plane live MCP protocol E2E suite against the running stack.\n'
+      ;;
+    live-rbac)
+      printf 'Control-plane live MCP RBAC and per-server transport suite.\n'
+      ;;
+    live-protocol)
+      printf 'Protocol compliance gateway target suite, including gateway_virtual-http rows.\n'
+      ;;
+    live-all)
+      printf 'Full upstream tests/live_gateway suite. Noisy, but kept for parity with the report.\n'
+      ;;
+    locust)
+      printf 'Full locust load lane using the harness streamable-HTTP locustfile.\n'
+      ;;
+    *)
+      printf 'Run %s.\n' "$1"
+      ;;
+  esac
+}
+
 usage() {
   cat <<EOF
 Usage: $0 <command>
@@ -78,6 +129,9 @@ Commands:
   test-all       Run every lane (probe smoke live-mcp live-rbac live-protocol live-all)
                  and log all output + per-lane PASS/FAIL to a timestamped log file;
                  CF_TEST_ALL_LOCUST=true appends the full locust load run
+  test-all-up    Start/update the integration stack, then run test-all without locust
+  test-all-up-load
+                 Start/update the integration stack, then run test-all with full locust
   controlplane-up        Start stock cf-controlplane testing stack without cf-dataplane overlays
   controlplane-down      Stop the stock cf-controlplane-only stack
   controlplane-ps        Show stock cf-controlplane-only services
@@ -217,27 +271,64 @@ run_test_all() {
     true|1) lanes+=(locust) ;;
   esac
   local results=() rc lane failed=0
+  local total_lanes="${#lanes[@]}"
 
+  print_section "Dataplane integration test run"
+  print_detail "Project: $PROJECT"
+  print_detail "Base URL: $MCP_CLI_BASE_URL"
+  print_detail "Dataplane image: $CF_DATAPLANE_IMAGE"
+  print_detail "Full output log: $log_file"
+  print_detail "Lanes: ${lanes[*]}"
+
+  local idx=0 started_at finished_at duration
   for lane in "${lanes[@]}"; do
-    echo "Running $lane..."
+    idx=$((idx + 1))
+    started_at="$(date +%s)"
+    printf '\n%s[%d/%d] %s%s\n' "$cyan" "$idx" "$total_lanes" "$lane" "$reset"
+    print_detail "$(lane_description "$lane")"
+    print_detail "Command: $0 $lane"
+    print_detail "Streaming summary here; full output goes to the log."
     printf '===== BEGIN %s %s =====\n' "$lane" "$(date -u +%FT%TZ)" >>"$log_file"
     rc=0
     "$0" "$lane" >>"$log_file" 2>&1 || rc=$?
+    finished_at="$(date +%s)"
+    duration=$((finished_at - started_at))
     if [[ $rc -eq 0 ]]; then
       results+=("PASS $lane")
+      printf '    %sPASS%s %s (%ss)\n' "$green" "$reset" "$lane" "$duration"
     else
       results+=("FAIL $lane exit=$rc")
+      printf '    %sFAIL%s %s exit=%s (%ss)\n' "$red" "$reset" "$lane" "$rc" "$duration"
       failed=1
     fi
     printf '===== END %s =====\n\n' "$lane" >>"$log_file"
   done
 
+  print_section "Summary"
   {
     echo "===== SUMMARY $(date -u +%FT%TZ) ====="
     printf '%s\n' "${results[@]}"
   } | tee -a "$log_file"
-  echo "Log: $log_file"
+  printf 'Log: %s\n' "$log_file"
   return "$failed"
+}
+
+run_test_all_up() {
+  print_section "Step 1/2: start or update integration stack"
+  print_detail "Command: $0 up"
+  "$0" up
+  print_section "Step 2/2: run report lanes without full locust"
+  print_detail "Command: CF_TEST_ALL_LOCUST=false $0 test-all"
+  CF_TEST_ALL_LOCUST=false "$0" test-all
+}
+
+run_test_all_up_load() {
+  print_section "Step 1/2: start or update integration stack"
+  print_detail "Command: $0 up"
+  "$0" up
+  print_section "Step 2/2: run report lanes with full locust"
+  print_detail "Command: CF_TEST_ALL_LOCUST=true $0 test-all"
+  CF_TEST_ALL_LOCUST=true "$0" test-all
 }
 
 run_controlplane_up() {
@@ -435,6 +526,12 @@ EOF
     ;;
   test-all)
     run_test_all
+    ;;
+  test-all-up)
+    run_test_all_up
+    ;;
+  test-all-up-load)
+    run_test_all_up_load
     ;;
   controlplane-up)
     run_controlplane_up

@@ -80,6 +80,16 @@ scripts/cf-integration.sh test-all
 
 `CF_TEST_ALL_LOCUST=true` appends the full Locust load run (default 100 users, 5m; `LOCUST_*` variables apply) as a final lane.
 
+To start/update the stack and run the same report lanes in one command:
+
+```bash
+scripts/cf-integration.sh test-all-up       # no full locust lane
+scripts/cf-integration.sh test-all-up-load  # includes full locust lane
+```
+
+These commands print a lane-by-lane demo summary to the terminal while
+writing full pytest/locust output to the timestamped log.
+
 `live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
 ## Control-Plane Baseline
@@ -142,6 +152,8 @@ scripts/cf-integration.sh logs nginx cf-dataplane cf-controlplane
 scripts/cf-integration.sh config
 scripts/cf-integration.sh token
 scripts/cf-integration.sh probe
+scripts/cf-integration.sh test-all-up
+scripts/cf-integration.sh test-all-up-load
 scripts/cf-integration.sh down
 ```
 
