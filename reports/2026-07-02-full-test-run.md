@@ -195,7 +195,26 @@ GET /gateways: Expected [200], got 403
 GET /metrics [api]: Expected [200], got 403
 ```
 
-This is the upstream full control-plane Locust file, not the harness dataplane Locust file. It exercises many admin/API/RPC surfaces and currently fails because the bearer token used by this harness does not have the rights expected by the full CF load profile.
+Failure cause:
+
+```text
+The full CF Locust profile is exercising control-plane admin, RBAC, teams,
+resources, prompts, metrics, protocol, and JSON-RPC tool-call surfaces.
+The harness-provided bearer token is accepted for basic read paths such as
+/tools, /servers, and /rpc tools/list, but it is not authorized for the full
+control-plane session/RBAC surface. The run therefore fails strict setup on
+protected pool fetches and then records the same authorization denial under load.
+```
+
+Failure classification from `locust_failures.csv`:
+
+```text
+JSON-RPC -32003 Access denied: 6,708 occurrences
+HTTP 403 Forbidden:             3,929 occurrences
+Other setup/list 403 wrappers:      9 occurrences
+```
+
+This is not a dataplane routing or Fast Time image failure. The green paths in the same run prove the stack is reachable, while the failing paths are permission-gated by the upstream control-plane profile.
 
 ## Full Suite
 
