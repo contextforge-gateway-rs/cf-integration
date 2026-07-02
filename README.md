@@ -12,7 +12,7 @@ The stack is the stock upstream `docker-compose.yml` (including its Fast Time im
 scripts/cf-integration.sh up
 ```
 
-The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers.
+The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
 
 Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged.
 
@@ -124,12 +124,16 @@ Useful overrides:
 ```bash
 CF_CONTROLPLANE_REPO=<control-plane-git-url>
 CF_CONTROLPLANE_REF=main
+CF_CONTROLPLANE_IMAGE=mcpgateway/mcpgateway:latest
+CF_CONTROLPLANE_VERSION=latest
 CF_DATAPLANE_IMAGE=ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:<tag>
 CF_DATAPLANE_VERSION=0.1.0
 CF_DATAPLANE_PLATFORM=linux/amd64
 CF_COMPOSE_BUILD=false
 CF_INTEGRATION_DIR=.integration
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
+CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS=2
+CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0
 NGINX_PORT=8080
 ```
 
@@ -137,11 +141,30 @@ NGINX_PORT=8080
 
 The upstream gateway sizing knobs (`GATEWAY_REPLICAS`, `GATEWAY_CPU_LIMIT`, `GATEWAY_CPU_RESERVATION`, `GATEWAY_MEM_LIMIT`, `GATEWAY_MEM_RESERVATION`, `GUNICORN_WORKERS`) are defaulted to fit the local Docker engine (upstream assumes a large CI host); override them to match upstream sizing on bigger hardware.
 
+If `CF_CONTROLPLANE_IMAGE` is not set, the script uses the upstream local build tag:
+
+```text
+mcpgateway/mcpgateway:${CF_CONTROLPLANE_VERSION:-latest}
+```
+
+To use a published control-plane image instead, set `CF_CONTROLPLANE_IMAGE=ghcr.io/ibm/mcp-context-forge:<tag>`. Use a tag that matches `CF_CONTROLPLANE_REF`; the published `latest` tag can lag `main`.
+
 If `CF_DATAPLANE_IMAGE` is not set, the script uses:
 
 ```text
 ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:${CF_DATAPLANE_VERSION:-0.1.0}
 ```
+
+GHCR currently publishes only `0.1.0` for the dataplane; there is no `latest` tag.
+
+Config propagation defaults are tuned for functional runs: the overlay sets the
+control-plane publisher snapshot interval to 2s
+(`CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS`, requires a control-plane image with
+configurable publisher interval; older images ignore it and publish every 60s)
+and disables the dataplane per-subject config cache
+(`CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0`, whose sliding TTL can pin
+stale configs under steady traffic). For load benchmarks set them back to the
+upstream defaults (60 and 60).
 
 ## Commands
 
