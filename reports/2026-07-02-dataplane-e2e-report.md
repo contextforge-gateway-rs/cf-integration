@@ -1,156 +1,248 @@
-# Dataplane E2E Report — 2026-07-02
+# Dataplane E2E Report — 2026-07-02 (evening run)
+
+Supersedes the morning report from this file. Same stack shape, but three
+inputs changed since then, so all findings below were re-verified by hand
+against the live stack — nothing is carried over untested.
 
 ## Scope and setup
 
-Full `scripts/cf-integration.sh test-all` against the dataplane stack:
-stock upstream compose + nginx routing split + `DATAPLANE_PUBLISHER=true`,
-`cf-dataplane` image
-`ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0`. UI/SSO
-tests out of scope. The current harness leaves the dataplane user-config
-cache at the image default.
+`scripts/cf-integration.sh test-all-up` at 17:16 UTC
+(log: `.integration/test-logs/cf-tests-20260702T171620Z.log`):
 
-Timeline of the runs this report is based on:
+- **cf-dataplane** `ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0`,
+  digest `cb5a64fe`, **rebuilt today 14:59 UTC** (after the morning runs).
+- **cf-controlplane** upstream `main` @ `5c22ade5c` (local build image),
+  4 gunicorn workers, `DATAPLANE_PUBLISHER=true`.
+- Dataplane user-config cache at **image default** (60s sliding TTL) —
+  the harness override was removed in commit `e41a079`.
+- [PR #5482](https://github.com/IBM/mcp-context-forge/pull/5482)
+  (live-RBAC allow-path retries) is **open, not in this checkout**; it was
+  additionally tested by hand below.
 
-1. **12:18 UTC — full `test-all`** on the pre-PR-#49 image
-   (log: `.integration/test-logs/cf-tests-20260702T121837Z.log`).
-2. **12:20 UTC — [contextforge-gateway-rs #49](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/49) merged**
-   (configurable user-config cache expiry); CI republished the `0.1.0` tag
-   (digest `8e063c0a`).
-3. **12:47–13:01 UTC — targeted re-verification** of the config-staleness
-   defect on the new image, by hand (curl MCP handshakes, Redis
-   inspection, controlled idle/traffic windows).
-4. **13:03–13:07 UTC — A/B locust benchmark** (cache 60s vs cache 0);
-   no throughput or latency regression with cache disabled.
-5. **13:57 UTC — new `0.1.0` image pulled** and stack recreated with
-   cache expiry 60 (digest `802bab9c`).
-6. **13:59–14:04 UTC — targeted user-config cache re-verification** on
-   digest `802bab9c`: a server created under continuous 10s traffic failed
-   until 50s, then initialized and served `tools/list` at 60s while traffic
-   continued. Dataplane logs moved from `virtual_hosts = 3` to
-   `virtual_hosts = 4`. An idle-subject check also passed after 80s
-   (`virtual_hosts = 5`).
-7. **14:05 UTC — full `test-all`** on digest `802bab9c`
-   (log: `.integration/test-logs/cf-tests-20260702T140505Z.log`).
-8. **14:16 UTC — harness overlay cache override removed**; stack
-   recreated with no `CONTEXTFORGE_GATEWAY_RS_USER_CONFIG_CACHE_EXPIRY_SECONDS`
-   env, `probe` passed, and a runtime-created server became usable under
-   continuous traffic after 30s.
+Run note: the run first failed at `up` because the working tree switched the
+dataplane default tag to `latest`, and **GHCR has no `latest` tag for
+`contextforge-gateway-rs`** (only `0.1.0`, confirmed via the registry tags
+API). Re-run with `CF_DATAPLANE_VERSION=0.1.0`.
 
-Reference baseline: the control-plane-only stack was fully green on the
-same suites earlier today (`controlplane-only-20260702T085914Z.log`,
-90 passed / 0 failed protocol compliance including `gateway_virtual`
-rows), so `gateway_virtual` deltas below are attributable to
-`cf-dataplane`, not stack drift.
-
-## Lane summary (latest full `test-all`, digest `802bab9c`, cache 60s)
+## Lane summary
 
 | Lane          | Result | Detail |
 |---------------|--------|--------|
-| probe         | PASS   | 401 negative, initialize, session reuse, tools/list, tools/call via nginx→dataplane |
+| probe         | PASS   | 401 negative, initialize, tools/list, tools/call via nginx→dataplane |
 | smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
 | live-mcp      | PASS   | 19 passed, 3 skipped |
 | live-rbac     | FAIL   | 3 failed / 37 passed |
-| live-protocol | FAIL   | 4 failed + 14 errors — every `gateway_virtual-http` row still 401s |
-| live-all      | FAIL   | 64 failed + 78 errors — mostly harness noise, see "Not dataplane" |
+| live-protocol | FAIL   | 4 failed + 14 errors — all 18 `gateway_virtual-http` rows 401 |
+| live-all      | FAIL   | 64 failed + 78 errors — mostly harness noise (see "Not dataplane") |
 
-The steady-state dataplane path (pre-registered Fast Time virtual server)
-is healthy under both functional and load traffic. Every dataplane failure
-involves **entities created at runtime** (virtual servers, users) or the
-**token contract**.
+Steady-state dataplane traffic (pre-registered Fast Time virtual server) is
+healthy. Every real failure again involves runtime-created entities or the
+token contract — but the root-cause picture has changed materially.
 
-## Dataplane findings
+## Fixed since the morning report
 
-All verified by hand against the live stack, not inferred from test output.
+**D2 — hollow-200 initialize is FIXED** in the rebuilt 0.1.0. Verified by
+hand: initialize against a vhost absent from the subject's config now
+returns `404 {"detail":"Server not found"}` (dataplane path via nginx
+regex), no phantom `Mcp-Session-Id`, no `-32002` in the logs. This restores
+honest client-side failures for every config problem below.
 
-### D2 — Failed initialize returns HTTP 200 + dead session (open)
+## Root cause: the publisher is a 60-second batch pipeline
 
-When a vhost is missing from the subject's config, the dataplane logs
-`ERROR ... Failed to serve session: initialize failed: -32002: No
-configuration` but still answers the initialize POST with **HTTP 200**
-and a `Mcp-Session-Id`. The session is never registered, so the next
-request gets `404 Session not found`. Clients observe a phantom-success
-handshake that dies one step later with a misleading error; this also
-masked the cache-staleness diagnosis (a plain-status probe of initialize
-reads as success).
+This is the load-bearing finding of this run. Everything previously filed
+under "publisher latency" (D4) is downstream of the control-plane publisher
+design in `mcpgateway/services/dataplane_publisher.py`:
 
-Fix (cf-dataplane): map initialize failure to a real HTTP error
-(404/409 with the JSON-RPC error body) instead of fabricating a session.
+- **Fixed 60s full-snapshot loop.** `REDIS_PUBLISHER_TIME = 60` is a
+  hardcoded module constant (not a setting). Every cycle re-reads all
+  users/servers/tools from the DB and rewrites every `UserConfig` key.
+  There is **no event-driven publish** — creating a user or server does
+  nothing until the next cycle fires.
+- **Key TTL 70s vs 60s interval = 10s of margin.** Keys are written with
+  `ex=PUBLISHER_TTL` (70). Idle sampling of Redis showed the admin
+  UserConfig TTL draining to **12s** before the next cycle refreshed it.
+- **Under load the cycle slips past the TTL.** Observed publish log
+  timestamps during the test-all run: 17:18:12 → 17:21:12 (**180s gap**) →
+  17:23:12 (120s) → 17:25:12 (120s) → 17:26:12 (60s, idle again). During a
+  120–180s gap every UserConfig key expires, so **all subjects lose
+  dataplane config for up to ~110s** — the dataplane's 60s in-memory cache
+  partially masks this for active subjects, which means disabling that
+  cache (the harness's former overlay override) exposes the outage instead
+  of fixing staleness. The slippage correlates with test load; the
+  publisher shares the serving event loop, so its timers fire late when
+  workers are busy.
+- **Lock ownership is broken.** `WORKER_ID = hostname:os.getpid()` is
+  computed at module import in the gunicorn master (pid 1) before fork, so
+  all 4 workers publish as `…:1`. The compare-and-delete release script
+  therefore can't distinguish owners; any worker can release any other's
+  lock. Harmless today only because publishes are near-instant.
+- **Silence at INFO.** Skipped cycles log at DEBUG only, and the dataplane
+  logs nothing at INFO when a config fetch misses — a subject in the
+  outage window just gets a bare `400 Bad Request`.
 
-### D3 — Tokens without a `scopes` claim are rejected 401 (open)
+Convergence for a brand-new subject is therefore uniform 0–60s in the best
+case and unbounded during load-induced slippage.
 
-The dataplane 401s any JWT lacking a `scopes` claim, regardless of
-`token_use`. Verified matrix against a live vhost:
+## PR #5482 assessment: right direction, insufficient as-is
 
-| Token | Result |
-|---|---|
-| `scopes` claim present (harness `cf-jwt.py` default) | 200 |
-| no `scopes` claim (upstream `make_test_jwt` admin token) | 401 |
-| `scopes` claim + `token_use=session` | 200 |
+The PR retries the two live-RBAC allow-path checks **5 × 100ms = 500ms**.
+Verified by hand against the live stack:
 
-Upstream's compliance harness mints one admin JWT (no `scopes`) and uses
-it for both control-plane REST and `/servers/{id}/mcp`. The control plane
-accepts it; the dataplane rejects it → all 18 `gateway_virtual-http`
-failures/errors in live-protocol. The inverse also holds: the
-dataplane-scoped token is rejected by control-plane admin REST
-("Access denied"), so **no single token works across both planes** (this
-is why `cf-jwt.py` grew an `--admin` flag).
+1. **Patch applied to the checkout, tests run 3×: 6 failures out of 6
+   runs** (`400 Bad Request` throughout). A 500ms window against a 60s
+   publish cycle passes only if the cycle happens to land inside it
+   (~1% chance).
+2. **Retry widened locally to 60 × 0.5s (30s):**
+   `test_public_token_accesses_public_server` converged after **12.04s**
+   (23 attempts); `test_team_member_accesses_team_server` still failed
+   after the full 30s — its fixture ran just after a publish cycle, so the
+   next chance was ~45s out. The window must cover a **full publisher
+   interval plus slippage: ≥75s** (e.g. 1s spacing, 75s deadline) to be
+   reliable.
+3. **The pass it produces is hollow.** When the public test converged it
+   printed `0 tools`. The fixture servers are backed by an **SSE gateway**
+   (`http://fast_time_server:8080/sse`); the dataplane opened a
+   streamable-HTTP client against it, got `HTTP 405 Method Not Allowed`,
+   logged `list_tools: backend … unavailable`, and returned an **empty
+   tools list with success status**. The tests assert only that
+   `tools/list` succeeds, so they will go green without ever proxying a
+   tool. Recommend the PR also assert a non-empty tool list — today that
+   assertion would correctly fail and expose the SSE gap below.
 
-Fix options: (a) dataplane treats a missing `scopes` claim as
-unrestricted for platform-admin tokens, matching control-plane semantics;
-(b) control plane embeds `scopes` in admin/API tokens; (c) upstream tests
-mint dataplane-compatible tokens. Only (a) keeps stock upstream clients
-working unmodified.
+## Dataplane findings (current 0.1.0, digest `cb5a64fe`)
 
-### D4 — Unknown subject → bare 400 (publisher latency remains)
+### D3 — tokens without a `scopes` claim rejected 401 (still open)
 
-A token whose subject has no `UserConfig` key in Redis gets a bare
-`400 Bad Request` ("Problem occurred retrieving the configuration").
-This is what failed `test_public_token_accesses_public_server` and
-`test_team_member_accesses_team_server` in live-rbac: the fixtures create
-users + servers and exercise them within seconds, inside the publisher
-window. The user-config cache fix closes stale existing-subject configs,
-but it does not close this first-publish gap for brand-new subjects. A
-clearer 403 body ("no dataplane config for subject") would make this
-diagnosable from the client side; an on-miss Redis fetch before rejecting
-would close the gap entirely.
+Unchanged. All 18 `gateway_virtual-http` live-protocol rows fail because
+upstream's compliance harness mints one admin JWT (no `scopes`) for both
+planes; the control plane accepts it, the dataplane 401s it. The inverse
+also still holds (dataplane-scoped token rejected by control-plane admin
+REST), so no single token works across both planes. Preferred fix remains:
+treat a missing `scopes` claim as unrestricted for platform-admin tokens.
+Largest single test unlock available.
+
+### D5 — SSE upstream transports not honored (new)
+
+The published `UserConfig` carries `transport` per gateway backend, but the
+dataplane initializes every backend with its streamable-HTTP client. For an
+SSE gateway this dies with `HTTP 405`:
+
+```
+ERROR rmcp::transport::worker: worker quit with fatal: … UnexpectedServerResponse("HTTP 405 Method Not Allowed: ")
+WARN  … initialize: Unable to initialize for DownstreamSessionId { … } … context: "send initialize request"
+```
+
+Fix: honor the transport field (SSE client for SSE gateways), or have the
+publisher exclude non-supported transports so the config is honest.
+
+### D6 — backend-unavailable is silently swallowed (new)
+
+When every backend of a vhost fails to initialize, `tools/list` returns
+**success with an empty list** instead of an error. Same
+phantom-success philosophy as the now-fixed D2, one layer deeper. Clients
+(and tests) cannot distinguish "no tools configured" from "all backends
+down". Fix: surface a JSON-RPC error or at minimum a partial-failure
+indication when zero backends initialized.
+
+### D4 — unknown subject → bare 400 (reframed)
+
+Still present: a subject with no `UserConfig` key gets a bare
+`400 Bad Request` with no INFO-level dataplane log. But given the publisher
+findings above, an on-miss Redis fetch would not help — the key genuinely
+does not exist until the next batch cycle. The real fixes are on the
+publisher (below). What the dataplane should still do: return a clearer
+403-style body ("no dataplane config for subject") and log the miss with
+the subject at WARN, so outage windows are diagnosable.
+
+### D1 — sliding-TTL user-config cache (still open, now double-edged)
+
+`lru_time_cache::get_mut` still resets the timestamp on every hit, so
+subjects with steady <60s traffic never refresh (insertion-based TTL still
+the right fix). Note the interaction: this same cache is currently the only
+thing masking the publisher's TTL-expiry outages for active subjects, which
+is why the harness reverting to the default cache (commit `e41a079`) made
+steady-state lanes stable while doing nothing for new-entity latency.
+
+## Control-plane findings
+
+- **Publisher redesign needed** (see root cause). Concretely, in
+  ascending effort:
+  1. Make `REDIS_PUBLISHER_TIME` / `PUBLISHER_TTL` env-configurable, with
+     TTL ≥ 2× interval + slippage margin (today's 70/60 leaves 10s).
+  2. Publish immediately at startup and after any mutation that changes a
+     UserConfig (user/team/server/tool CRUD) — even a debounced "publish
+     soon" flag would cut convergence from 0–60s to sub-second.
+  3. Compute `WORKER_ID` post-fork (or in `start()`), restoring lock CAS.
+  4. Move the publish loop off the request-serving event loop (thread or
+     dedicated process) so load can't starve its timer past the TTL.
+- **Private-server visibility regression** (unchanged):
+  `test_admin_sees_public_and_team_via_http` — `/servers` REST listing
+  shows admin another user's private server, violating the PR #4341
+  contract. Pure control-plane bug, identical code path in the stock stack.
 
 ## Failures NOT attributable to cf-dataplane
 
-- **live-rbac `test_admin_sees_public_and_team_via_http`** — the
-  control-plane `/servers` REST listing shows admin another user's
-  private server, violating the PR #4341 visibility contract. Pure
-  control-plane RBAC regression; identical code path in the stock stack.
-- **live-all mass failures (64F/78E in 17s)** — `make test-live-gateway`
-  runs `pytest -p playwright` over the whole tree; pytest-playwright's
-  `pytest_runtest_call` hook collides with pytest-asyncio →
-  `RuntimeError: Runner.run() cannot be called from a running event loop`
-  on every async test in **all three targets including reference-stdio**
-  (which passed in the baseline via the `-p no:playwright` path). Harness
-  incompatibility, not the gateway. The same log also contains the real
-  D3 `gateway_virtual` 401s.
-- **live-all plugins suite (pii_filter / sql_sanitizer)** — fixtures
-  self-register the gateway at `http://localhost:8080/mcp`; inside the
-  gateway container localhost:8080 is unreachable → control plane returns
-  502 "All connection attempts failed". Also requires
-  `PLUGINS_CONFIG_FILE=plugins/plugin_parity_config.yaml` at stack boot.
-  Environment/upstream-fixture issue in any compose-based run.
+Unchanged from the morning report, re-confirmed in this run's log:
 
-## Status and next steps
+- **live-all mass failures (64F/78E in 17.5s)** — `make test-live-gateway`
+  runs `pytest -p playwright` over the whole tree; the plugin's
+  `pytest_runtest_call` hook collides with pytest-asyncio → 103×
+  `Runner.run() cannot be called from a running event loop`. The same log
+  contains the real D3 401 rows.
+- **live-all plugins suites** — fixtures self-register the gateway at
+  `http://localhost:8080/mcp`, unreachable from inside the container →
+  502 "All connection attempts failed"; also need `PLUGINS_CONFIG_FILE`
+  at boot. Broken in any compose-based run.
 
-Remaining, in priority order:
+## Improvements
 
-1. **cf-dataplane: honest initialize errors** (D2) — cheap; removes the
-   phantom-200 that makes every config problem look like a session bug.
-2. **cf-dataplane: accept admin tokens without `scopes`** (D3) — unblocks
-   all upstream `gateway_virtual` compliance rows with no test changes.
-3. **cf-dataplane: on-miss Redis fetch for unknown subjects** (D4) —
-   closes the remaining ≤60s window for brand-new users.
-4. **Harness/upstream:** split live-all into `-p no:playwright` and
-   playwright invocations so real regressions aren't drowned in
-   event-loop noise; report the private-server visibility regression
-   upstream.
+### cf-dataplane (priority order)
 
-Expected test-lane picture once D3–D4 land: live-protocol
-`gateway_virtual` rows green; live-rbac green except the control-plane
-visibility regression; live-all still needs the pytest split before its
-numbers mean anything.
+1. **Accept admin tokens without `scopes`** (D3) — unblocks all 18
+   `gateway_virtual` compliance rows with zero test changes.
+2. **Honor backend `transport` / support SSE upstreams** (D5) — without it
+   every SSE-backed virtual server is a silent no-op through the dataplane.
+3. **Error on zero-backends-initialized instead of empty success** (D6).
+4. **Insertion-based TTL for the user-config cache** (D1).
+5. **Diagnosable config misses** (D4): clear error body + WARN log with
+   subject.
+
+### cf-controlplane
+
+1. Publisher: configurable interval/TTL, mutation-triggered publish,
+   post-fork `WORKER_ID`, off-loop scheduling (details above).
+2. Fix the private-server visibility regression (PR #4341 contract).
+
+### Harness (this repo)
+
+1. **Fix the broken `latest` default** in the working tree —
+   `CF_DATAPLANE_VERSION` defaults to `latest` but GHCR only has `0.1.0`;
+   `test-all-up` dies at `up`. Revert to a pinned tag (or pin by digest)
+   until upstream publishes `latest`.
+2. **Add a publisher-health check to the probe lane**: assert a
+   `UserConfig` key exists and its TTL/interval margin is sane; tail the
+   gateway's `Published N user configs` lines into the run log. Publish
+   gaps were only visible here via manual Redis sampling.
+3. **Split live-all** into `-p no:playwright` and playwright-only
+   invocations so real regressions aren't drowned in event-loop noise.
+4. Keep `CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS` easy to re-enable
+   in the overlay for A/B runs — with the publisher outage windows, cache
+   on/off now trades staleness against availability, which is worth
+   measuring per image.
+
+### Upstream tests / PR #5482
+
+1. Widen the retry to cover a full publish interval plus slippage
+   (≈75s deadline, ~1s spacing), ideally reading the deadline from an env
+   var so a future event-driven publisher can shrink it.
+2. Assert the converged `tools/list` is **non-empty** — today's assertion
+   passes on the hollow empty list produced by the SSE 405 path (D5/D6)
+   and would hide it permanently once retries land.
+
+## Expected picture once fixes land
+
+- D3 fix → live-protocol fully green.
+- Publisher mutation-triggered publish + PR #5482 (widened) → live-rbac
+  green except the control-plane visibility regression.
+- D5+D6 → allow-path tests can assert real tool lists.
+- live-all numbers remain meaningless until the playwright split.
