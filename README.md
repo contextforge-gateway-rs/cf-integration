@@ -78,6 +78,8 @@ Run everything in one shot with per-lane PASS/FAIL and full output captured to a
 scripts/cf-integration.sh test-all
 ```
 
+`CF_TEST_ALL_LOCUST=true` appends the full Locust load run (default 100 users, 5m; `LOCUST_*` variables apply) as a final lane.
+
 `live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
 ## Configuration

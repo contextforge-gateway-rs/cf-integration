@@ -65,7 +65,8 @@ Commands:
   live-protocol  Run cf-controlplane live protocol-compliance tests
   live-all       Run cf-controlplane's full tests/live_gateway suite
   test-all       Run every lane (probe smoke live-mcp live-rbac live-protocol live-all)
-                 and log all output + per-lane PASS/FAIL to a timestamped log file
+                 and log all output + per-lane PASS/FAIL to a timestamped log file;
+                 CF_TEST_ALL_LOCUST=true appends the full locust load run
 
 MCP_VIRTUAL_SERVER_ID defaults to the auto-registered Fast Time server:
   $FAST_TIME_SERVER_ID
@@ -139,6 +140,9 @@ run_test_all() {
   mkdir -p "$log_dir"
   local log_file="$log_dir/cf-tests-$(date -u +%Y%m%dT%H%M%SZ).log"
   local lanes=(probe smoke live-mcp live-rbac live-protocol live-all)
+  case "${CF_TEST_ALL_LOCUST:-false}" in
+    true|1) lanes+=(locust) ;;
+  esac
   local results=() rc lane failed=0
 
   for lane in "${lanes[@]}"; do

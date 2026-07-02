@@ -15,6 +15,8 @@ cf-controlplane_head=a8f786b7f
 evidence=.integration/mcp-context-forge/reports/full-test-run-20260702T065847Z/
 ```
 
+After the run, `origin/main` was pulled again and was already current at `b7b36d4`. The evidence below remains labeled with the SHA that actually produced it.
+
 ## Stack State
 
 Stack refreshed with:
@@ -62,6 +64,7 @@ a88e2c3f5d7b4a9e8f1c6d2e3b4a5f6e|Fast Time SSE Server|6
 probe     PASS exit 0
 smoke     PASS exit 0, 68 requests, 0 failures
 live-all  FAIL exit 2, 64 failed, 84 passed, 75 skipped, 5 xfailed, 42 errors
+cf-locust FAIL exit 1, 17,015 requests, 10,675 failures
 ```
 
 This is an improvement over the previous full run. The old `/sse` setup failure is gone, and the `fast-test-*` tool-call fixture failures are gone.
@@ -89,7 +92,7 @@ tool=938b4cbeb3b541c7a013496bcc069f13-schema_success
 tool_call=PASS tool=938b4cbeb3b541c7a013496bcc069f13-echo
 ```
 
-The public nginx to dataplane route is healthy for the fixed Fast Time virtual server.
+The public nginx to dataplane route is healthy for the Fast Time virtual server.
 
 ## Smoke
 
@@ -111,6 +114,88 @@ Aggregated                          68   0(0.00%)  avg 19ms  max 46ms
 ```
 
 The harness streamable HTTP client remains green.
+
+## Full CF Locust
+
+Command:
+
+```bash
+LOCUST_LOCUSTFILE=locustfile.py scripts/cf-integration.sh locust
+```
+
+Settings:
+
+```text
+locust_file=locustfile.py
+locust_users=100
+locust_spawn_rate=10
+locust_run_time=5m
+evidence=.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/
+```
+
+Result:
+
+```text
+exit code: 1
+Total Requests:     17,015
+Total Failures:     10,675 (62.74%)
+Requests/sec (RPS): 56.75
+Average:            9.92 ms
+Min:                1.05 ms
+Max:                740.51 ms
+p50:                7.00 ms
+p90:                16.00 ms
+p95:                21.00 ms
+p99:                37.00 ms
+```
+
+Artifacts:
+
+```text
+.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/locust_report.html
+.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/locust_stats.csv
+.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/locust_failures.csv
+.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/locust_exceptions.csv
+.integration/mcp-context-forge/reports/full-cf-locust-20260702T070453Z/locust_stats_history.csv
+```
+
+Top high-volume endpoints:
+
+```text
+/rpc fast-time-get-system-time        2,311 requests, 2,311 failures
+/rpc fast-time-get-system-time [UTC]  1,120 requests, 1,120 failures
+/rpc fast-time-convert-time             770 requests,   770 failures
+/tools                                  649 requests,     0 failures
+/rpc tools/list                         583 requests,     0 failures
+/servers                                533 requests,     0 failures
+/rpc tools/list [fasttime]              489 requests,     0 failures
+/rpc fast-test-echo                     411 requests,   411 failures
+/health                                 395 requests,     0 failures
+/rpc fast-test-get-system-time          395 requests,   395 failures
+```
+
+The setup phase also failed in strict mode:
+
+```text
+/gateways -> HTTP 403
+/resources -> HTTP 403
+/prompts -> HTTP 403
+/teams/ -> HTTP 403
+/rbac/roles -> HTTP 403
+```
+
+Dominant errors are authorization/permission failures:
+
+```text
+GET /admin/: Expected [200], got 403
+POST /rpc fast-time-get-system-time: JSON-RPC error [-32003]: Access denied - {'method': 'tools/call'}
+POST /rpc fast-test-echo: JSON-RPC error [-32003]: Access denied - {'method': 'tools/call'}
+POST /rpc prompts/list: JSON-RPC error [-32003]: Access denied - {'method': 'prompts/list'}
+GET /gateways: Expected [200], got 403
+GET /metrics [api]: Expected [200], got 403
+```
+
+This is the upstream full control-plane Locust file, not the harness dataplane Locust file. It exercises many admin/API/RPC surfaces and currently fails because the bearer token used by this harness does not have the rights expected by the full CF load profile.
 
 ## Full Suite
 
