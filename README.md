@@ -82,6 +82,26 @@ scripts/cf-integration.sh test-all
 
 `live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
+## Control-Plane Baseline
+
+Run the stock upstream `cf-controlplane` testing stack without the `cf-dataplane` service, nginx route override, integration MCP counter, or `DATAPLANE_PUBLISHER` overlay:
+
+```bash
+scripts/cf-integration.sh down
+scripts/cf-integration.sh controlplane-test-all
+```
+
+This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack, so stop the integration stack first. `controlplane-test-all` starts the stock testing stack, runs `tests/live_gateway`, then runs the upstream full control-plane Locust file (`locustfile.py`). Output is logged under `.integration/test-logs/`.
+
+Useful individual commands:
+
+```bash
+scripts/cf-integration.sh controlplane-up
+scripts/cf-integration.sh controlplane-live-all
+scripts/cf-integration.sh controlplane-locust
+scripts/cf-integration.sh controlplane-down
+```
+
 ## Configuration
 
 Useful overrides:
