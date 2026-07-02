@@ -4,7 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 default_dataplane_image() {
+  # GHCR currently publishes only 0.1.0 (no latest tag); keep the default pinned.
   printf 'ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:%s\n' "${CF_DATAPLANE_VERSION:-0.1.0}"
+}
+
+default_controlplane_image() {
+  printf 'mcpgateway/mcpgateway:%s\n' "${CF_CONTROLPLANE_VERSION:-latest}"
 }
 
 INTEGRATION_DIR="${CF_INTEGRATION_DIR:-"$ROOT/.integration"}"
@@ -15,6 +20,9 @@ PROJECT="${CF_INTEGRATION_PROJECT:-cf-integration}"
 CONTROLPLANE_PROJECT="${CF_CONTROLPLANE_PROJECT:-cf-controlplane-only}"
 JWT_SECRET_KEY="${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}"
 ADMIN_SUBJECT="${MCP_JWT_SUBJECT:-admin@example.com}"
+CF_CONTROLPLANE_IMAGE_WAS_SET="${CF_CONTROLPLANE_IMAGE+x}"
+IMAGE_LOCAL_WAS_SET="${IMAGE_LOCAL+x}"
+CF_CONTROLPLANE_IMAGE="${CF_CONTROLPLANE_IMAGE:-${IMAGE_LOCAL:-$(default_controlplane_image)}}"
 CF_DATAPLANE_IMAGE="${CF_DATAPLANE_IMAGE:-$(default_dataplane_image)}"
 CF_DATAPLANE_PLATFORM="${CF_DATAPLANE_PLATFORM:-linux/amd64}"
 CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-false}"
@@ -31,10 +39,12 @@ export GATEWAY_MEM_RESERVATION="${GATEWAY_MEM_RESERVATION:-512M}"
 export GUNICORN_WORKERS="${GUNICORN_WORKERS:-$DOCKER_CPUS}"
 
 export CF_INTEGRATION_ROOT="$ROOT"
+export CF_CONTROLPLANE_IMAGE
 export CF_DATAPLANE_IMAGE
 export CF_DATAPLANE_PLATFORM
 export CF_CONTROLPLANE_DIR
 export CF_INTEGRATION_DIR="$INTEGRATION_DIR"
+export IMAGE_LOCAL="$CF_CONTROLPLANE_IMAGE"
 export JWT_SECRET_KEY
 export MCP_CLI_BASE_URL="${MCP_CLI_BASE_URL:-http://127.0.0.1:${NGINX_PORT:-8080}}"
 export PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-$ADMIN_SUBJECT}"
@@ -371,6 +381,9 @@ CF-dataplane image:
   $CF_DATAPLANE_IMAGE
   platform: $CF_DATAPLANE_PLATFORM
 
+CF-controlplane image:
+  $CF_CONTROLPLANE_IMAGE
+
 Integration MCP backend URL to add in cf-controlplane UI:
   http://cf-integration-mcp-counter:5555/mcp
 EOF
@@ -394,6 +407,66 @@ compose() {
 
 controlplane_compose() {
   docker compose "${controlplane_compose_args[@]}" "$@"
+}
+
+remote_image_digest() {
+  docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null
+}
+
+local_image_has_digest() {
+  local image="$1"
+  local digest="$2"
+
+  docker image inspect "$image" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
+    | grep -Fq "@$digest"
+}
+
+pull_image_if_digest_changed() {
+  local label="$1"
+  local image="$2"
+  local platform="${3:-}"
+  local remote_digest
+
+  print_detail "$label image: $image"
+  if ! remote_digest="$(remote_image_digest "$image")" || [[ -z "$remote_digest" ]]; then
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      print_detail "$label sha unavailable; nothing pulled: using local image"
+      return 0
+    fi
+    print_detail "$label sha unavailable and local image missing; pulling"
+    if [[ -n "$platform" ]]; then
+      docker pull --platform "$platform" "$image"
+    else
+      docker pull "$image"
+    fi
+    return 0
+  fi
+
+  if local_image_has_digest "$image" "$remote_digest"; then
+    print_detail "$label sha unchanged; nothing pulled: $remote_digest"
+    return 0
+  fi
+
+  print_detail "$label sha changed or missing locally; pulling: $remote_digest"
+  if [[ -n "$platform" ]]; then
+    docker pull --platform "$platform" "$image"
+  else
+    docker pull "$image"
+  fi
+}
+
+pull_controlplane_image_if_needed() {
+  if [[ -z "$CF_CONTROLPLANE_IMAGE_WAS_SET" && -z "$IMAGE_LOCAL_WAS_SET" ]]; then
+    print_detail "cf-controlplane image: $CF_CONTROLPLANE_IMAGE"
+    print_detail "cf-controlplane sha check skipped; nothing pulled: default local build image"
+  else
+    pull_image_if_digest_changed "cf-controlplane" "$CF_CONTROLPLANE_IMAGE"
+  fi
+}
+
+pull_stack_images() {
+  pull_controlplane_image_if_needed
+  pull_image_if_digest_changed "cf-dataplane" "$CF_DATAPLANE_IMAGE" "$CF_DATAPLANE_PLATFORM"
 }
 
 integration_stack_running() {
@@ -595,12 +668,14 @@ run_controlplane_up() {
       ;;
   esac
 
+  pull_controlplane_image_if_needed
   controlplane_compose "${up_args[@]}"
   cat <<EOF
 Control-plane-only stack started.
 Project: $CONTROLPLANE_PROJECT
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
+CF-controlplane image: $CF_CONTROLPLANE_IMAGE
 No cf-dataplane service, no dataplane nginx routing override, no DATAPLANE_PUBLISHER overlay.
 
 Run:
@@ -708,11 +783,12 @@ case "${1:-}" in
     if [[ "$CF_COMPOSE_BUILD" == "true" || "$CF_COMPOSE_BUILD" == "1" ]]; then
       up_args+=(--build)
     fi
-    compose pull gateway cf-dataplane
+    pull_stack_images
     compose up "${up_args[@]}"
     print_info_box "Integration stack started." "$(cat <<EOF
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
+CF-controlplane image: $CF_CONTROLPLANE_IMAGE
 CF-dataplane image: $CF_DATAPLANE_IMAGE
 CF-dataplane platform: $CF_DATAPLANE_PLATFORM
 EOF
@@ -726,8 +802,15 @@ EOF
     ;;
   logs)
     shift
-    mapfile -t services < <(map_compose_services "$@")
-    compose logs -f "${services[@]}"
+    if [[ $# -eq 0 ]]; then
+      compose logs -f
+    else
+      services=()
+      while IFS= read -r service; do
+        services+=("$service")
+      done < <(map_compose_services "$@")
+      compose logs -f "${services[@]}"
+    fi
     ;;
   config)
     ensure_checkout
