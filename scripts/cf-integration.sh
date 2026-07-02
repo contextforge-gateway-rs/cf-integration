@@ -64,6 +64,8 @@ Commands:
   live-rbac      Run cf-controlplane live MCP RBAC/multi-transport tests
   live-protocol  Run cf-controlplane live protocol-compliance tests
   live-all       Run cf-controlplane's full tests/live_gateway suite
+  test-all       Run every lane (probe smoke live-mcp live-rbac live-protocol live-all)
+                 and log all output + per-lane PASS/FAIL to a timestamped log file
 
 MCP_VIRTUAL_SERVER_ID defaults to the auto-registered Fast Time server:
   $FAST_TIME_SERVER_ID
@@ -130,6 +132,35 @@ map_compose_services() {
 
 export_server_id() {
   export MCP_SERVER_ID="${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+}
+
+run_test_all() {
+  local log_dir="${CF_TEST_LOG_DIR:-$INTEGRATION_DIR/test-logs}"
+  mkdir -p "$log_dir"
+  local log_file="$log_dir/cf-tests-$(date -u +%Y%m%dT%H%M%SZ).log"
+  local lanes=(probe smoke live-mcp live-rbac live-protocol live-all)
+  local results=() rc lane failed=0
+
+  for lane in "${lanes[@]}"; do
+    echo "Running $lane..."
+    printf '===== BEGIN %s %s =====\n' "$lane" "$(date -u +%FT%TZ)" >>"$log_file"
+    rc=0
+    "$0" "$lane" >>"$log_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      results+=("PASS $lane")
+    else
+      results+=("FAIL $lane exit=$rc")
+      failed=1
+    fi
+    printf '===== END %s =====\n\n' "$lane" >>"$log_file"
+  done
+
+  {
+    echo "===== SUMMARY $(date -u +%FT%TZ) ====="
+    printf '%s\n' "${results[@]}"
+  } | tee -a "$log_file"
+  echo "Log: $log_file"
+  return "$failed"
 }
 
 # LOCUST_MODE/LOCUST_LOCUSTFILE defaults live in the compose overlay.
@@ -208,6 +239,9 @@ EOF
     ;;
   live-all)
     run_cf_controlplane_make test-live-gateway
+    ;;
+  test-all)
+    run_test_all
     ;;
   ""|-h|--help|help)
     usage

@@ -72,6 +72,12 @@ scripts/cf-integration.sh live-protocol
 scripts/cf-integration.sh live-all
 ```
 
+Run everything in one shot with per-lane PASS/FAIL and full output captured to a timestamped log file (default `.integration/test-logs/`, override with `CF_TEST_LOG_DIR`):
+
+```bash
+scripts/cf-integration.sh test-all
+```
+
 `live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
 
 ## Configuration
