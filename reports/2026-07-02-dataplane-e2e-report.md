@@ -130,11 +130,26 @@ claim-stripping a working token against the live vhost:
 
 Upstream's `make_test_jwt` admin token has no `token_use` and its `user`
 object is `{email, is_admin, auth_provider}` (no `full_name`) → 401.
-Follow-up fix (cf-dataplane): make `token_use` and the `user` sub-fields
-optional in the claims struct (`Option<>` / serde defaults) instead of
-required. Still the largest single test unlock available. The inverse gap
-also still holds: the dataplane-scoped token is rejected by control-plane
-admin REST, so no single token works across both planes.
+Follow-up fix opened and verified E2E:
+[contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54)
+makes both claims optional (mirroring #51's `scopes` handling). With a
+dataplane built from that branch, live-protocol went from 4 failed +
+14 errors to **2 failed / 23 passed / 0 errors** — the auth blocker is
+gone. The inverse gap still holds: the dataplane-scoped token is rejected
+by control-plane admin REST, so no single token works across both planes.
+
+### D7 — allowed_tool_names filtering empties runtime-registered vhosts (new)
+
+Exposed once #54 unblocks auth: the two remaining `gateway_virtual`
+failures (plus 12 skips) show sessions established and the dataplane
+fetching the backend's tools (`list_tools: backend … completed
+(136 items)`) yet returning **0 tools** to the client. The published
+`allowed_tool_names` use control-plane slugs (`fast-time-echo`) while
+upstreams advertise bare names (`echo`); the pre-registered Fast Time
+vhosts filter correctly, but the compliance harness's runtime-registered
+reference upstream filters to zero. Needs isolation against a live
+fixture before teardown; likely in the dataplane's list_tools
+prefix/filter mapping.
 
 ### D5 — SSE upstream transports not honored (new)
 
