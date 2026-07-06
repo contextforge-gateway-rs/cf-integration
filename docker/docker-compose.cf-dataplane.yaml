@@ -53,6 +53,14 @@ services:
     deploy:
       replicas: 1
 
+  # The dataplane will not implement SSE upstreams: the transport is
+  # deprecated and is removed in the 2026-07-28 MCP protocol update. Keep the
+  # upstream SSE gateway registration out of the dataplane stack so its fixed
+  # virtual server cannot surface hollow (0-tool) results through
+  # /servers/{id}/mcp. Start with --profile sse-deprecated to restore it.
+  register_fast_time_sse:
+    profiles: ["sse-deprecated"]
+
   nginx:
     volumes:
       - ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}/docker/nginx.cf-dataplane.conf:/etc/nginx/nginx.conf:ro

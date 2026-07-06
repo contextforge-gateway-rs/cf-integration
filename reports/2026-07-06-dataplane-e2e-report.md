@@ -63,14 +63,23 @@ to `tests/live_gateway/protocol_compliance/fixtures/gateway_live.py`.
 shows admin another user's private server, violating the PR #4341
 contract. Reproduces identically on the stock control-plane-only stack.
 
-### 4. D5 — SSE upstream transports not honored (dataplane)
+### 4. SSE-backed fixtures in upstream tests (upstream tests; dataplane SSE is won't-fix)
 
-The dataplane initializes every backend with its streamable-HTTP client;
-SSE gateways die with `HTTP 405 Method Not Allowed`. Consequence: the
-live-rbac allow-path tests pass **hollow** (0 tools — their fixture
-servers are SSE-backed and they assert only that tools/list succeeds).
-Fix: honor the `transport` field per backend, or exclude unsupported
-transports at publish time.
+Decision: the dataplane will **not** implement SSE upstreams — the
+transport is deprecated and is removed in the 2026-07-28 MCP protocol
+update. The harness now profile-gates the stock `register_fast_time_sse`
+job off and removed the Fast Time SSE fixed virtual server, so no
+SSE-backed vhost reaches the dataplane from the stack itself (verified:
+Redis UserConfig contains only `STREAMABLEHTTP` backends; probe green).
+
+Residue: the upstream live-rbac suite registers its **own** SSE gateway
+(`mcp-rbac-sse-gw`) inside its fixtures, so its allow-path tests still
+pass hollow (0 tools) through the dataplane. Fix belongs upstream: switch
+those fixtures to the streamable-HTTP endpoint
+(`http://fast_time_server:8080/http`). Until SSE-registered gateways
+disappear, the publisher exporting SSE backends into UserConfig remains
+misleading — excluding non-supported transports at publish time would
+make the config honest.
 
 ### 5. D6 — backend-unavailable swallowed as empty success (dataplane)
 

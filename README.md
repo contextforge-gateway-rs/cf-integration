@@ -14,7 +14,7 @@ scripts/cf-integration.sh up
 
 The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
 
-Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged.
+Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), but the harness registers only the streamable-HTTP gateway: the dataplane will not implement SSE upstreams (the transport is deprecated and is removed in the 2026-07-28 MCP protocol update), so the stock `register_fast_time_sse` job is profile-gated off. Start with `--profile sse-deprecated` to restore it.
 
 Open `http://localhost:8080/admin` and log in with:
 
