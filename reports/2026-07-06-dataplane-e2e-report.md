@@ -7,20 +7,26 @@ history of this file and in the linked PRs.
 
 ## Stack under test
 
-`scripts/cf-integration.sh test-all-up` at 10:28 UTC
-(log: `.integration/test-logs/cf-tests-20260706T102814Z.log`):
+`scripts/cf-integration.sh test-all-up` at 14:19 UTC
+(log: `.integration/test-logs/cf-tests-20260706T141959Z.log`):
 
-- **cf-controlplane** built from the
-  [PR #5482](https://github.com/IBM/mcp-context-forge/pull/5482) branch
-  (publisher interval configurable; harness overlay sets 2s).
+- **cf-controlplane** built from `user/luca/dataplane-integration-fixes`
+  — the consolidated feature branch collecting every open control-plane
+  fix: [PR #5482](https://github.com/IBM/mcp-context-forge/pull/5482)
+  (configurable publisher interval + allow-path convergence wait) and
+  [PR #5510](https://github.com/IBM/mcp-context-forge/pull/5510)
+  (publish `original_name` in `allowed_tool_names`, plus the follow-up
+  select-column fix — as first pushed, #5510 crashed every publish cycle
+  with `KeyError: original_name` because the bulk tool query did not
+  select the column, taking the whole dataplane path down).
 - **cf-dataplane** `cf-dataplane:pr54` — local arm64 build of
   [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54)
   (optional `token_use`/`full_name` claims).
 - Harness overlay: publisher interval 2s, dataplane user-config cache
   disabled (`CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0`).
 
-Both PRs are open; once they merge, a stock `test-all-up` with published
-images should reproduce these numbers.
+Both control-plane PRs and rs#54 are open; once they merge, a stock
+`test-all-up` with published images should reproduce these numbers.
 
 ## Lane summary
 
@@ -30,32 +36,34 @@ images should reproduce these numbers.
 | smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
 | live-mcp      | PASS   | 19 passed, 3 skipped |
 | live-rbac     | FAIL   | 1 failed / 39 passed — control-plane visibility regression only |
-| live-protocol | FAIL   | 2 failed + 2 errors / 21 passed / 11 skipped |
+| live-protocol | FAIL   | 3 failed + 3 errors / 20 passed / 10 skipped |
 | live-all      | FAIL   | 62 failed + 78 errors — harness noise (playwright collision, plugin fixtures) |
 
 ## Open issues
 
-### 1. D7 — allowed_tool_names filtering empties runtime-registered vhosts (dataplane)
+### 1. D7 (remaining half) — dataplane exposes backend-UUID tool names (dataplane)
 
-The 2 live-protocol failures (`test_list_tools_returns_all_stubs`,
-`test_required_tools_advertised`) plus 11 "tool not advertised" skips.
-Sessions establish and the dataplane fetches the backend's tools
-(`list_tools: backend … completed (136 items)`) but returns **0 tools**
-to the client. Published `allowed_tool_names` are control-plane slugs
-(`fast-time-echo`) while upstreams advertise bare names (`echo`);
-pre-registered Fast Time vhosts filter correctly, the compliance
-harness's runtime-registered reference upstream filters to zero. Needs
-isolation against a live fixture before teardown; likely in the
-dataplane's list_tools prefix/filter mapping.
+The publisher half is fixed: with #5510 (+ select fix),
+`allowed_tool_names` carry bare upstream names, the dataplane's filter
+matches, and the probe lane lists **and calls** tools through the
+dataplane. What remains is the response side: the dataplane advertises
+tools as `<backend-uuid>-<name>` (e.g. `938b4cbe…-echo`) while the
+control plane exposes its slug-based tool naming, so the compliance
+`gateway_virtual` rows still fail `test_required_tools_advertised` /
+pagination stub checks and skip 10 tests with "tool not advertised"
+despite live sessions and a 136-item backend fetch. Fix belongs in the
+dataplane's `list_tools` response mapping (contextforge-gateway-rs).
 
 ### 2. Compliance fixtures race the publisher (upstream tests)
 
-The 2 live-protocol errors: the first two `gateway_virtual` rows 404
-("Session terminated") at setup because the compliance conftest connects
-to the fixture vhost before even the 2s publisher has it in Redis — those
-fixtures have no convergence retry. On a stock 60s-publisher stack this
-flakes far more often. Fix: apply the same deadline-wait used by PR #5482
-to `tests/live_gateway/protocol_compliance/fixtures/gateway_live.py`.
+The 3 live-protocol errors plus 2 of the 3 failures this run: early
+`gateway_virtual` rows 404 ("Session terminated") at setup/connect
+because the compliance conftest reaches the fixture vhost before even
+the 2s publisher has it in Redis — those fixtures have no convergence
+retry, and how many rows get hit varies run to run. On a stock
+60s-publisher stack this flakes far more often. Fix: apply the same
+deadline-wait used by PR #5482 to
+`tests/live_gateway/protocol_compliance/fixtures/gateway_live.py`.
 
 ### 3. Private-server visibility regression (control plane)
 
@@ -127,9 +135,11 @@ control-plane admin REST ("Access denied") — why `cf-jwt.py` keeps its
 
 ## Expected next state
 
-- rs#54 merge + republished image → live-protocol auth rows stay green on
-  stock pulls.
-- D7 fix → live-protocol fully green except the fixture race (issue 2).
+- IBM#5482 + IBM#5510 merges (the `user/luca/dataplane-integration-fixes`
+  feature branch is their combined, verified state) and rs#54 merge +
+  republished image → these numbers on stock pulls.
+- Dataplane tool-naming fix (issue 1) → live-protocol green except the
+  fixture race (issue 2).
 - Issue 2 fix → live-protocol green.
 - Issue 3 fix → live-rbac green.
 - Issue 8 split → live-all numbers become meaningful.
