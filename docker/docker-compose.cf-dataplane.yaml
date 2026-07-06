@@ -53,13 +53,11 @@ services:
     deploy:
       replicas: 1
 
-  # The dataplane will not implement SSE upstreams: the transport is
-  # deprecated and is removed in the 2026-07-28 MCP protocol update. Keep the
-  # upstream SSE gateway registration out of the dataplane stack so its fixed
-  # virtual server cannot surface hollow (0-tool) results through
-  # /servers/{id}/mcp. Start with --profile sse-deprecated to restore it.
-  register_fast_time_sse:
-    profiles: ["sse-deprecated"]
+  # SSE registration runs stock: the dataplane will not implement SSE
+  # upstreams (deprecated; removed in the 2026-07-28 MCP protocol update),
+  # but the publisher exports streamable-HTTP backends only, so SSE-backed
+  # virtual servers are absent from dataplane config and nginx replays their
+  # /servers/{id}/mcp requests on the control plane, which serves them fully.
 
   nginx:
     volumes:

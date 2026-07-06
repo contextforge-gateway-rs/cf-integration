@@ -155,7 +155,7 @@ EOF
       printf 'Protocol compliance gateway target suite, including gateway_virtual-http rows.\n'
       ;;
     live-all)
-      printf 'Full upstream tests/live_gateway suite. Noisy, but kept for parity with the report.\n'
+      printf 'Full upstream tests/live_gateway suite in two passes: asyncio suites without pytest-playwright, then the playwright-dependent suites (sso, RBAC transport).\n'
       ;;
     locust)
       printf 'Full locust load lane using the harness streamable-HTTP locustfile.\n'
@@ -169,9 +169,10 @@ EOF
 format_test_summary() {
   local lane_log="$1"
   local summary
-  summary="$(grep -E '^=+ .* (failed|passed|error|errors|skipped|xfailed|xpassed|warnings|deselected).* =+$' "$lane_log" | tail -n 1 || true)"
+  # Lanes may run more than one pytest pass (live-all); join all summaries.
+  summary="$(grep -E '^=+ .* (failed|passed|error|errors|skipped|xfailed|xpassed|warnings|deselected).* =+$' "$lane_log" | sed -E 's/^=+ +//; s/ +=+$//' | paste -sd '|' - || true)"
   if [[ -n "$summary" ]]; then
-    printf '%s\n' "$summary" | sed -E 's/^=+ +//; s/ +=+$//'
+    printf '%s\n' "$summary" | sed 's/|/ | /g'
   fi
 }
 
@@ -513,6 +514,31 @@ run_cf_controlplane_make() {
   make -C "$CF_CONTROLPLANE_DIR" "$@"
 }
 
+# Two-pass replacement for upstream's `make test-live-gateway`, which runs the
+# whole tree under -p playwright: pytest-playwright's runtest hook breaks every
+# pytest-asyncio test ("Runner.run() cannot be called from a running event
+# loop"), drowning real regressions. Pass 1 runs the asyncio suites without
+# the plugin; pass 2 runs the two playwright-dependent suites with it.
+run_live_all() {
+  ensure_checkout
+  local rc=0
+  (
+    cd "$CF_CONTROLPLANE_DIR"
+    uv run --extra plugins pytest -p no:playwright tests/live_gateway/ \
+      --ignore=tests/live_gateway/sso \
+      --ignore=tests/live_gateway/mcp/test_mcp_rbac_transport.py \
+      -v --tb=short
+  ) || rc=$?
+  (
+    cd "$CF_CONTROLPLANE_DIR"
+    uv run --extra plugins pytest -p playwright \
+      tests/live_gateway/sso \
+      tests/live_gateway/mcp/test_mcp_rbac_transport.py \
+      -v --tb=short
+  ) || rc=$?
+  return "$rc"
+}
+
 run_cf_controlplane_only_make() {
   ensure_checkout
   COMPOSE_PROJECT_NAME="$CONTROLPLANE_PROJECT" \
@@ -842,7 +868,7 @@ EOF
     run_cf_controlplane_make test-protocol-compliance-gateway
     ;;
   live-all)
-    run_cf_controlplane_make test-live-gateway
+    run_live_all
     ;;
   test-all)
     run_test_all

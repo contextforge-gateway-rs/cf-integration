@@ -1,32 +1,44 @@
 # Dataplane E2E Report — 2026-07-06
 
-Current open issues only. Everything resolved since the 2026-07-02 report
-(hollow-200 initialize, scopes/token_use/full_name 401s, publisher-latency
-test flakes, frozen-cache staleness workaround) is documented in git
-history of this file and in the linked PRs.
+Current open issues only; resolved findings live in this file's git
+history and the linked PRs.
 
 ## Stack under test
 
-`scripts/cf-integration.sh test-all-up` at 14:19 UTC
-(log: `.integration/test-logs/cf-tests-20260706T141959Z.log`):
+Latest full `test-all` (log: `.integration/test-logs/`, 16:0x UTC run):
 
 - **cf-controlplane** built from `user/luca/dataplane-integration-fixes`
-  — the consolidated feature branch collecting every open control-plane
-  fix: [PR #5482](https://github.com/IBM/mcp-context-forge/pull/5482)
-  (configurable publisher interval + allow-path convergence wait) and
-  [PR #5510](https://github.com/IBM/mcp-context-forge/pull/5510)
-  (publish `original_name` in `allowed_tool_names`, plus the follow-up
-  select-column fix — as first pushed, #5510 crashed every publish cycle
-  with `KeyError: original_name` because the bulk tool query did not
-  select the column, taking the whole dataplane path down).
+  — the consolidated feature branch of all open control-plane PRs
+  ([#5482](https://github.com/IBM/mcp-context-forge/pull/5482) publisher
+  interval + allow-path wait,
+  [#5510](https://github.com/IBM/mcp-context-forge/pull/5510)
+  original_name in allowed_tool_names + select fix,
+  [#5515](https://github.com/IBM/mcp-context-forge/pull/5515) compliance
+  fixture convergence wait,
+  [#5516](https://github.com/IBM/mcp-context-forge/pull/5516) non-empty
+  allow-path asserts,
+  [#5517](https://github.com/IBM/mcp-context-forge/pull/5517) per-worker
+  lock id + TTL margin,
+  [#5519](https://github.com/IBM/mcp-context-forge/pull/5519)
+  streamable-HTTP-only publishing).
+  [#5514](https://github.com/IBM/mcp-context-forge/pull/5514) is the
+  draft combined-diff view.
 - **cf-dataplane** `cf-dataplane:pr54` — local arm64 build of
-  [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54)
-  (optional `token_use`/`full_name` claims).
-- Harness overlay: publisher interval 2s, dataplane user-config cache
-  disabled (`CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0`).
-
-Both control-plane PRs and rs#54 are open; once they merge, a stock
-`test-all-up` with published images should reproduce these numbers.
+  [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54).
+- **Harness**: publisher interval 2s, dataplane config cache disabled,
+  and nginx now **replays dataplane 400/404 responses on the control
+  plane** for `/servers/{id}/mcp` — combined with #5519, SSE-backed
+  virtual servers (SSE is deprecated; removed in the 2026-07-28 MCP
+  protocol update) are absent from dataplane config and served fully by
+  the control plane. Verified live: the Fast Time SSE server initializes
+  and lists tools through the fallback, and the RBAC allow-path tests
+  pass **with non-empty tool lists**.
+- The `live-all` lane runs upstream `tests/live_gateway/` directly in
+  two pytest passes (asyncio suites with `-p no:playwright`, then the
+  two playwright-dependent suites), replacing `make test-live-gateway`,
+  whose single `-p playwright` pass broke every asyncio test
+  (~103 × `Runner.run() cannot be called from a running event loop`).
+  Harness-side only; upstream Makefile intentionally unchanged.
 
 ## Lane summary
 
@@ -35,111 +47,73 @@ Both control-plane PRs and rs#54 are open; once they merge, a stock
 | probe         | PASS   | 401 negative, initialize, tools/list, tools/call via nginx→dataplane |
 | smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
 | live-mcp      | PASS   | 19 passed, 3 skipped |
-| live-rbac     | FAIL   | 1 failed / 39 passed — control-plane visibility regression only |
-| live-protocol | FAIL   | 3 failed + 3 errors / 20 passed / 10 skipped |
-| live-all      | FAIL   | 62 failed + 78 errors — harness noise (playwright collision, plugin fixtures) |
+| live-rbac     | FAIL   | 1 failed / 39 passed — visibility contract mismatch only |
+| live-protocol | FAIL   | 2 failed / 23 passed / 14 skipped / **0 errors** (fixture race gone) |
+| live-all      | FAIL   | 4 failed / 105+ passed / 36 errors — errors are the plugin fixtures |
 
 ## Open issues
 
 ### 1. D7 (remaining half) — dataplane exposes backend-UUID tool names (dataplane)
 
-The publisher half is fixed: with #5510 (+ select fix),
-`allowed_tool_names` carry bare upstream names, the dataplane's filter
-matches, and the probe lane lists **and calls** tools through the
-dataplane. What remains is the response side: the dataplane advertises
-tools as `<backend-uuid>-<name>` (e.g. `938b4cbe…-echo`) while the
-control plane exposes its slug-based tool naming, so the compliance
-`gateway_virtual` rows still fail `test_required_tools_advertised` /
-pagination stub checks and skip 10 tests with "tool not advertised"
-despite live sessions and a 136-item backend fetch. Fix belongs in the
-dataplane's `list_tools` response mapping (contextforge-gateway-rs).
+Publisher side fixed (#5510 + select fix): filters match and the probe
+lists **and calls** tools through the dataplane. The dataplane still
+advertises tools as `<backend-uuid>-<name>` instead of the control
+plane's naming, so the compliance rows `test_required_tools_advertised`
+and the pagination stub checks fail and ~14 tests skip with "tool not
+advertised" despite live sessions. Fix in contextforge-gateway-rs
+`list_tools` response mapping. Largest remaining item.
 
-### 2. Compliance fixtures race the publisher (upstream tests)
+### 2. Visibility contract mismatch in `/servers` listing (control plane)
 
-The 3 live-protocol errors plus 2 of the 3 failures this run: early
-`gateway_virtual` rows 404 ("Session terminated") at setup/connect
-because the compliance conftest reaches the fixture vhost before even
-the 2s publisher has it in Redis — those fixtures have no convergence
-retry, and how many rows get hit varies run to run. On a stock
-60s-publisher stack this flakes far more often. Fix: apply the same
-deadline-wait used by PR #5482 to
-`tests/live_gateway/protocol_compliance/fixtures/gateway_live.py`.
+`test_admin_sees_public_and_team_via_http` — the REST listing does not
+honor the PR #4341 visibility contract for admin sessions. Reproduces on
+the stock control-plane-only stack; needs its own upstream PR. Last
+failure in live-rbac.
 
-### 3. Private-server visibility regression (control plane)
+### 3. Plugin E2E fixtures unusable under compose (upstream tests)
 
-`test_admin_sees_public_and_team_via_http` — the `/servers` REST listing
-shows admin another user's private server, violating the PR #4341
-contract. Reproduces identically on the stock control-plane-only stack.
+The 36 live-all errors: `tests/live_gateway/plugins` fixtures
+self-register the gateway at `http://localhost:8080/mcp`, unreachable
+from inside the gateway container (502), and require
+`PLUGINS_CONFIG_FILE` at stack boot. Broken in any compose-based run;
+needs upstream fixture parameterization.
 
-### 4. SSE-backed fixtures in upstream tests (upstream tests; dataplane SSE is won't-fix)
+### 4. Two live-all failures to triage (upstream)
 
-Decision: the dataplane will **not** implement SSE upstreams — the
-transport is deprecated and is removed in the 2026-07-28 MCP protocol
-update. The harness now profile-gates the stock `register_fast_time_sse`
-job off and removed the Fast Time SSE fixed virtual server, so no
-SSE-backed vhost reaches the dataplane from the stack itself (verified:
-Redis UserConfig contains only `STREAMABLEHTTP` backends; probe green).
+Now that the lane is meaningful, two failures beyond D7 need triage:
+`test_drift.py::test_drift_add_call` and
+`test_resources.py::test_templated_resource_registered_and_resolves[gateway_proxy-http]`.
+Not yet root-caused; may be genuine gateway-proxy gaps or test-order
+artifacts.
 
-Residue: the upstream live-rbac suite registers its **own** SSE gateway
-(`mcp-rbac-sse-gw`) inside its fixtures, so its allow-path tests still
-pass hollow (0 tools) through the dataplane. Fix belongs upstream: switch
-those fixtures to the streamable-HTTP endpoint
-(`http://fast_time_server:8080/http`). Until SSE-registered gateways
-disappear, the publisher exporting SSE backends into UserConfig remains
-misleading — excluding non-supported transports at publish time would
-make the config honest.
+### 5. D1 — sliding-TTL user-config cache (dataplane)
 
-### 5. D6 — backend-unavailable swallowed as empty success (dataplane)
+`lru_time_cache::get_mut` renews TTL on hit; steady traffic pins stale
+config. Harness works around with cache=0; real fix is insertion-based
+TTL.
 
-When all backends of a vhost fail to initialize, `tools/list` returns
-success with an empty list. Clients and tests cannot distinguish "no
-tools configured" from "all backends down". Fix: JSON-RPC error or
-partial-failure indication when zero backends initialized.
+### 6. D6 — backend-unavailable swallowed as empty success (dataplane)
 
-### 6. D1 — sliding-TTL user-config cache (dataplane)
+All-backends-down still yields `tools/list` 200 + `[]`. Less pressing
+now that unsupported transports are excluded at publish time, but the
+failure mode remains for genuinely down streamable backends.
 
-`lru_time_cache::get_mut` resets the TTL on every hit, so subjects with
-steady <60s traffic never refresh; a client retry loop can pin a stale
-config forever. The harness works around it with cache=0; the real fix is
-insertion-based TTL. Note the interaction: with the cache disabled, the
-publisher's TTL-expiry windows (below) are no longer masked.
+### 7. Remaining publisher gaps (control plane)
 
-### 7. Publisher design gaps (control plane)
+After #5482/#5517/#5519: no event-driven publish (new entities wait for
+the next snapshot) and the publish loop shares the serving event loop
+(timers fire late under load). Both are design changes beyond the
+current PR set.
 
-PR #5482 makes the interval configurable, but upstream still has:
+### 8. No single token works on both planes (cross-plane contract)
 
-- **TTL margin**: key TTL = interval + 10s; any publish delay > 10s
-  expires every UserConfig key (observed 120–180s cycle slippage under
-  load on 2026-07-02 → ~110s total config outages).
-- **No event-driven publish**: new entities wait for the next snapshot.
-- **`WORKER_ID` computed pre-fork**: all gunicorn workers publish as
-  `hostname:1`, defeating the lock's compare-and-swap ownership.
-- **Publisher shares the serving event loop**: load delays its timer,
-  which is what causes the slippage.
-
-### 8. live-all lane is meaningless (harness + upstream Makefile)
-
-`make test-live-gateway` runs `pytest -p playwright` over the whole tree;
-its hook collides with pytest-asyncio (`Runner.run() cannot be called
-from a running event loop`) on every async test, and the plugin suites'
-fixtures self-register `http://localhost:8080/mcp` which is unreachable
-in-container (502). Split into `-p no:playwright` and playwright-only
-invocations before reading anything into its numbers.
-
-### 9. No single token works on both planes (cross-plane contract)
-
-The dataplane now accepts control-plane admin tokens (rs#51 + rs#54),
-but the inverse still fails: a dataplane-scoped token is rejected by
-control-plane admin REST ("Access denied") — why `cf-jwt.py` keeps its
-`--admin` flag.
+Dataplane accepts control-plane admin tokens (rs#51 + rs#54); the
+inverse still fails (dataplane-scoped token rejected by control-plane
+admin REST) — why `cf-jwt.py` keeps `--admin`.
 
 ## Expected next state
 
-- IBM#5482 + IBM#5510 merges (the `user/luca/dataplane-integration-fixes`
-  feature branch is their combined, verified state) and rs#54 merge +
-  republished image → these numbers on stock pulls.
-- Dataplane tool-naming fix (issue 1) → live-protocol green except the
-  fixture race (issue 2).
-- Issue 2 fix → live-protocol green.
-- Issue 3 fix → live-rbac green.
-- Issue 8 split → live-all numbers become meaningful.
+- Open PR set merges (+ rs#54 image) → these numbers on stock pulls.
+- Issue 1 (dataplane naming) → live-protocol green; live-all failures
+  down to issues 3/4.
+- Issue 2 fix → live-rbac green.
