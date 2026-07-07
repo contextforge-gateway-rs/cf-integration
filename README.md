@@ -83,8 +83,9 @@ scripts/cf-integration.sh test-all
 To start/update the stack and run the same report lanes in one command:
 
 ```bash
-scripts/cf-integration.sh test-all-up       # no full locust lane
-scripts/cf-integration.sh test-all-up-load  # includes full locust lane
+scripts/cf-integration.sh test-all-up            # no full locust lane
+scripts/cf-integration.sh test-all-up-load       # includes full locust lane
+scripts/cf-integration.sh test-all-up-no-plugins # also deselects tests/live_gateway/plugins
 ```
 
 These commands stream stack startup output, then print colored section headers
@@ -178,6 +179,7 @@ scripts/cf-integration.sh token
 scripts/cf-integration.sh probe
 scripts/cf-integration.sh test-all-up
 scripts/cf-integration.sh test-all-up-load
+scripts/cf-integration.sh test-all-up-no-plugins
 scripts/cf-integration.sh down
 ```
 

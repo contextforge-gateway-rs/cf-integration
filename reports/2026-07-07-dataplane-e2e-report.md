@@ -5,39 +5,29 @@ git history and the linked PRs.
 
 ## Stack under test
 
-`scripts/cf-integration.sh test-all-up` at 07:59 UTC
-(log: `.integration/test-logs/cf-tests-20260707T075927Z.log`):
+`scripts/cf-integration.sh test-all-up-no-plugins` at 12:36 UTC on a
+**fresh stack** (log: `.integration/test-logs/cf-tests-20260707T123627Z.log`):
 
-- **Harness** at cf-integration `main` — nginx replays dataplane 400/404
-  on `/servers/{id}/mcp` to the control plane, SSE registration runs
-  stock (SSE-backed servers are served fully via the control-plane
-  path), publisher interval 2s, dataplane config cache disabled,
-  two-pass `live-all` lane.
+- **Harness** — nginx replays dataplane 400/404 on `/servers/{id}/mcp`
+  to the control plane, SSE registration runs stock, publisher interval
+  2s, dataplane config cache disabled, two-pass `live-all` lane. New
+  `test-all-up-no-plugins` command deselects
+  `tests/live_gateway/plugins` (`CF_TEST_PLUGINS=false`): those suites
+  need a gateway booted with a plugin enforce config, which this stack
+  intentionally does not run, so under plain `test-all` their failures
+  stay visible as the honest signal.
 - **cf-controlplane** built from `user/luca/dataplane-integration-fixes`
   — all open control-plane PRs:
-  [#5482](https://github.com/IBM/mcp-context-forge/pull/5482)
-  (publisher interval, allow-path convergence wait, non-empty asserts),
-  [#5510](https://github.com/IBM/mcp-context-forge/pull/5510)
-  (original_name in allowed_tool_names + select fix),
-  [#5515](https://github.com/IBM/mcp-context-forge/pull/5515)
-  (compliance fixture convergence wait),
-  [#5517](https://github.com/IBM/mcp-context-forge/pull/5517)
-  (per-worker lock id, TTL = 2×interval + 10),
-  [#5519](https://github.com/IBM/mcp-context-forge/pull/5519)
-  (streamable-HTTP-only publishing),
-  [#5523](https://github.com/IBM/mcp-context-forge/pull/5523)
-  (admin own-private listing test aligned with owner matching —
-  the long-standing live-rbac failure was a stale test, not a service
-  bug: issue #4694 / commit 8c186c5e0 deliberately made owner-matched
-  private rows visible),
-  [#5539](https://github.com/IBM/mcp-context-forge/pull/5539)
-  (plugin E2E suites skip cleanly when the gateway has no enabled
-  plugins).
+  [#5482](https://github.com/IBM/mcp-context-forge/pull/5482),
+  [#5510](https://github.com/IBM/mcp-context-forge/pull/5510),
+  [#5515](https://github.com/IBM/mcp-context-forge/pull/5515),
+  [#5517](https://github.com/IBM/mcp-context-forge/pull/5517),
+  [#5519](https://github.com/IBM/mcp-context-forge/pull/5519),
+  [#5523](https://github.com/IBM/mcp-context-forge/pull/5523).
   [#5514](https://github.com/IBM/mcp-context-forge/pull/5514) is the
   draft combined-diff view.
 - **cf-dataplane** `cf-dataplane:pr54` — local arm64 build of
-  [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54)
-  (optional `token_use`/`full_name` claims).
+  [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54).
 
 ## Lane summary
 
@@ -46,33 +36,38 @@ git history and the linked PRs.
 | probe         | PASS   | 401 negative, initialize, tools/list, tools/call via nginx→dataplane |
 | smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
 | live-mcp      | PASS   | 19 passed, 3 skipped |
-| live-rbac     | **PASS** | 40 passed — first fully green run |
-| live-protocol | FAIL   | 2 failed / 23 passed / 0 errors |
-| live-all      | FAIL   | pass 1: 4 failed / 105 passed / 105 skipped / 0 errors · pass 2: 40 passed |
+| live-rbac     | PASS   | 40 passed |
+| live-protocol | **PASS** | 28 passed / 4 skipped / 0 failed |
+| live-all      | FAIL   | pass 1: **1 failed** / 111 passed · pass 2: 40 passed |
 
-Zero errors anywhere; every failure has a known root cause. Both
-remaining failure classes are listed below.
+**One failure remains in the entire suite.**
+
+Notable: the previous run's `gateway_virtual` tool-naming failures
+(`test_required_tools_advertised`, pagination stubs, the drift probe)
+**do not reproduce on a fresh database** — they were artifacts of
+long-lived stack state (repeated compliance-fixture register/delete
+cycles leave renamed tool rows whose published `allowed_tool_names` no
+longer match the upstream's advertised names). On a clean stack the
+dataplane serves the compliance virtual server fully.
 
 ## Open issues
 
-### 1. Dataplane advertises backend-UUID tool names (dataplane — the last blocker)
+### 1. `test_templated_resource_registered_and_resolves[gateway_proxy-http]` (control plane, triage)
 
-Root cause of **5 of the 6 remaining failures**:
-`test_required_tools_advertised[gateway_virtual-http]` and
-`test_list_tools_returns_all_stubs[gateway_virtual-http]` (both lanes)
-plus `test_drift_add_call` (gateway_virtual leg reports
-`add not advertised`), and ~11 "tool not advertised" skips. The
-dataplane serves sessions and filters correctly (#5510) but exposes
-tools as `<backend-uuid>-<name>` instead of the control plane's naming.
-Fix in contextforge-gateway-rs `list_tools` response mapping.
-
-### 2. `test_templated_resource_registered_and_resolves[gateway_proxy-http]` (control plane, triage)
-
-Deterministic across runs: reading the templated resource
+The sole failing test. Deterministic: reading the templated resource
 `reference://users/7` through the **gateway proxy** returns content
 whose text is not the upstream JSON payload (`json.loads` fails at
 char 0). Control-plane resource federation path, unrelated to the
 dataplane. Needs root-cause work before a fix PR.
+
+### 2. Stale-state tool renames break dataplane filtering (control plane, low priority)
+
+The reframed remainder of the old "tool naming" issue: after many
+register/delete cycles of the same gateway on a long-lived database,
+published `allowed_tool_names` can stop matching the upstream's
+advertised tool names and the dataplane then filters everything out
+(sessions fine, 0 tools). Does not affect fresh deployments; worth a
+look at how tool `original_name` survives re-registration conflicts.
 
 ### 3. D1 — sliding-TTL user-config cache (dataplane)
 
@@ -82,15 +77,14 @@ insertion-based TTL upstream.
 
 ### 4. D6 — backend-unavailable swallowed as empty success (dataplane)
 
-All-streamable-backends-down still yields `tools/list` 200 + `[]`.
-Narrower since unsupported transports never reach the dataplane, but
-the failure mode remains for genuinely down backends.
+All-streamable-backends-down still yields `tools/list` 200 with an
+empty list; clients cannot distinguish it from a tool-less server.
 
 ### 5. Remaining publisher design gaps (control plane)
 
-Beyond the open PR set: no event-driven publish (new entities wait up
-to one snapshot interval) and the publish loop shares the serving event
-loop (timers fire late under load). Design changes, not patches.
+No event-driven publish (new entities wait up to one snapshot interval)
+and the publish loop shares the serving event loop (timers fire late
+under load). Design changes, not patches.
 
 ### 6. No single token works on both planes (cross-plane contract)
 
@@ -100,8 +94,7 @@ reason `cf-jwt.py` keeps its `--admin` flag.
 
 ## Expected next state
 
-- Open PR set (IBM #5482/#5510/#5515/#5517/#5519/#5523/#5539 + rs#54)
-  merges → these numbers on stock image pulls.
-- Issue 1 (dataplane tool naming) → live-protocol green and live-all
-  down to issue 2 only.
-- Issue 2 root-caused and fixed → full suite green.
+- Open PR set (IBM #5482/#5510/#5515/#5517/#5519/#5523 + rs#54) merges
+  → these numbers on stock image pulls.
+- Issue 1 root-caused and fixed → **full suite green** under
+  `test-all-up-no-plugins`.

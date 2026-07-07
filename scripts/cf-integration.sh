@@ -361,6 +361,10 @@ Commands:
   test-all-up    Start/update the integration stack, then run test-all without locust
   test-all-up-load
                  Start/update the integration stack, then run test-all with full locust
+  test-all-up-no-plugins
+                 Same as test-all-up but deselects tests/live_gateway/plugins:
+                 those suites need a gateway booted with a plugin enforce
+                 config, which this stack does not run (CF_TEST_PLUGINS=false)
   controlplane-up        Start stock cf-controlplane testing stack without cf-dataplane overlays
   controlplane-down      Stop the stock cf-controlplane-only stack
   controlplane-ps        Show stock cf-controlplane-only services
@@ -522,11 +526,20 @@ run_cf_controlplane_make() {
 run_live_all() {
   ensure_checkout
   local rc=0
+  local pass1_ignores=(
+    --ignore=tests/live_gateway/sso
+    --ignore=tests/live_gateway/mcp/test_mcp_rbac_transport.py
+  )
+  # The plugin E2E suites need a gateway booted with a plugin enforce
+  # config; this stack runs without enabled plugins, so their failures are
+  # expected. CF_TEST_PLUGINS=false deselects them (test-all-up-no-plugins).
+  case "${CF_TEST_PLUGINS:-true}" in
+    false|0) pass1_ignores+=(--ignore=tests/live_gateway/plugins) ;;
+  esac
   (
     cd "$CF_CONTROLPLANE_DIR"
     uv run --extra plugins pytest -p no:playwright tests/live_gateway/ \
-      --ignore=tests/live_gateway/sso \
-      --ignore=tests/live_gateway/mcp/test_mcp_rbac_transport.py \
+      "${pass1_ignores[@]}" \
       -v --tb=short
   ) || rc=$?
   (
@@ -671,6 +684,13 @@ run_test_all_up_load() {
   print_section "Step 2/2: run report lanes with full locust"
   print_detail "Command: CF_TEST_ALL_LOCUST=true $0 test-all"
   CF_TEST_ALL_LOCUST=true "$0" test-all
+}
+
+run_test_all_up_no_plugins() {
+  run_stack_up_for_test_all
+  print_section "Step 2/2: run report lanes without locust and without plugin suites"
+  print_detail "Command: CF_TEST_ALL_LOCUST=false CF_TEST_PLUGINS=false $0 test-all"
+  CF_TEST_ALL_LOCUST=false CF_TEST_PLUGINS=false "$0" test-all
 }
 
 run_controlplane_up() {
@@ -878,6 +898,9 @@ EOF
     ;;
   test-all-up-load)
     run_test_all_up_load
+    ;;
+  test-all-up-no-plugins)
+    run_test_all_up_no_plugins
     ;;
   controlplane-up)
     run_controlplane_up
