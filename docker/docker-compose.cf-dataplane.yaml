@@ -21,6 +21,13 @@ services:
           - cf-controlplane
     environment:
       DATAPLANE_PUBLISHER: "true"
+      # Fresh databases bootstrap the admin with password_change_required,
+      # which 303-redirects every /admin/* route to an HTML page and breaks
+      # admin-API-driven test fixtures (e.g. the runtime-mode suite). The
+      # control-plane-only commands already disable enforcement; match them.
+      PASSWORD_CHANGE_ENFORCEMENT_ENABLED: ${PASSWORD_CHANGE_ENFORCEMENT_ENABLED:-false}
+      ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP: ${ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP:-false}
+      REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD: ${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}
       # Short snapshot interval so runtime-created users/servers reach the
       # dataplane quickly in functional runs; raise for load benchmarks.
       # Requires a control-plane image with configurable publisher interval;

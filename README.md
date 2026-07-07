@@ -12,7 +12,9 @@ The stack is the stock upstream `docker-compose.yml` (including its Fast Time im
 scripts/cf-integration.sh up
 ```
 
-The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
+The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
+
+All stack-starting commands fresh-bootstrap by default, including `up`, `up controlplane`, `test-all-up*`, and `controlplane-test-all`. Set `CF_FRESH_STACK=false` only when you intentionally want to keep existing database state.
 
 Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged. The dataplane will not implement SSE upstreams (the transport is deprecated and is removed in the 2026-07-28 MCP protocol update): the control-plane publisher exports streamable-HTTP backends only, SSE-backed virtual servers are therefore absent from dataplane config, and nginx replays their `/servers/{id}/mcp` requests on the control plane — SSE stays fully functional through the control-plane path. Requires a control-plane image with the streamable-only publisher change; older images publish SSE backends and the dataplane answers them with empty tool lists instead of falling back.
 
@@ -81,10 +83,10 @@ scripts/cf-integration.sh test-all
 `CF_TEST_ALL_LOCUST=true` appends the full Locust load run (default 100 users, 5m; `LOCUST_*` variables apply) as a final lane.
 
 To start the stack and run the same report lanes in one command. These
-commands **reset stack state first** (`down --volumes`, fresh database) so
-runs are reproducible — long-lived state has produced failures that do not
-exist on clean deployments; set `CF_FRESH_STACK=false` to keep existing
-state, or run `scripts/cf-integration.sh reset` manually:
+commands use the same fresh-bootstrap path as `up` so runs are reproducible —
+long-lived state has produced failures that do not exist on clean deployments;
+set `CF_FRESH_STACK=false` to keep existing state, or run
+`scripts/cf-integration.sh reset` manually:
 
 ```bash
 scripts/cf-integration.sh test-all-up            # no full locust lane
@@ -103,20 +105,19 @@ pytest/locust output to the timestamped log.
 Run the stock upstream `cf-controlplane` testing stack without the `cf-dataplane` service, nginx route override, integration MCP counter, or `DATAPLANE_PUBLISHER` overlay:
 
 ```bash
-scripts/cf-integration.sh down
 scripts/cf-integration.sh controlplane-test-all
 ```
 
-This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack, so stop the integration stack first. `controlplane-test-all` starts the stock testing stack, runs non-UI live gateway checks without SSO/playwright, then runs upstream `locustfile.py` with the non-UI Fast Time/Fast Test/health class subset. Output is logged under `.integration/test-logs/`.
+This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack. `controlplane-test-all` fresh-bootstraps first, starts the stock testing stack, runs non-UI live gateway checks without SSO/playwright, then runs upstream `locustfile.py` with the non-UI Fast Time/Fast Test/health class subset. Output is logged under `.integration/test-logs/`.
 
 Useful individual commands:
 
 ```bash
-scripts/cf-integration.sh controlplane-up
+scripts/cf-integration.sh up controlplane
 scripts/cf-integration.sh controlplane-live-core
 scripts/cf-integration.sh controlplane-live-all
 scripts/cf-integration.sh controlplane-locust
-scripts/cf-integration.sh controlplane-down
+scripts/cf-integration.sh down
 ```
 
 Set `CONTROLPLANE_ENABLE_SSO=true` only when explicitly validating SSO-dependent tests.
@@ -176,6 +177,7 @@ upstream defaults (60 and 60).
 ```bash
 scripts/cf-integration.sh checkout
 scripts/cf-integration.sh up
+scripts/cf-integration.sh up controlplane
 scripts/cf-integration.sh ps
 scripts/cf-integration.sh logs nginx cf-dataplane cf-controlplane
 scripts/cf-integration.sh config

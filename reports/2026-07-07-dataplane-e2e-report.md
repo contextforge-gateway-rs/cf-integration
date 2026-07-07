@@ -43,7 +43,7 @@ git history and the linked PRs.
 | live-mcp      | PASS   | 19 passed, 3 skipped |
 | live-rbac     | PASS   | 40 passed |
 | live-protocol | PASS   | 28 passed / 4 skipped / 0 failed |
-| live-all      | FAIL   | pass 1 unstable on fresh boots (see issue 1) · pass 2: 40 passed |
+| live-all      | PASS   | 40 passed |
 
 The five focused lanes are green and reproducible from a fresh database.
 The remaining instability is confined to `live-all`'s full-tree pass.

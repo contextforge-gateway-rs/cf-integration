@@ -66,6 +66,7 @@ controlplane_profiles=(--profile testing --profile inspector)
 case "${CONTROLPLANE_ENABLE_SSO:-false}" in
   true|1) controlplane_profiles+=(--profile sso) ;;
 esac
+all_stack_profiles=(--profile testing --profile inspector --profile sso)
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   bold=$'\033[1m'
@@ -342,9 +343,11 @@ Usage: $0 <command>
 
 Commands:
   checkout       Clone/update cf-controlplane into $CF_CONTROLPLANE_DIR
-  up             Checkout cf-controlplane and start cf-controlplane + nginx + cf-dataplane + integration MCP backend
-  down           Stop the integration stack
-  reset          Stop the integration stack and remove its volumes (fresh database)
+  up             Fresh-bootstrap and start cf-controlplane + nginx + cf-dataplane + integration MCP backend
+  up controlplane
+                 Fresh-bootstrap and start stock cf-controlplane testing stack without cf-dataplane overlays
+  down           Stop integration and control-plane-only stacks
+  reset          Stop both stacks and remove volumes (fresh database)
   ps             Show compose services
   logs [svc...]  Follow compose logs
   config         Render merged compose config
@@ -362,20 +365,18 @@ Commands:
   test-all-up    Reset stack state (fresh database; CF_FRESH_STACK=false to keep it),
                  start the integration stack, then run test-all without locust
   test-all-up-load
-                 Start/update the integration stack, then run test-all with full locust
+                 Fresh-bootstrap the integration stack, then run test-all with full locust
   test-all-up-no-plugins
                  Same as test-all-up but deselects tests/live_gateway/plugins:
                  those suites need a gateway booted with a plugin enforce
                  config, which this stack does not run (CF_TEST_PLUGINS=false)
-  controlplane-up        Start stock cf-controlplane testing stack without cf-dataplane overlays
-  controlplane-down      Stop the stock cf-controlplane-only stack
   controlplane-ps        Show stock cf-controlplane-only services
   controlplane-logs      Follow stock cf-controlplane-only logs
   controlplane-config    Render stock cf-controlplane-only compose config
   controlplane-live-core Run non-UI, non-SSO live gateway checks against controlplane-only stack
   controlplane-live-all  Run upstream tests/live_gateway against controlplane-only stack, including SSO/playwright
   controlplane-locust    Run upstream control-plane Locust file against controlplane-only stack
-  controlplane-test-all  Run controlplane-up, controlplane-live-core, and controlplane-locust with one log
+  controlplane-test-all  Run up controlplane, controlplane-live-core, and controlplane-locust with one log
 
 MCP_VIRTUAL_SERVER_ID defaults to the auto-registered Fast Time server:
   $FAST_TIME_SERVER_ID
@@ -393,6 +394,10 @@ CF-controlplane image:
 
 Integration MCP backend URL to add in cf-controlplane UI:
   http://cf-integration-mcp-counter:5555/mcp
+
+Fresh bootstrap:
+  up and up controlplane reset compose volumes by default.
+  Set CF_FRESH_STACK=false to keep existing database state.
 EOF
 }
 
@@ -480,6 +485,17 @@ integration_stack_running() {
   docker ps --format '{{.Names}}' | grep -q "^${PROJECT}-"
 }
 
+controlplane_stack_running() {
+  docker ps --format '{{.Names}}' | grep -q "^${CONTROLPLANE_PROJECT}-"
+}
+
+fresh_stack_enabled() {
+  case "${CF_FRESH_STACK:-true}" in
+    true|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_no_integration_stack() {
   if integration_stack_running; then
     cat >&2 <<EOF
@@ -487,9 +503,100 @@ The $PROJECT dataplane integration stack is running and uses the same host ports
 Stop it first:
   $0 down
 Then start the control-plane-only stack:
-  $0 controlplane-up
+  $0 up controlplane
 EOF
     return 2
+  fi
+}
+
+ensure_no_controlplane_stack() {
+  if controlplane_stack_running; then
+    cat >&2 <<EOF
+The $CONTROLPLANE_PROJECT control-plane-only stack is running and uses the same host ports.
+Stop it first:
+  $0 down
+Then start the integration stack:
+  $0 up
+EOF
+    return 2
+  fi
+}
+
+remove_compose_project_by_label() {
+  local project="$1"
+  local remove_volumes="${2:-false}"
+  local containers=()
+  local networks=()
+  local volumes=()
+  local container_ids network_ids volume_ids
+
+  container_ids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || return $?
+  if [[ -n "$container_ids" ]]; then
+    mapfile -t containers <<<"$container_ids"
+  fi
+  if ((${#containers[@]} > 0)); then
+    docker rm -f "${containers[@]}" >/dev/null
+  fi
+
+  network_ids="$(docker network ls -q --filter "label=com.docker.compose.project=$project")" || return $?
+  if [[ -n "$network_ids" ]]; then
+    mapfile -t networks <<<"$network_ids"
+  fi
+  if ((${#networks[@]} > 0)); then
+    docker network rm "${networks[@]}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$remove_volumes" == "true" ]]; then
+    volume_ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" || return $?
+    if [[ -n "$volume_ids" ]]; then
+      mapfile -t volumes <<<"$volume_ids"
+    fi
+    if ((${#volumes[@]} > 0)); then
+      docker volume rm "${volumes[@]}" >/dev/null
+    fi
+  fi
+}
+
+run_down() {
+  local rc=0
+
+  if [[ -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" ]]; then
+    compose "${all_stack_profiles[@]}" down --remove-orphans || rc=$?
+    controlplane_compose "${all_stack_profiles[@]}" down --remove-orphans || rc=$?
+  else
+    print_detail "cf-controlplane checkout missing; stopping known compose projects by label."
+  fi
+
+  remove_compose_project_by_label "$PROJECT" false || rc=$?
+  remove_compose_project_by_label "$CONTROLPLANE_PROJECT" false || rc=$?
+  return "$rc"
+}
+
+run_reset() {
+  local rc=0
+
+  if [[ -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" ]]; then
+    compose "${all_stack_profiles[@]}" down --volumes --remove-orphans || rc=$?
+    controlplane_compose "${all_stack_profiles[@]}" down --volumes --remove-orphans || rc=$?
+  else
+    print_detail "cf-controlplane checkout missing; stopping known compose projects by label."
+  fi
+
+  remove_compose_project_by_label "$PROJECT" true || rc=$?
+  remove_compose_project_by_label "$CONTROLPLANE_PROJECT" true || rc=$?
+  return "$rc"
+}
+
+bootstrap_fresh_database() {
+  local target="$1"
+
+  if fresh_stack_enabled; then
+    print_section "Fresh database bootstrap"
+    print_detail "Target: $target"
+    print_detail "Command: $0 reset"
+    run_reset
+  else
+    print_detail "CF_FRESH_STACK=false; keeping existing database state."
   fi
 }
 
@@ -694,21 +801,12 @@ wait_for_publisher_snapshot() {
 }
 
 run_stack_up_for_test_all() {
-  # Test runs start from a fresh database by default: long-lived stack state
-  # (e.g. repeated fixture register/delete cycles renaming tools) has produced
-  # failures that do not exist on a clean deployment. CF_FRESH_STACK=false
-  # keeps the previous incremental behavior.
-  case "${CF_FRESH_STACK:-true}" in
-    true|1)
-      print_section "Step 1/2: reset stack state (fresh database), then start"
-      print_detail "Command: $0 reset && $0 up"
-      "$0" reset
-      ;;
-    *)
-      print_section "Step 1/2: start or update integration stack (CF_FRESH_STACK=false)"
-      print_detail "Command: $0 up"
-      ;;
-  esac
+  if fresh_stack_enabled; then
+    print_section "Step 1/2: fresh-bootstrap and start integration stack"
+  else
+    print_section "Step 1/2: start or update integration stack (CF_FRESH_STACK=false)"
+  fi
+  print_detail "Command: $0 up"
   "$0" up
   wait_for_publisher_snapshot
 }
@@ -734,8 +832,29 @@ run_test_all_up_no_plugins() {
   CF_TEST_ALL_LOCUST=false CF_TEST_PLUGINS=false "$0" test-all
 }
 
+run_integration_up() {
+  ensure_checkout
+  bootstrap_fresh_database "integration stack"
+  ensure_no_controlplane_stack
+  local up_args=(-d)
+  if [[ "$CF_COMPOSE_BUILD" == "true" || "$CF_COMPOSE_BUILD" == "1" ]]; then
+    up_args+=(--build)
+  fi
+  pull_stack_images
+  compose up "${up_args[@]}"
+  print_info_box "Integration stack started." "$(cat <<EOF
+UI: http://localhost:${NGINX_PORT:-8080}/admin
+Login: admin@example.com / changeme
+CF-controlplane image: $CF_CONTROLPLANE_IMAGE
+CF-dataplane image: $CF_DATAPLANE_IMAGE
+CF-dataplane platform: $CF_DATAPLANE_PLATFORM
+EOF
+)"
+}
+
 run_controlplane_up() {
   ensure_checkout
+  bootstrap_fresh_database "control-plane-only stack"
   ensure_no_integration_stack
   mkdir -p "$CF_CONTROLPLANE_DIR/reports"
   export HOST_UID="${HOST_UID:-$(id -u 2>/dev/null || echo 1000)}"
@@ -766,11 +885,35 @@ CF-controlplane image: $CF_CONTROLPLANE_IMAGE
 No cf-dataplane service, no dataplane nginx routing override, no DATAPLANE_PUBLISHER overlay.
 
 Run:
+  $0 down
   $0 controlplane-live-core
   $0 controlplane-live-all
   $0 controlplane-locust
   $0 controlplane-test-all
 EOF
+}
+
+run_up() {
+  local target="${1:-integration}"
+
+  if [[ $# -gt 1 ]]; then
+    printf 'Usage: %s up [controlplane]\n' "$0" >&2
+    return 2
+  fi
+
+  case "$target" in
+    integration|dataplane)
+      run_integration_up
+      ;;
+    controlplane|control-plane|baseline)
+      run_controlplane_up
+      ;;
+    *)
+      printf 'Unknown up target: %s\n\n' "$target" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
 }
 
 run_controlplane_live_core() {
@@ -827,14 +970,21 @@ run_controlplane_test_all() {
   local log_dir="${CF_TEST_LOG_DIR:-$INTEGRATION_DIR/test-logs}"
   mkdir -p "$log_dir"
   local log_file="$log_dir/controlplane-only-$(date -u +%Y%m%dT%H%M%SZ).log"
-  local lanes=(controlplane-up controlplane-live-core controlplane-locust)
+  local lanes=("up controlplane" controlplane-live-core controlplane-locust)
   local results=() rc lane failed=0
 
   for lane in "${lanes[@]}"; do
     echo "Running $lane..."
     printf '===== BEGIN %s %s =====\n' "$lane" "$(date -u +%FT%TZ)" >>"$log_file"
     rc=0
-    "$0" "$lane" >>"$log_file" 2>&1 || rc=$?
+    case "$lane" in
+      "up controlplane")
+        "$0" up controlplane >>"$log_file" 2>&1 || rc=$?
+        ;;
+      *)
+        "$0" "$lane" >>"$log_file" 2>&1 || rc=$?
+        ;;
+    esac
     if [[ $rc -eq 0 ]]; then
       results+=("PASS $lane")
     else
@@ -865,28 +1015,14 @@ case "${1:-}" in
     ensure_checkout
     ;;
   up)
-    ensure_checkout
-    up_args=(-d)
-    if [[ "$CF_COMPOSE_BUILD" == "true" || "$CF_COMPOSE_BUILD" == "1" ]]; then
-      up_args+=(--build)
-    fi
-    pull_stack_images
-    compose up "${up_args[@]}"
-    print_info_box "Integration stack started." "$(cat <<EOF
-UI: http://localhost:${NGINX_PORT:-8080}/admin
-Login: admin@example.com / changeme
-CF-controlplane image: $CF_CONTROLPLANE_IMAGE
-CF-dataplane image: $CF_DATAPLANE_IMAGE
-CF-dataplane platform: $CF_DATAPLANE_PLATFORM
-EOF
-)"
+    shift
+    run_up "$@"
     ;;
   down)
-    compose down --remove-orphans
+    run_down
     ;;
   reset)
-    ensure_checkout
-    compose down --volumes --remove-orphans
+    run_reset
     ;;
   ps)
     compose ps
@@ -948,11 +1084,12 @@ EOF
     run_test_all_up_no_plugins
     ;;
   controlplane-up)
+    # Backward-compatible alias; prefer: up controlplane.
     run_controlplane_up
     ;;
   controlplane-down)
-    ensure_checkout
-    controlplane_compose "${controlplane_profiles[@]}" down --remove-orphans
+    # Backward-compatible alias; prefer: down.
+    run_down
     ;;
   controlplane-ps)
     ensure_checkout
