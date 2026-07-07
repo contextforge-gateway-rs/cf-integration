@@ -344,6 +344,7 @@ Commands:
   checkout       Clone/update cf-controlplane into $CF_CONTROLPLANE_DIR
   up             Checkout cf-controlplane and start cf-controlplane + nginx + cf-dataplane + integration MCP backend
   down           Stop the integration stack
+  reset          Stop the integration stack and remove its volumes (fresh database)
   ps             Show compose services
   logs [svc...]  Follow compose logs
   config         Render merged compose config
@@ -358,7 +359,8 @@ Commands:
   test-all       Run every lane (probe smoke live-mcp live-rbac live-protocol live-all)
                  with lane sections, per-test result rows, and full output logs;
                  CF_TEST_ALL_LOCUST=true appends the full locust load run
-  test-all-up    Start/update the integration stack, then run test-all without locust
+  test-all-up    Reset stack state (fresh database; CF_FRESH_STACK=false to keep it),
+                 start the integration stack, then run test-all without locust
   test-all-up-load
                  Start/update the integration stack, then run test-all with full locust
   test-all-up-no-plugins
@@ -666,10 +668,49 @@ run_test_all() {
   return "$failed"
 }
 
+wait_for_publisher_snapshot() {
+  # On a fresh database the first publisher snapshot and the admin app warmup
+  # land seconds after `up` returns; lanes that start immediately race them
+  # (the scoped-token probe then lands on the control-plane fallback, which
+  # denies tools/call). Wait until dataplane config exists in Redis.
+  local timeout="${CF_PUBLISHER_WAIT_SECONDS:-90}"
+  local deadline=$((SECONDS + timeout))
+  print_detail "Waiting for a publisher snapshot containing the Fast Time virtual server (max ${timeout}s)..."
+  # Key existence is not enough: the gateway's very first snapshot on a fresh
+  # boot can run before the registration jobs finish and publish an empty
+  # config (virtual_hosts = 0). Require the Fast Time vhost id inside the
+  # payload so lanes start against real dataplane config.
+  while ((SECONDS < deadline)); do
+    if docker exec "${PROJECT}-redis-1" redis-cli EVAL \
+        "for _,k in ipairs(redis.call('KEYS','*UserConfig*')) do if string.find(redis.call('GET',k), ARGV[1], 1, true) then return 1 end end return 0" \
+        0 "$FAST_TIME_SERVER_ID" 2>/dev/null | grep -q '^1$'; then
+      print_detail "Dataplane config with Fast Time server present in Redis."
+      return 0
+    fi
+    sleep 2
+  done
+  print_detail "WARNING: Fast Time server not in dataplane config after ${timeout}s; lanes may hit the control-plane fallback."
+  return 0
+}
+
 run_stack_up_for_test_all() {
-  print_section "Step 1/2: start or update integration stack"
-  print_detail "Command: $0 up"
+  # Test runs start from a fresh database by default: long-lived stack state
+  # (e.g. repeated fixture register/delete cycles renaming tools) has produced
+  # failures that do not exist on a clean deployment. CF_FRESH_STACK=false
+  # keeps the previous incremental behavior.
+  case "${CF_FRESH_STACK:-true}" in
+    true|1)
+      print_section "Step 1/2: reset stack state (fresh database), then start"
+      print_detail "Command: $0 reset && $0 up"
+      "$0" reset
+      ;;
+    *)
+      print_section "Step 1/2: start or update integration stack (CF_FRESH_STACK=false)"
+      print_detail "Command: $0 up"
+      ;;
+  esac
   "$0" up
+  wait_for_publisher_snapshot
 }
 
 run_test_all_up() {
@@ -842,6 +883,10 @@ EOF
     ;;
   down)
     compose down --remove-orphans
+    ;;
+  reset)
+    ensure_checkout
+    compose down --volumes --remove-orphans
     ;;
   ps)
     compose ps

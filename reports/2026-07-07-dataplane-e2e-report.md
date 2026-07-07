@@ -5,17 +5,22 @@ git history and the linked PRs.
 
 ## Stack under test
 
-`scripts/cf-integration.sh test-all-up-no-plugins` at 12:36 UTC on a
-**fresh stack** (log: `.integration/test-logs/cf-tests-20260707T123627Z.log`):
+`scripts/cf-integration.sh test-all-up-no-plugins` at 12:56 UTC
+(log: `.integration/test-logs/cf-tests-20260707T125640Z.log`):
 
-- **Harness** — nginx replays dataplane 400/404 on `/servers/{id}/mcp`
-  to the control plane, SSE registration runs stock, publisher interval
-  2s, dataplane config cache disabled, two-pass `live-all` lane. New
-  `test-all-up-no-plugins` command deselects
-  `tests/live_gateway/plugins` (`CF_TEST_PLUGINS=false`): those suites
-  need a gateway booted with a plugin enforce config, which this stack
-  intentionally does not run, so under plain `test-all` their failures
-  stay visible as the honest signal.
+- **Harness** — `test-all-up*` commands now **reset stack state first**
+  (`reset` = `down --volumes`; `CF_FRESH_STACK=false` opts out) so every
+  run starts from a fresh database, then wait for a publisher snapshot
+  **containing the Fast Time virtual server** before running lanes.
+  Key-existence alone is not enough: the gateway's very first snapshot
+  on a fresh boot runs before the registration jobs finish and publishes
+  an empty config (`virtual_hosts = 0`), which sent the scoped-token
+  probe through the nginx fallback to the control plane, where
+  `tools/call` is denied. Plus the established pieces: nginx 400/404
+  replay to the control plane, stock SSE registration, 2s publisher,
+  dataplane cache disabled, two-pass `live-all`, plugin suites
+  deselected via `CF_TEST_PLUGINS=false` (their failures stay visible
+  under plain `test-all` by design).
 - **cf-controlplane** built from `user/luca/dataplane-integration-fixes`
   — all open control-plane PRs:
   [#5482](https://github.com/IBM/mcp-context-forge/pull/5482),
@@ -29,7 +34,7 @@ git history and the linked PRs.
 - **cf-dataplane** `cf-dataplane:pr54` — local arm64 build of
   [contextforge-gateway-rs #54](https://github.com/contextforge-gateway-rs/contextforge-gateway-rs/pull/54).
 
-## Lane summary
+## Lane summary (fresh stack, reproducible)
 
 | Lane          | Result | Detail |
 |---------------|--------|--------|
@@ -37,37 +42,44 @@ git history and the linked PRs.
 | smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
 | live-mcp      | PASS   | 19 passed, 3 skipped |
 | live-rbac     | PASS   | 40 passed |
-| live-protocol | **PASS** | 28 passed / 4 skipped / 0 failed |
-| live-all      | FAIL   | pass 1: **1 failed** / 111 passed · pass 2: 40 passed |
+| live-protocol | PASS   | 28 passed / 4 skipped / 0 failed |
+| live-all      | FAIL   | pass 1 unstable on fresh boots (see issue 1) · pass 2: 40 passed |
 
-**One failure remains in the entire suite.**
-
-Notable: the previous run's `gateway_virtual` tool-naming failures
-(`test_required_tools_advertised`, pagination stubs, the drift probe)
-**do not reproduce on a fresh database** — they were artifacts of
-long-lived stack state (repeated compliance-fixture register/delete
-cycles leave renamed tool rows whose published `allowed_tool_names` no
-longer match the upstream's advertised names). On a clean stack the
-dataplane serves the compliance virtual server fully.
+The five focused lanes are green and reproducible from a fresh database.
+The remaining instability is confined to `live-all`'s full-tree pass.
 
 ## Open issues
 
-### 1. `test_templated_resource_registered_and_resolves[gateway_proxy-http]` (control plane, triage)
+### 1. live-all pass 1 is unstable on fresh boots (upstream test coupling, triage)
 
-The sole failing test. Deterministic: reading the templated resource
-`reference://users/7` through the **gateway proxy** returns content
-whose text is not the upstream JSON payload (`json.loads` fails at
-char 0). Control-plane resource federation path, unrelated to the
-dataplane. Needs root-cause work before a fix PR.
+Running the whole `protocol_compliance` tree in one session produces
+failures that the same tests do not show in the focused lanes minutes
+apart on the same stack:
 
-### 2. Stale-state tool renames break dataplane filtering (control plane, low priority)
+- **`test_runtime_mode.py`: 9 errors + 2 failures.** The suite's fixture
+  gets HTTP 200 with a non-JSON body from `/admin/runtime/mcp-mode`
+  (JSON decode error instead of the suite's clean skip). On the
+  long-lived pre-reset stack these tests skipped; on fresh boots they
+  error. The suite also live-flips the gateway's runtime mode mid-run,
+  which is state other rows may observe.
+- **`gateway_virtual` rows (`test_required_tools_advertised`, pagination
+  stubs) and `test_drift_*`** fail in the full-tree pass while the
+  identical rows pass in the `live-protocol` lane in the same run —
+  test-session coupling, not a per-test defect. Earlier reports
+  attributed these rows to dataplane tool naming and then to stale DB
+  state; the full-tree coupling is the consistent explanation for their
+  flip-flopping.
 
-The reframed remainder of the old "tool naming" issue: after many
-register/delete cycles of the same gateway on a long-lived database,
-published `allowed_tool_names` can stop matching the upstream's
-advertised tool names and the dataplane then filters everything out
-(sessions fine, 0 tools). Does not affect fresh deployments; worth a
-look at how tool `original_name` survives re-registration conflicts.
+Needs upstream triage: isolate what state the full-tree session carries
+between suites (runtime-mode flips, shared reference upstream, session
+caches) before trusting pass 1 as a signal beyond the focused lanes.
+
+### 2. `test_templated_resource_registered_and_resolves[gateway_proxy-http]` (control plane, triage)
+
+Deterministic in every run: reading the templated resource
+`reference://users/7` through the gateway proxy returns content whose
+text is not the upstream JSON payload. Control-plane resource
+federation path, unrelated to the dataplane.
 
 ### 3. D1 — sliding-TTL user-config cache (dataplane)
 
@@ -80,11 +92,13 @@ insertion-based TTL upstream.
 All-streamable-backends-down still yields `tools/list` 200 with an
 empty list; clients cannot distinguish it from a tool-less server.
 
-### 5. Remaining publisher design gaps (control plane)
+### 5. Remaining publisher gaps (control plane)
 
-No event-driven publish (new entities wait up to one snapshot interval)
-and the publish loop shares the serving event loop (timers fire late
-under load). Design changes, not patches.
+The empty first snapshot on boot (see harness notes above) is the same
+family as the other publisher gaps: no event-driven publish, no
+registration-aware first snapshot, and the loop shares the serving
+event loop. The harness now waits for real content; a product fix
+belongs upstream.
 
 ### 6. No single token works on both planes (cross-plane contract)
 
@@ -95,6 +109,8 @@ reason `cf-jwt.py` keeps its `--admin` flag.
 ## Expected next state
 
 - Open PR set (IBM #5482/#5510/#5515/#5517/#5519/#5523 + rs#54) merges
-  → these numbers on stock image pulls.
-- Issue 1 root-caused and fixed → **full suite green** under
-  `test-all-up-no-plugins`.
+  → the five focused lanes green on stock pulls, reproducibly.
+- Issue 2 fixed → focused-lane picture fully green including the
+  gateway-proxy resource row.
+- Issue 1 triaged → live-all pass 1 becomes a trustworthy superset
+  instead of a coupled full-tree run.

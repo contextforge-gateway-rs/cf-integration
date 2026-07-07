@@ -80,7 +80,11 @@ scripts/cf-integration.sh test-all
 
 `CF_TEST_ALL_LOCUST=true` appends the full Locust load run (default 100 users, 5m; `LOCUST_*` variables apply) as a final lane.
 
-To start/update the stack and run the same report lanes in one command:
+To start the stack and run the same report lanes in one command. These
+commands **reset stack state first** (`down --volumes`, fresh database) so
+runs are reproducible — long-lived state has produced failures that do not
+exist on clean deployments; set `CF_FRESH_STACK=false` to keep existing
+state, or run `scripts/cf-integration.sh reset` manually:
 
 ```bash
 scripts/cf-integration.sh test-all-up            # no full locust lane
