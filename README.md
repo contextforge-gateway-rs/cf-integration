@@ -135,9 +135,13 @@ CF_CONTROLPLANE_REPO=<control-plane-git-url>
 CF_CONTROLPLANE_REF=main
 CF_CONTROLPLANE_IMAGE=mcpgateway/mcpgateway:latest
 CF_CONTROLPLANE_VERSION=latest
+CF_DATAPLANE_REPO=https://github.com/contextforge-gateway-rs/contextforge-gateway-rs.git
+CF_DATAPLANE_REF=
+CF_DATAPLANE_DIR=.integration/contextforge-gateway-rs
+CF_DATAPLANE_LOCAL_IMAGE=contextforge-gateway-rs/contextforge-gateway-rs:local
 CF_DATAPLANE_IMAGE=ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:<tag>
 CF_DATAPLANE_VERSION=0.1.0
-CF_DATAPLANE_PLATFORM=linux/amd64
+CF_DATAPLANE_PLATFORM=auto
 CF_COMPOSE_BUILD=auto
 CF_INTEGRATION_DIR=.integration
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
@@ -146,7 +150,7 @@ CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0
 NGINX_PORT=8080
 ```
 
-`CF_COMPOSE_BUILD` defaults to `auto`: when using the default local control-plane image tag, the script compares the image's `org.opencontainers.image.revision` label with the checked-out `CF_CONTROLPLANE_REF` commit and passes `--build` when the image is missing or stale. Harness-built control-plane images are stamped with the checkout revision and ref so the next run can skip the build, and repeated `up` can skip compose entirely when the running stack already matches. Set `CF_COMPOSE_BUILD=false` to force image reuse, or `CF_COMPOSE_BUILD=true` to always build. Explicit `CF_CONTROLPLANE_IMAGE` or `IMAGE_LOCAL` overrides disable auto-build unless `CF_COMPOSE_BUILD=true` is also set.
+`CF_COMPOSE_BUILD` defaults to `auto`: when using the default local control-plane image tag, the script compares the image's `org.opencontainers.image.revision` label with the checked-out `CF_CONTROLPLANE_REF` commit and passes `--build` when the image is missing or stale. If `CF_DATAPLANE_REF` is set, the same revision-label check is applied to the local dataplane image. Harness-built images are stamped with checkout revision and ref so the next run can skip the build, and repeated `up` can skip compose entirely when the running stack already matches. Set `CF_COMPOSE_BUILD=false` to force image reuse, or `CF_COMPOSE_BUILD=true` to always build. Explicit `CF_CONTROLPLANE_IMAGE` or `IMAGE_LOCAL` overrides disable control-plane auto-build unless `CF_COMPOSE_BUILD=true` is also set.
 
 The upstream gateway sizing knobs (`GATEWAY_REPLICAS`, `GATEWAY_CPU_LIMIT`, `GATEWAY_CPU_RESERVATION`, `GATEWAY_MEM_LIMIT`, `GATEWAY_MEM_RESERVATION`, `GUNICORN_WORKERS`) are defaulted to fit the local Docker engine (upstream assumes a large CI host); override them to match upstream sizing on bigger hardware.
 
@@ -165,6 +169,14 @@ ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:${CF_DATAPLANE_VERSION:-
 ```
 
 GHCR currently publishes only `0.1.0` for the dataplane; there is no `latest` tag.
+
+To test a dataplane branch instead of the published image, set `CF_DATAPLANE_REF`:
+
+```bash
+CF_DATAPLANE_REF=user/luca/cp-parity-tool-names ./scripts/cf-integration.sh up
+```
+
+When `CF_DATAPLANE_REF` is set and `CF_DATAPLANE_IMAGE` is unset, the script checks out `CF_DATAPLANE_REPO` under `CF_DATAPLANE_DIR`, builds `CF_DATAPLANE_LOCAL_IMAGE`, stamps the image with `org.opencontainers.image.ref.name` and `org.opencontainers.image.revision`, and prints both the checkout and image revision in the `up` summary. `CF_DATAPLANE_PLATFORM=auto` uses `linux/amd64` for published images and the Docker server platform for local source builds; set an explicit platform to override that.
 
 Config propagation defaults are tuned for functional runs: the overlay sets the
 control-plane publisher snapshot interval to 2s

@@ -47,18 +47,51 @@ load_env_file() {
 load_env_file
 
 default_dataplane_image() {
-  # GHCR currently publishes only 0.1.0 (no latest tag); keep the default pinned.
-  printf 'ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:%s\n' "${CF_DATAPLANE_VERSION:-0.1.0}"
+  if [[ -n "${CF_DATAPLANE_REF:-}" ]]; then
+    printf '%s\n' "${CF_DATAPLANE_LOCAL_IMAGE:-contextforge-gateway-rs/contextforge-gateway-rs:local}"
+  else
+    # GHCR currently publishes only 0.1.0 (no latest tag); keep the default pinned.
+    printf 'ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:%s\n' "${CF_DATAPLANE_VERSION:-0.1.0}"
+  fi
 }
 
 default_controlplane_image() {
   printf 'mcpgateway/mcpgateway:%s\n' "${CF_CONTROLPLANE_VERSION:-latest}"
 }
 
-INTEGRATION_DIR="${CF_INTEGRATION_DIR:-"$ROOT/.integration"}"
-CF_CONTROLPLANE_DIR="${CF_CONTROLPLANE_DIR:-"$INTEGRATION_DIR/mcp-context-forge"}"
+docker_server_platform() {
+  local platform
+
+  platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || true)"
+  if [[ -n "$platform" ]]; then
+    printf '%s\n' "$platform"
+  else
+    printf 'linux/amd64\n'
+  fi
+}
+
+default_dataplane_platform() {
+  if [[ -n "${CF_DATAPLANE_REF:-}" ]]; then
+    docker_server_platform
+  else
+    printf 'linux/amd64\n'
+  fi
+}
+
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$ROOT" "$1" ;;
+  esac
+}
+
+INTEGRATION_DIR="$(absolute_path "${CF_INTEGRATION_DIR:-"$ROOT/.integration"}")"
+CF_CONTROLPLANE_DIR="$(absolute_path "${CF_CONTROLPLANE_DIR:-"$INTEGRATION_DIR/mcp-context-forge"}")"
 CF_CONTROLPLANE_REPO="${CF_CONTROLPLANE_REPO:-https://github.com/IBM/mcp-context-forge.git}"
 CF_CONTROLPLANE_REF="${CF_CONTROLPLANE_REF:-main}"
+CF_DATAPLANE_DIR="$(absolute_path "${CF_DATAPLANE_DIR:-"$INTEGRATION_DIR/contextforge-gateway-rs"}")"
+CF_DATAPLANE_REPO="${CF_DATAPLANE_REPO:-https://github.com/contextforge-gateway-rs/contextforge-gateway-rs.git}"
+CF_DATAPLANE_REF="${CF_DATAPLANE_REF:-}"
 PROJECT="${CF_INTEGRATION_PROJECT:-cf-integration}"
 CONTROLPLANE_PROJECT="${CF_CONTROLPLANE_PROJECT:-cf-controlplane-only}"
 JWT_SECRET_KEY="${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}"
@@ -73,9 +106,17 @@ if [[ -n "${IMAGE_LOCAL+x}" && "${CF_INTERNAL_IMAGE_LOCAL:-}" != "1" ]]; then
 else
   IMAGE_LOCAL_WAS_SET=""
 fi
+if [[ -n "${CF_DATAPLANE_IMAGE+x}" && "${CF_INTERNAL_DATAPLANE_IMAGE:-}" != "1" ]]; then
+  CF_DATAPLANE_IMAGE_WAS_SET=1
+else
+  CF_DATAPLANE_IMAGE_WAS_SET=""
+fi
 CF_CONTROLPLANE_IMAGE="${CF_CONTROLPLANE_IMAGE:-${IMAGE_LOCAL:-$(default_controlplane_image)}}"
 CF_DATAPLANE_IMAGE="${CF_DATAPLANE_IMAGE:-$(default_dataplane_image)}"
-CF_DATAPLANE_PLATFORM="${CF_DATAPLANE_PLATFORM:-linux/amd64}"
+CF_DATAPLANE_PLATFORM="${CF_DATAPLANE_PLATFORM:-auto}"
+if [[ "$CF_DATAPLANE_PLATFORM" == "auto" ]]; then
+  CF_DATAPLANE_PLATFORM="$(default_dataplane_platform)"
+fi
 CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-auto}"
 FAST_TIME_SERVER_ID="${CF_FAST_TIME_SERVER_ID:-9779b6698cbd4b4995ee04a4fab38737}"
 
@@ -95,8 +136,12 @@ if [[ -z "$CF_CONTROLPLANE_IMAGE_WAS_SET" ]]; then
   export CF_INTERNAL_CONTROLPLANE_IMAGE=1
 fi
 export CF_DATAPLANE_IMAGE
+if [[ -z "$CF_DATAPLANE_IMAGE_WAS_SET" ]]; then
+  export CF_INTERNAL_DATAPLANE_IMAGE=1
+fi
 export CF_DATAPLANE_PLATFORM
 export CF_CONTROLPLANE_DIR
+export CF_DATAPLANE_DIR
 export CF_INTEGRATION_DIR="$INTEGRATION_DIR"
 export IMAGE_LOCAL="$CF_CONTROLPLANE_IMAGE"
 if [[ -z "$IMAGE_LOCAL_WAS_SET" ]]; then
@@ -114,6 +159,10 @@ compose_args=(
   -f "$ROOT/docker/docker-compose.cf-dataplane.yaml"
   -f "$ROOT/docker/docker-compose.cf-integration.yaml"
 )
+
+if [[ -n "$CF_DATAPLANE_REF" ]]; then
+  compose_args+=(-f "$ROOT/docker/docker-compose.cf-dataplane-build.yaml")
+fi
 
 controlplane_compose_args=(
   -p "$CONTROLPLANE_PROJECT"
@@ -278,10 +327,10 @@ print_result_line() {
   local duration="$2"
   local name="$3"
   case "$status" in
-    PASS|XFAIL)
+    PASS|XFAIL|XPASS)
       printf '    %s%-5s%s [%7s] %s\n' "$green" "$status" "$reset" "$duration" "$name"
       ;;
-    FAIL|ERROR|XPASS)
+    FAIL|ERROR)
       printf '    %s%-5s%s [%7s] %s\n' "$red" "$status" "$reset" "$duration" "$name"
       ;;
     SKIP)
@@ -436,7 +485,7 @@ usage() {
 Usage: $0 <command>
 
 Commands:
-  checkout       Clone/update cf-controlplane into $CF_CONTROLPLANE_DIR
+  checkout       Clone/update cf-controlplane and configured cf-dataplane source checkouts
   up             Fresh-bootstrap and start cf-controlplane + nginx + cf-dataplane + integration MCP backend
   up controlplane
                  Fresh-bootstrap and start stock cf-controlplane testing stack without cf-dataplane overlays
@@ -482,6 +531,7 @@ UI:
 CF-dataplane image:
   $CF_DATAPLANE_IMAGE
   platform: $CF_DATAPLANE_PLATFORM
+  source ref: ${CF_DATAPLANE_REF:-published image mode}
 
 CF-controlplane image:
   $CF_CONTROLPLANE_IMAGE
@@ -513,6 +563,33 @@ ensure_checkout() {
   if [[ "$CF_CONTROLPLANE_REF" == "main" && $fetched -eq 1 ]]; then
     git -C "$CF_CONTROLPLANE_DIR" pull -q --ff-only origin main
   fi
+}
+
+dataplane_source_enabled() {
+  [[ -n "$CF_DATAPLANE_REF" ]]
+}
+
+ensure_dataplane_checkout() {
+  dataplane_source_enabled || return 0
+
+  mkdir -p "$INTEGRATION_DIR"
+  if [[ ! -d "$CF_DATAPLANE_DIR/.git" ]]; then
+    git clone -q "$CF_DATAPLANE_REPO" "$CF_DATAPLANE_DIR"
+  fi
+  local fetched=1
+  if ! git -C "$CF_DATAPLANE_DIR" fetch -q --prune --tags --force origin; then
+    fetched=0
+    echo "warning: fetch from $CF_DATAPLANE_REPO failed; using existing dataplane checkout" >&2
+  fi
+  git -C "$CF_DATAPLANE_DIR" checkout -q "$CF_DATAPLANE_REF"
+  if [[ "$CF_DATAPLANE_REF" == "main" && $fetched -eq 1 ]]; then
+    git -C "$CF_DATAPLANE_DIR" pull -q --ff-only origin main
+  fi
+}
+
+ensure_source_checkouts() {
+  ensure_checkout
+  ensure_dataplane_checkout
 }
 
 compose() {
@@ -580,7 +657,12 @@ pull_controlplane_image_if_needed() {
 
 pull_stack_images() {
   pull_controlplane_image_if_needed
-  pull_image_if_digest_changed "cf-dataplane" "$CF_DATAPLANE_IMAGE" "$CF_DATAPLANE_PLATFORM"
+  if dataplane_source_enabled; then
+    print_detail "cf-dataplane image: $CF_DATAPLANE_IMAGE"
+    print_detail "cf-dataplane sha check skipped; source checkout build image"
+  else
+    pull_image_if_digest_changed "cf-dataplane" "$CF_DATAPLANE_IMAGE" "$CF_DATAPLANE_PLATFORM"
+  fi
 }
 
 integration_stack_running() {
@@ -702,6 +784,15 @@ integration_stack_current() {
     fi
   fi
 
+  if dataplane_source_enabled; then
+    checkout_head="$(git -C "$CF_DATAPLANE_DIR" rev-parse HEAD)"
+    image_revision="$(compose_service_image_label "$PROJECT" cf-dataplane "org.opencontainers.image.revision")"
+    if [[ "$image_revision" != "$checkout_head" ]]; then
+      print_detail "Integration stack not current; cf-dataplane branch revision differs."
+      return 1
+    fi
+  fi
+
   return 0
 }
 
@@ -762,6 +853,35 @@ export_controlplane_checkout_env() {
   export CF_CONTROLPLANE_CHECKOUT_REF="${branch:-$CF_CONTROLPLANE_REF}"
 }
 
+dataplane_checkout_summary() {
+  local branch revision
+
+  if ! dataplane_source_enabled; then
+    printf 'disabled; published image mode\n'
+    return 0
+  fi
+
+  branch="$(git -C "$CF_DATAPLANE_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  revision="$(git -C "$CF_DATAPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+
+  if [[ -n "$branch" ]]; then
+    printf '%s @ %s\n' "$branch" "$(short_revision "$revision")"
+  else
+    printf 'detached @ %s\n' "$(short_revision "$revision")"
+  fi
+}
+
+export_dataplane_checkout_env() {
+  local branch revision
+
+  dataplane_source_enabled || return 0
+
+  branch="$(git -C "$CF_DATAPLANE_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  revision="$(git -C "$CF_DATAPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  export CF_DATAPLANE_CHECKOUT_REVISION="$revision"
+  export CF_DATAPLANE_CHECKOUT_REF="${branch:-$CF_DATAPLANE_REF}"
+}
+
 controlplane_runtime_summary() {
   local project="$1"
   local container_id image image_ref revision version checkout_head revision_status
@@ -802,10 +922,60 @@ controlplane_runtime_summary() {
   printf 'CF_COMPOSE_BUILD resolved: %s\n' "$CF_COMPOSE_BUILD"
 }
 
+dataplane_runtime_summary() {
+  local project="$1"
+  local container_id image image_ref revision version checkout_head revision_status
+
+  container_id="$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=cf-dataplane" \
+    | head -n 1)"
+
+  if [[ -z "$container_id" ]]; then
+    printf 'CF-dataplane runtime: cf-dataplane container not running\n'
+    return 0
+  fi
+
+  image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  revision="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+  image_ref="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.ref.name" }}' 2>/dev/null || true)"
+  version="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
+
+  if dataplane_source_enabled; then
+    checkout_head="$(git -C "$CF_DATAPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "$revision" ]]; then
+      revision_status="unknown; image has no revision label"
+    elif [[ "$revision" == "$checkout_head" ]]; then
+      revision_status="matches checkout"
+    else
+      revision_status="MISMATCH; checkout $(short_revision "$checkout_head")"
+    fi
+  else
+    revision_status="published image mode"
+  fi
+
+  printf 'CF-dataplane checkout: %s\n' "$(dataplane_checkout_summary)"
+  printf 'CF-dataplane image: %s\n' "${image:-unknown}"
+  printf 'CF-dataplane platform: %s\n' "$CF_DATAPLANE_PLATFORM"
+  if [[ -n "$image_ref" ]]; then
+    printf 'CF-dataplane image ref: %s\n' "$image_ref"
+  fi
+  if [[ -n "$revision" || dataplane_source_enabled ]]; then
+    printf 'CF-dataplane image revision: %s (%s)\n' "$(short_revision "$revision")" "$revision_status"
+  fi
+  if [[ -n "$version" ]]; then
+    printf 'CF-dataplane image version: %s\n' "$version"
+  fi
+}
+
 resolve_compose_build_mode() {
+  local include_dataplane="${1:-false}"
   local checkout_head image_revision
 
   export_controlplane_checkout_env
+  if [[ "$include_dataplane" == "true" ]]; then
+    export_dataplane_checkout_env
+  fi
 
   case "$CF_COMPOSE_BUILD" in
     true|1|false|0) return 0 ;;
@@ -817,26 +987,43 @@ resolve_compose_build_mode() {
   esac
 
   if [[ -n "$CF_CONTROLPLANE_IMAGE_WAS_SET" || -n "$IMAGE_LOCAL_WAS_SET" ]]; then
-    CF_COMPOSE_BUILD=false
     print_detail "CF_COMPOSE_BUILD=auto; explicit cf-controlplane image set, build disabled."
-    return 0
-  fi
-
-  checkout_head="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD)"
-  if ! docker image inspect "$CF_CONTROLPLANE_IMAGE" >/dev/null 2>&1; then
-    CF_COMPOSE_BUILD=true
-    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image missing, build enabled: $CF_CONTROLPLANE_IMAGE"
-    return 0
-  fi
-
-  image_revision="$(docker image inspect "$CF_CONTROLPLANE_IMAGE" \
-    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
-  if [[ "$image_revision" == "$checkout_head" ]]; then
-    CF_COMPOSE_BUILD=false
-    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image matches checkout, build disabled: $checkout_head"
   else
-    CF_COMPOSE_BUILD=true
-    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image is stale, build enabled: image=${image_revision:-unknown} checkout=$checkout_head"
+    checkout_head="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD)"
+    if ! docker image inspect "$CF_CONTROLPLANE_IMAGE" >/dev/null 2>&1; then
+      CF_COMPOSE_BUILD=true
+      print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image missing, build enabled: $CF_CONTROLPLANE_IMAGE"
+    else
+      image_revision="$(docker image inspect "$CF_CONTROLPLANE_IMAGE" \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+      if [[ "$image_revision" == "$checkout_head" ]]; then
+        print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image matches checkout, build disabled: $checkout_head"
+      else
+        CF_COMPOSE_BUILD=true
+        print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image is stale, build enabled: image=${image_revision:-unknown} checkout=$checkout_head"
+      fi
+    fi
+  fi
+
+  if [[ "$include_dataplane" == "true" ]] && dataplane_source_enabled; then
+    checkout_head="$(git -C "$CF_DATAPLANE_DIR" rev-parse HEAD)"
+    if ! docker image inspect "$CF_DATAPLANE_IMAGE" >/dev/null 2>&1; then
+      CF_COMPOSE_BUILD=true
+      print_detail "CF_COMPOSE_BUILD=auto; cf-dataplane image missing, build enabled: $CF_DATAPLANE_IMAGE"
+    else
+      image_revision="$(docker image inspect "$CF_DATAPLANE_IMAGE" \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+      if [[ "$image_revision" == "$checkout_head" ]]; then
+        print_detail "CF_COMPOSE_BUILD=auto; cf-dataplane image matches checkout, build disabled: $checkout_head"
+      else
+        CF_COMPOSE_BUILD=true
+        print_detail "CF_COMPOSE_BUILD=auto; cf-dataplane image is stale, build enabled: image=${image_revision:-unknown} checkout=$checkout_head"
+      fi
+    fi
+  fi
+
+  if [[ "$CF_COMPOSE_BUILD" == "auto" ]]; then
+    CF_COMPOSE_BUILD=false
   fi
 }
 
@@ -1180,8 +1367,8 @@ run_test_all_up_no_plugins() {
 }
 
 run_integration_up() {
-  ensure_checkout
-  resolve_compose_build_mode
+  ensure_source_checkouts
+  resolve_compose_build_mode true
   local up_args=(-d)
   if compose_build_enabled; then
     up_args+=(--build)
@@ -1193,8 +1380,7 @@ run_integration_up() {
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
 $(controlplane_runtime_summary "$PROJECT")
-CF-dataplane image: $CF_DATAPLANE_IMAGE
-CF-dataplane platform: $CF_DATAPLANE_PLATFORM
+$(dataplane_runtime_summary "$PROJECT")
 EOF
 )"
     return 0
@@ -1206,8 +1392,7 @@ EOF
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
 $(controlplane_runtime_summary "$PROJECT")
-CF-dataplane image: $CF_DATAPLANE_IMAGE
-CF-dataplane platform: $CF_DATAPLANE_PLATFORM
+$(dataplane_runtime_summary "$PROJECT")
 EOF
 )"
 }
@@ -1376,7 +1561,7 @@ run_locust() {
 
 case "${1:-}" in
   checkout)
-    ensure_checkout
+    ensure_source_checkouts
     ;;
   up)
     shift
@@ -1404,8 +1589,9 @@ case "${1:-}" in
     fi
     ;;
   config)
-    ensure_checkout
+    ensure_source_checkouts
     export_controlplane_checkout_env
+    export_dataplane_checkout_env
     compose --profile testing config
     ;;
   token)
