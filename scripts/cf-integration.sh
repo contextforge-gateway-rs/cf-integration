@@ -3,6 +3,49 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+load_env_file() {
+  local env_file="$ROOT/.env"
+  local line assignment key value
+
+  [[ -f "$env_file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ""|\#*) continue ;;
+      export\ *) assignment="${line#export }" ;;
+      *) assignment="$line" ;;
+    esac
+
+    case "$assignment" in
+      *=*) ;;
+      *)
+        printf 'warning: ignoring invalid .env line: %s\n' "$line" >&2
+        continue
+        ;;
+    esac
+
+    key="${assignment%%=*}"
+    value="${assignment#*=}"
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf 'warning: ignoring invalid .env key: %s\n' "$key" >&2
+      continue
+    fi
+    if [[ -n "${!key+x}" ]]; then
+      continue
+    fi
+
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    export "$key=$value"
+    export "CF_ENV_FILE_${key}=1"
+  done <"$env_file"
+}
+
+load_env_file
+
 default_dataplane_image() {
   # GHCR currently publishes only 0.1.0 (no latest tag); keep the default pinned.
   printf 'ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:%s\n' "${CF_DATAPLANE_VERSION:-0.1.0}"
@@ -20,12 +63,20 @@ PROJECT="${CF_INTEGRATION_PROJECT:-cf-integration}"
 CONTROLPLANE_PROJECT="${CF_CONTROLPLANE_PROJECT:-cf-controlplane-only}"
 JWT_SECRET_KEY="${JWT_SECRET_KEY:-my-test-key-but-now-longer-than-32-bytes}"
 ADMIN_SUBJECT="${MCP_JWT_SUBJECT:-admin@example.com}"
-CF_CONTROLPLANE_IMAGE_WAS_SET="${CF_CONTROLPLANE_IMAGE+x}"
-IMAGE_LOCAL_WAS_SET="${IMAGE_LOCAL+x}"
+if [[ -n "${CF_CONTROLPLANE_IMAGE+x}" && "${CF_INTERNAL_CONTROLPLANE_IMAGE:-}" != "1" ]]; then
+  CF_CONTROLPLANE_IMAGE_WAS_SET=1
+else
+  CF_CONTROLPLANE_IMAGE_WAS_SET=""
+fi
+if [[ -n "${IMAGE_LOCAL+x}" && "${CF_INTERNAL_IMAGE_LOCAL:-}" != "1" ]]; then
+  IMAGE_LOCAL_WAS_SET=1
+else
+  IMAGE_LOCAL_WAS_SET=""
+fi
 CF_CONTROLPLANE_IMAGE="${CF_CONTROLPLANE_IMAGE:-${IMAGE_LOCAL:-$(default_controlplane_image)}}"
 CF_DATAPLANE_IMAGE="${CF_DATAPLANE_IMAGE:-$(default_dataplane_image)}"
 CF_DATAPLANE_PLATFORM="${CF_DATAPLANE_PLATFORM:-linux/amd64}"
-CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-false}"
+CF_COMPOSE_BUILD="${CF_COMPOSE_BUILD:-auto}"
 FAST_TIME_SERVER_ID="${CF_FAST_TIME_SERVER_ID:-9779b6698cbd4b4995ee04a4fab38737}"
 
 # Scale the upstream gateway sizing knobs to the local Docker engine;
@@ -40,11 +91,17 @@ export GUNICORN_WORKERS="${GUNICORN_WORKERS:-$DOCKER_CPUS}"
 
 export CF_INTEGRATION_ROOT="$ROOT"
 export CF_CONTROLPLANE_IMAGE
+if [[ -z "$CF_CONTROLPLANE_IMAGE_WAS_SET" ]]; then
+  export CF_INTERNAL_CONTROLPLANE_IMAGE=1
+fi
 export CF_DATAPLANE_IMAGE
 export CF_DATAPLANE_PLATFORM
 export CF_CONTROLPLANE_DIR
 export CF_INTEGRATION_DIR="$INTEGRATION_DIR"
 export IMAGE_LOCAL="$CF_CONTROLPLANE_IMAGE"
+if [[ -z "$IMAGE_LOCAL_WAS_SET" ]]; then
+  export CF_INTERNAL_IMAGE_LOCAL=1
+fi
 export JWT_SECRET_KEY
 export MCP_CLI_BASE_URL="${MCP_CLI_BASE_URL:-http://127.0.0.1:${NGINX_PORT:-8080}}"
 export PLATFORM_ADMIN_EMAIL="${PLATFORM_ADMIN_EMAIL:-$ADMIN_SUBJECT}"
@@ -53,6 +110,7 @@ export KEY_FILE_PASSWORD="${KEY_FILE_PASSWORD:-}"
 compose_args=(
   -p "$PROJECT"
   -f "$CF_CONTROLPLANE_DIR/docker-compose.yml"
+  -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml"
   -f "$ROOT/docker/docker-compose.cf-dataplane.yaml"
   -f "$ROOT/docker/docker-compose.cf-integration.yaml"
 )
@@ -60,6 +118,7 @@ compose_args=(
 controlplane_compose_args=(
   -p "$CONTROLPLANE_PROJECT"
   -f "$CF_CONTROLPLANE_DIR/docker-compose.yml"
+  -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml"
 )
 
 controlplane_profiles=(--profile testing --profile inspector)
@@ -132,6 +191,32 @@ print_info_box() {
   printf '%s%s\n' "$section_rule" "$reset"
 }
 
+env_file_set() {
+  local marker="CF_ENV_FILE_$1"
+  [[ "${!marker:-}" == "1" ]]
+}
+
+env_value_for_lane() {
+  local lane="$1"
+  local key="$2"
+  local default_value="$3"
+
+  if [[ "$lane" == "smoke" ]] && { [[ -z "${!key+x}" ]] || env_file_set "$key"; }; then
+    printf '%s\n' "$default_value"
+  else
+    printf '%s\n' "${!key:-$default_value}"
+  fi
+}
+
+set_default_if_unset_or_env_file() {
+  local key="$1"
+  local value="$2"
+
+  if [[ -z "${!key+x}" ]] || env_file_set "$key"; then
+    export "$key=$value"
+  fi
+}
+
 lane_description() {
   case "$1" in
     probe)
@@ -143,7 +228,7 @@ EOF
     smoke)
       cat <<EOF
 Locust smoke against /servers/{virtual_host_id}/mcp on the Fast Time virtual server.
-Settings: users=${LOCUST_USERS:-1}, spawn_rate=${LOCUST_SPAWN_RATE:-1}, run_time=${LOCUST_RUN_TIME:-10s}. Flow: initialize, tools/list, ping, tools/call.
+Settings: users=$(env_value_for_lane smoke LOCUST_USERS 1), spawn_rate=$(env_value_for_lane smoke LOCUST_SPAWN_RATE 1), run_time=$(env_value_for_lane smoke LOCUST_RUN_TIME 10s). Flow: initialize, tools/list, ping, tools/call.
 EOF
       ;;
     live-mcp)
@@ -294,13 +379,22 @@ print_locust_results() {
   local lane="$1"
   local lane_log="$2"
   local rc="$3"
-  local printed=0 line name reqs fails status
+  local printed=0 line name reqs fails status users spawn_rate run_time
   local locust_row_re='^POST[[:space:]]+(.+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)\([^)]+\)[[:space:]]+\|'
 
+  users="$(env_value_for_lane "$lane" LOCUST_USERS 1)"
+  spawn_rate="$(env_value_for_lane "$lane" LOCUST_SPAWN_RATE 1)"
+  run_time="$(env_value_for_lane "$lane" LOCUST_RUN_TIME 10s)"
+  if [[ "$lane" == "locust" ]]; then
+    users="$(env_value_for_lane "$lane" LOCUST_USERS 100)"
+    spawn_rate="$(env_value_for_lane "$lane" LOCUST_SPAWN_RATE 10)"
+    run_time="$(env_value_for_lane "$lane" LOCUST_RUN_TIME 5m)"
+  fi
+
   if [[ "$rc" -eq 0 ]]; then
-    print_result_line "PASS" "-" "$lane/config users=${LOCUST_USERS:-1} spawn_rate=${LOCUST_SPAWN_RATE:-1} run_time=${LOCUST_RUN_TIME:-10s} server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+    print_result_line "PASS" "-" "$lane/config users=$users spawn_rate=$spawn_rate run_time=$run_time server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
   else
-    print_result_line "FAIL" "-" "$lane/config users=${LOCUST_USERS:-1} spawn_rate=${LOCUST_SPAWN_RATE:-1} run_time=${LOCUST_RUN_TIME:-10s} server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
+    print_result_line "FAIL" "-" "$lane/config users=$users spawn_rate=$spawn_rate run_time=$run_time server=${MCP_SERVER_ID:-${MCP_VIRTUAL_SERVER_ID:-$FAST_TIME_SERVER_ID}}"
   fi
   printed=1
 
@@ -493,6 +587,124 @@ integration_stack_running() {
   docker ps --format '{{.Names}}' | grep -q "^${PROJECT}-"
 }
 
+compose_service_container_id() {
+  local project="$1"
+  local service="$2"
+
+  docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$service" \
+    | head -n 1
+}
+
+compose_service_container_id_all() {
+  local project="$1"
+  local service="$2"
+
+  docker ps -aq \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$service" \
+    | head -n 1
+}
+
+compose_service_uses_image() {
+  local project="$1"
+  local service="$2"
+  local expected_image="$3"
+  local container_id config_image running_image_id expected_image_id
+
+  container_id="$(compose_service_container_id "$project" "$service")"
+  [[ -n "$container_id" ]] || return 1
+
+  config_image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  [[ "$config_image" == "$expected_image" ]] || return 1
+
+  running_image_id="$(docker inspect "$container_id" --format '{{.Image}}' 2>/dev/null || true)"
+  expected_image_id="$(docker image inspect "$expected_image" --format '{{.Id}}' 2>/dev/null || true)"
+  [[ -n "$running_image_id" && "$running_image_id" == "$expected_image_id" ]]
+}
+
+compose_service_image_label() {
+  local project="$1"
+  local service="$2"
+  local label="$3"
+  local container_id
+
+  container_id="$(compose_service_container_id "$project" "$service")"
+  [[ -n "$container_id" ]] || return 1
+
+  docker inspect "$container_id" --format "{{ index .Config.Labels \"$label\" }}" 2>/dev/null || true
+}
+
+compose_service_completed_successfully() {
+  local project="$1"
+  local service="$2"
+  local container_id status exit_code
+
+  container_id="$(compose_service_container_id_all "$project" "$service")"
+  [[ -n "$container_id" ]] || return 1
+
+  status="$(docker inspect "$container_id" --format '{{.State.Status}}' 2>/dev/null || true)"
+  exit_code="$(docker inspect "$container_id" --format '{{.State.ExitCode}}' 2>/dev/null || true)"
+  [[ "$status" == "exited" && "$exit_code" == "0" ]]
+}
+
+integration_stack_current() {
+  local service checkout_head image_revision
+  local required_running_services=(
+    gateway
+    cf-dataplane
+    nginx
+    postgres
+    pgbouncer
+    redis
+    fast_time_server
+    fast_test_server
+    cf-integration-mcp-counter
+  )
+  local required_completed_services=(
+    migration
+    register_fast_time
+    register_fast_time_sse
+    register_fast_test
+  )
+
+  for service in "${required_running_services[@]}"; do
+    if [[ -z "$(compose_service_container_id "$PROJECT" "$service")" ]]; then
+      print_detail "Integration stack not current; service is not running: $service"
+      return 1
+    fi
+  done
+
+  for service in "${required_completed_services[@]}"; do
+    if ! compose_service_completed_successfully "$PROJECT" "$service"; then
+      print_detail "Integration stack not current; setup service did not complete successfully: $service"
+      return 1
+    fi
+  done
+
+  if ! compose_service_uses_image "$PROJECT" gateway "$CF_CONTROLPLANE_IMAGE"; then
+    print_detail "Integration stack not current; cf-controlplane image differs."
+    return 1
+  fi
+
+  if ! compose_service_uses_image "$PROJECT" cf-dataplane "$CF_DATAPLANE_IMAGE"; then
+    print_detail "Integration stack not current; cf-dataplane image differs."
+    return 1
+  fi
+
+  if [[ -z "$CF_CONTROLPLANE_IMAGE_WAS_SET" && -z "$IMAGE_LOCAL_WAS_SET" ]]; then
+    checkout_head="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD)"
+    image_revision="$(compose_service_image_label "$PROJECT" gateway "org.opencontainers.image.revision")"
+    if [[ "$image_revision" != "$checkout_head" ]]; then
+      print_detail "Integration stack not current; cf-controlplane branch revision differs."
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 controlplane_stack_running() {
   docker ps --format '{{.Names}}' | grep -q "^${CONTROLPLANE_PROJECT}-"
 }
@@ -502,6 +714,130 @@ fresh_stack_enabled() {
     true|1) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+force_fresh_stack_enabled() {
+  case "${CF_FORCE_FRESH_STACK:-false}" in
+    true|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+compose_build_enabled() {
+  case "$CF_COMPOSE_BUILD" in
+    true|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+short_revision() {
+  local revision="$1"
+
+  if [[ -z "$revision" ]]; then
+    printf 'unknown\n'
+  else
+    printf '%s\n' "${revision:0:12}"
+  fi
+}
+
+controlplane_checkout_summary() {
+  local branch revision
+
+  branch="$(git -C "$CF_CONTROLPLANE_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  revision="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+
+  if [[ -n "$branch" ]]; then
+    printf '%s @ %s\n' "$branch" "$(short_revision "$revision")"
+  else
+    printf 'detached @ %s\n' "$(short_revision "$revision")"
+  fi
+}
+
+export_controlplane_checkout_env() {
+  local branch revision
+
+  branch="$(git -C "$CF_CONTROLPLANE_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  revision="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  export CF_CONTROLPLANE_CHECKOUT_REVISION="$revision"
+  export CF_CONTROLPLANE_CHECKOUT_REF="${branch:-$CF_CONTROLPLANE_REF}"
+}
+
+controlplane_runtime_summary() {
+  local project="$1"
+  local container_id image image_ref revision version checkout_head revision_status
+
+  checkout_head="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  container_id="$(docker ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=gateway" \
+    | head -n 1)"
+
+  if [[ -z "$container_id" ]]; then
+    printf 'CF-controlplane runtime: gateway container not running\n'
+    return 0
+  fi
+
+  image="$(docker inspect "$container_id" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  revision="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+  image_ref="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.ref.name" }}' 2>/dev/null || true)"
+  version="$(docker inspect "$container_id" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
+
+  if [[ -z "$revision" ]]; then
+    revision_status="unknown; image has no revision label"
+  elif [[ "$revision" == "$checkout_head" ]]; then
+    revision_status="matches checkout"
+  else
+    revision_status="MISMATCH; checkout $(short_revision "$checkout_head")"
+  fi
+
+  printf 'CF-controlplane checkout: %s\n' "$(controlplane_checkout_summary)"
+  printf 'CF-controlplane image: %s\n' "${image:-unknown}"
+  if [[ -n "$image_ref" ]]; then
+    printf 'CF-controlplane image ref: %s\n' "$image_ref"
+  fi
+  printf 'CF-controlplane image revision: %s (%s)\n' "$(short_revision "$revision")" "$revision_status"
+  if [[ -n "$version" ]]; then
+    printf 'CF-controlplane image version: %s\n' "$version"
+  fi
+  printf 'CF_COMPOSE_BUILD resolved: %s\n' "$CF_COMPOSE_BUILD"
+}
+
+resolve_compose_build_mode() {
+  local checkout_head image_revision
+
+  export_controlplane_checkout_env
+
+  case "$CF_COMPOSE_BUILD" in
+    true|1|false|0) return 0 ;;
+    auto) ;;
+    *)
+      printf 'Invalid CF_COMPOSE_BUILD=%s; use auto, true, or false.\n' "$CF_COMPOSE_BUILD" >&2
+      return 2
+      ;;
+  esac
+
+  if [[ -n "$CF_CONTROLPLANE_IMAGE_WAS_SET" || -n "$IMAGE_LOCAL_WAS_SET" ]]; then
+    CF_COMPOSE_BUILD=false
+    print_detail "CF_COMPOSE_BUILD=auto; explicit cf-controlplane image set, build disabled."
+    return 0
+  fi
+
+  checkout_head="$(git -C "$CF_CONTROLPLANE_DIR" rev-parse HEAD)"
+  if ! docker image inspect "$CF_CONTROLPLANE_IMAGE" >/dev/null 2>&1; then
+    CF_COMPOSE_BUILD=true
+    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image missing, build enabled: $CF_CONTROLPLANE_IMAGE"
+    return 0
+  fi
+
+  image_revision="$(docker image inspect "$CF_CONTROLPLANE_IMAGE" \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)"
+  if [[ "$image_revision" == "$checkout_head" ]]; then
+    CF_COMPOSE_BUILD=false
+    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image matches checkout, build disabled: $checkout_head"
+  else
+    CF_COMPOSE_BUILD=true
+    print_detail "CF_COMPOSE_BUILD=auto; cf-controlplane image is stale, build enabled: image=${image_revision:-unknown} checkout=$checkout_head"
+  fi
 }
 
 ensure_no_integration_stack() {
@@ -533,34 +869,31 @@ EOF
 remove_compose_project_by_label() {
   local project="$1"
   local remove_volumes="${2:-false}"
-  local containers=()
-  local networks=()
-  local volumes=()
-  local container_ids network_ids volume_ids
+  local container_ids network_ids volume_ids resource_id
 
   container_ids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || return $?
   if [[ -n "$container_ids" ]]; then
-    mapfile -t containers <<<"$container_ids"
-  fi
-  if ((${#containers[@]} > 0)); then
-    docker rm -f "${containers[@]}" >/dev/null
+    while IFS= read -r resource_id; do
+      [[ -n "$resource_id" ]] || continue
+      docker rm -f "$resource_id" >/dev/null
+    done <<<"$container_ids"
   fi
 
   network_ids="$(docker network ls -q --filter "label=com.docker.compose.project=$project")" || return $?
   if [[ -n "$network_ids" ]]; then
-    mapfile -t networks <<<"$network_ids"
-  fi
-  if ((${#networks[@]} > 0)); then
-    docker network rm "${networks[@]}" >/dev/null 2>&1 || true
+    while IFS= read -r resource_id; do
+      [[ -n "$resource_id" ]] || continue
+      docker network rm "$resource_id" >/dev/null 2>&1 || true
+    done <<<"$network_ids"
   fi
 
   if [[ "$remove_volumes" == "true" ]]; then
     volume_ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" || return $?
     if [[ -n "$volume_ids" ]]; then
-      mapfile -t volumes <<<"$volume_ids"
-    fi
-    if ((${#volumes[@]} > 0)); then
-      docker volume rm "${volumes[@]}" >/dev/null
+      while IFS= read -r resource_id; do
+        [[ -n "$resource_id" ]] || continue
+        docker volume rm "$resource_id" >/dev/null
+      done <<<"$volume_ids"
     fi
   fi
 }
@@ -712,6 +1045,7 @@ export_server_id() {
 run_test_all() {
   local log_dir="${CF_TEST_LOG_DIR:-$INTEGRATION_DIR/test-logs}"
   mkdir -p "$log_dir"
+  log_dir="$(cd "$log_dir" && pwd)"
   local log_file="$log_dir/cf-tests-$(date -u +%Y%m%dT%H%M%SZ).log"
   local lanes=(probe smoke live-mcp live-rbac live-protocol live-all)
   case "${CF_TEST_ALL_LOCUST:-false}" in
@@ -811,11 +1145,16 @@ wait_for_publisher_snapshot() {
 run_stack_up_for_test_all() {
   if fresh_stack_enabled; then
     print_section "Step 1/2: fresh-bootstrap and start integration stack"
+    print_detail "Command: CF_FORCE_FRESH_STACK=true $0 up"
   else
     print_section "Step 1/2: start or update integration stack (CF_FRESH_STACK=false)"
+    print_detail "Command: $0 up"
   fi
-  print_detail "Command: $0 up"
-  "$0" up
+  if fresh_stack_enabled; then
+    CF_FORCE_FRESH_STACK=true "$0" up
+  else
+    "$0" up
+  fi
   wait_for_publisher_snapshot
 }
 
@@ -842,18 +1181,31 @@ run_test_all_up_no_plugins() {
 
 run_integration_up() {
   ensure_checkout
-  bootstrap_fresh_database "integration stack"
-  ensure_no_controlplane_stack
+  resolve_compose_build_mode
   local up_args=(-d)
-  if [[ "$CF_COMPOSE_BUILD" == "true" || "$CF_COMPOSE_BUILD" == "1" ]]; then
+  if compose_build_enabled; then
     up_args+=(--build)
   fi
   pull_stack_images
+  if ! force_fresh_stack_enabled && ! compose_build_enabled && integration_stack_current; then
+    print_detail "Integration stack already current; skipping docker compose up."
+    print_info_box "Integration stack already current." "$(cat <<EOF
+UI: http://localhost:${NGINX_PORT:-8080}/admin
+Login: admin@example.com / changeme
+$(controlplane_runtime_summary "$PROJECT")
+CF-dataplane image: $CF_DATAPLANE_IMAGE
+CF-dataplane platform: $CF_DATAPLANE_PLATFORM
+EOF
+)"
+    return 0
+  fi
+  bootstrap_fresh_database "integration stack"
+  ensure_no_controlplane_stack
   compose up "${up_args[@]}"
   print_info_box "Integration stack started." "$(cat <<EOF
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
-CF-controlplane image: $CF_CONTROLPLANE_IMAGE
+$(controlplane_runtime_summary "$PROJECT")
 CF-dataplane image: $CF_DATAPLANE_IMAGE
 CF-dataplane platform: $CF_DATAPLANE_PLATFORM
 EOF
@@ -864,6 +1216,7 @@ run_controlplane_up() {
   ensure_checkout
   bootstrap_fresh_database "control-plane-only stack"
   ensure_no_integration_stack
+  resolve_compose_build_mode
   mkdir -p "$CF_CONTROLPLANE_DIR/reports"
   export HOST_UID="${HOST_UID:-$(id -u 2>/dev/null || echo 1000)}"
   export HOST_GID="${HOST_GID:-$(id -g 2>/dev/null || echo 1000)}"
@@ -873,6 +1226,9 @@ run_controlplane_up() {
   export REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD="${REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD:-false}"
 
   local up_args=("${controlplane_profiles[@]}" up -d)
+  if compose_build_enabled; then
+    up_args+=(--build)
+  fi
   case "${CONTROLPLANE_START_LOCUST_UI:-false}" in
     true|1)
       up_args+=(--scale "locust_worker=${CONTROLPLANE_LOCUST_WORKERS:-1}")
@@ -889,7 +1245,7 @@ Control-plane-only stack started.
 Project: $CONTROLPLANE_PROJECT
 UI: http://localhost:${NGINX_PORT:-8080}/admin
 Login: admin@example.com / changeme
-CF-controlplane image: $CF_CONTROLPLANE_IMAGE
+$(controlplane_runtime_summary "$CONTROLPLANE_PROJECT")
 No cf-dataplane service, no dataplane nginx routing override, no DATAPLANE_PUBLISHER overlay.
 
 Run:
@@ -1049,6 +1405,7 @@ case "${1:-}" in
     ;;
   config)
     ensure_checkout
+    export_controlplane_checkout_env
     compose --profile testing config
     ;;
   token)
@@ -1062,9 +1419,9 @@ case "${1:-}" in
     run_locust
     ;;
   smoke)
-    export LOCUST_USERS="${LOCUST_USERS:-1}"
-    export LOCUST_SPAWN_RATE="${LOCUST_SPAWN_RATE:-1}"
-    export LOCUST_RUN_TIME="${LOCUST_RUN_TIME:-10s}"
+    set_default_if_unset_or_env_file LOCUST_USERS 1
+    set_default_if_unset_or_env_file LOCUST_SPAWN_RATE 1
+    set_default_if_unset_or_env_file LOCUST_RUN_TIME 10s
     run_locust
     ;;
   live-mcp)
@@ -1110,6 +1467,7 @@ case "${1:-}" in
     ;;
   controlplane-config)
     ensure_checkout
+    export_controlplane_checkout_env
     controlplane_compose "${controlplane_profiles[@]}" config
     ;;
   controlplane-live-core)

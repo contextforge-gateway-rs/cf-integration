@@ -1,0 +1,14 @@
+# Shared build metadata overlay for cf-controlplane images built by the harness.
+
+services:
+  gateway:
+    build:
+      labels:
+        org.opencontainers.image.revision: ${CF_CONTROLPLANE_CHECKOUT_REVISION:-unknown}
+        org.opencontainers.image.ref.name: ${CF_CONTROLPLANE_CHECKOUT_REF:-unknown}
+
+  migration:
+    build:
+      labels:
+        org.opencontainers.image.revision: ${CF_CONTROLPLANE_CHECKOUT_REVISION:-unknown}
+        org.opencontainers.image.ref.name: ${CF_CONTROLPLANE_CHECKOUT_REF:-unknown}

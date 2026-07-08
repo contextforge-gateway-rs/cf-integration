@@ -12,9 +12,11 @@ The stack is the stock upstream `docker-compose.yml` (including its Fast Time im
 scripts/cf-integration.sh up
 ```
 
-The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
+The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. The default control-plane image is rebuilt automatically when its revision label does not match the checked-out commit. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
 
-All stack-starting commands fresh-bootstrap by default, including `up`, `up controlplane`, `test-all-up*`, and `controlplane-test-all`. Set `CF_FRESH_STACK=false` only when you intentionally want to keep existing database state.
+Local configuration is read from `.env` when present. Copy `.env.example` to `.env` and edit it for branch/image choices; `.env` is git-ignored and shell variables override it.
+
+Stack-starting commands fresh-bootstrap by default, including `up`, `up controlplane`, `test-all-up*`, and `controlplane-test-all`. A repeated `up` skips `docker compose up` when the running integration stack already matches the requested control-plane checkout and image tags. Set `CF_FRESH_STACK=false` when you intentionally want to keep existing database state while changing or restarting the stack.
 
 Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged. The dataplane will not implement SSE upstreams (the transport is deprecated and is removed in the 2026-07-28 MCP protocol update): the control-plane publisher exports streamable-HTTP backends only, SSE-backed virtual servers are therefore absent from dataplane config, and nginx replays their `/servers/{id}/mcp` requests on the control plane — SSE stays fully functional through the control-plane path. Requires a control-plane image with the streamable-only publisher change; older images publish SSE backends and the dataplane answers them with empty tool lists instead of falling back.
 
@@ -128,6 +130,7 @@ Set `CONTROLPLANE_LOCUST_CLASSES=all` to run the full upstream Locust class mix,
 Useful overrides:
 
 ```bash
+# Put these in .env, or export them in the shell.
 CF_CONTROLPLANE_REPO=<control-plane-git-url>
 CF_CONTROLPLANE_REF=main
 CF_CONTROLPLANE_IMAGE=mcpgateway/mcpgateway:latest
@@ -135,7 +138,7 @@ CF_CONTROLPLANE_VERSION=latest
 CF_DATAPLANE_IMAGE=ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:<tag>
 CF_DATAPLANE_VERSION=0.1.0
 CF_DATAPLANE_PLATFORM=linux/amd64
-CF_COMPOSE_BUILD=false
+CF_COMPOSE_BUILD=auto
 CF_INTEGRATION_DIR=.integration
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
 CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS=2
@@ -143,7 +146,7 @@ CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0
 NGINX_PORT=8080
 ```
 
-`CF_COMPOSE_BUILD` defaults to `false`; published images are used and local builds happen only when an image is missing or `CF_COMPOSE_BUILD=true` forces `--build`.
+`CF_COMPOSE_BUILD` defaults to `auto`: when using the default local control-plane image tag, the script compares the image's `org.opencontainers.image.revision` label with the checked-out `CF_CONTROLPLANE_REF` commit and passes `--build` when the image is missing or stale. Harness-built control-plane images are stamped with the checkout revision and ref so the next run can skip the build, and repeated `up` can skip compose entirely when the running stack already matches. Set `CF_COMPOSE_BUILD=false` to force image reuse, or `CF_COMPOSE_BUILD=true` to always build. Explicit `CF_CONTROLPLANE_IMAGE` or `IMAGE_LOCAL` overrides disable auto-build unless `CF_COMPOSE_BUILD=true` is also set.
 
 The upstream gateway sizing knobs (`GATEWAY_REPLICAS`, `GATEWAY_CPU_LIMIT`, `GATEWAY_CPU_RESERVATION`, `GATEWAY_MEM_LIMIT`, `GATEWAY_MEM_RESERVATION`, `GUNICORN_WORKERS`) are defaulted to fit the local Docker engine (upstream assumes a large CI host); override them to match upstream sizing on bigger hardware.
 
