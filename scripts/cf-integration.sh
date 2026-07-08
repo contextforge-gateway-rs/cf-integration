@@ -406,9 +406,17 @@ ensure_checkout() {
   if [[ ! -d "$CF_CONTROLPLANE_DIR/.git" ]]; then
     git clone -q "$CF_CONTROLPLANE_REPO" "$CF_CONTROLPLANE_DIR"
   fi
-  git -C "$CF_CONTROLPLANE_DIR" fetch -q --prune --tags origin
+  # --force: upstream occasionally re-points release tags; a scratch checkout
+  # should follow them instead of aborting on "would clobber existing tag".
+  # A failed fetch (e.g. offline) is tolerated when the ref already exists
+  # locally; the checkout below still fails hard on a truly unknown ref.
+  local fetched=1
+  if ! git -C "$CF_CONTROLPLANE_DIR" fetch -q --prune --tags --force origin; then
+    fetched=0
+    echo "warning: fetch from $CF_CONTROLPLANE_REPO failed; using existing checkout" >&2
+  fi
   git -C "$CF_CONTROLPLANE_DIR" checkout -q "$CF_CONTROLPLANE_REF"
-  if [[ "$CF_CONTROLPLANE_REF" == "main" ]]; then
+  if [[ "$CF_CONTROLPLANE_REF" == "main" && $fetched -eq 1 ]]; then
     git -C "$CF_CONTROLPLANE_DIR" pull -q --ff-only origin main
   fi
 }
