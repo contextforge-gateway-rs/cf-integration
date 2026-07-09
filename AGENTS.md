@@ -4,7 +4,7 @@ This repo is the reusable integration harness for `cf-controlplane` plus the Rus
 
 Scope:
 
-- Keep this repo focused on Docker Compose overlays, nginx routing, reusable test orchestration, and local test backends.
+- Keep this repo focused on Docker Compose overlays, nginx routing, and reusable test orchestration.
 - Do not add dataplane implementation code here.
 - Do not add control-plane implementation code here.
 - Keep generated checkout/build/runtime state under `.integration/` or `CF_INTEGRATION_DIR`.
