@@ -12,7 +12,7 @@ The stack is the stock upstream `docker-compose.yml` (including its Fast Time im
 scripts/cf-integration.sh up
 ```
 
-The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, starts the control-plane compose stack with the dataplane/nginx overlay, and starts a local MCP counter backend for UI-created virtual servers. The default control-plane image is rebuilt automatically when its revision label does not match the checked-out commit. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
+The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, and starts the control-plane compose stack with the dataplane/nginx overlay. The default control-plane image is rebuilt automatically when its revision label does not match the checked-out commit. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
 
 Local configuration is read from `.env` when present. Copy `.env.example` to `.env` and edit it for branch/image choices; `.env` is git-ignored and shell variables override it.
 
@@ -26,13 +26,7 @@ Open `http://localhost:8080/admin` and log in with:
 admin@example.com / changeme
 ```
 
-Add this MCP backend in the UI:
-
-```text
-http://cf-integration-mcp-counter:5555/mcp
-```
-
-Optionally create a virtual server from that backend's tools in the UI. The overlay enables `DATAPLANE_PUBLISHER`, so `cf-controlplane` publishes the virtual server config to Redis for `cf-dataplane`. The publisher runs every 60 seconds.
+The overlay enables `DATAPLANE_PUBLISHER`, so `cf-controlplane` publishes virtual server configs to Redis for `cf-dataplane`. The publisher runs every 60 seconds.
 
 The Fast Time backend is registered automatically as virtual server `9779b6698cbd4b4995ee04a4fab38737`, so `probe`, `smoke`, and `locust` work with no manual UI step.
 
@@ -104,7 +98,7 @@ pytest/locust output to the timestamped log.
 
 ## Control-Plane Baseline
 
-Run the stock upstream `cf-controlplane` testing stack without the `cf-dataplane` service, nginx route override, integration MCP counter, or `DATAPLANE_PUBLISHER` overlay:
+Run the stock upstream `cf-controlplane` testing stack without the `cf-dataplane` service, nginx route override, or `DATAPLANE_PUBLISHER` overlay:
 
 ```bash
 scripts/cf-integration.sh controlplane-test-all
@@ -208,9 +202,8 @@ scripts/cf-integration.sh down
 
 ```text
 docker/docker-compose.cf-dataplane.yaml      cf-dataplane service and nginx override
-docker/docker-compose.cf-integration.yaml    integration MCP backend and Locust override
+docker/docker-compose.cf-integration.yaml    fixture service and Locust overrides
 docker/nginx.cf-dataplane.conf               public routing split
-docker/mcp_counter.Dockerfile                local MCP counter backend
 scripts/cf-integration.sh                    orchestration wrapper
 scripts/cf_pytest_result_recorder.py         pytest result recorder for test-all display
 scripts/cf-jwt.py                            local HS256 JWT helper (CLI + importable make_token)

@@ -22,22 +22,6 @@ services:
   register_fast_test:
     profiles: !reset []
 
-  cf-integration-mcp-counter:
-    image: cf-integration-mcp-counter:local
-    build:
-      context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
-      dockerfile: docker/mcp_counter.Dockerfile
-    restart: unless-stopped
-    networks: [mcpnet]
-    expose:
-      - "5555"
-    ports:
-      - "${CF_INTEGRATION_MCP_COUNTER_PORT:-5601}:5555"
-    environment:
-      RUST_LOG: ${CF_INTEGRATION_MCP_COUNTER_LOG:-info}
-      MCP_SERVER_BIND_ADDRESS: 0.0.0.0:5555
-      MCP_SERVER_ALLOWED_HOSTS: cf-integration-mcp-counter,cf-controlplane,cf-dataplane,nginx,localhost,127.0.0.1
-
   locust:
     volumes:
       # Harness locustfile with streamable-HTTP content negotiation; the

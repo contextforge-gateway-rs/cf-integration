@@ -536,9 +536,6 @@ CF-dataplane image:
 CF-controlplane image:
   $CF_CONTROLPLANE_IMAGE
 
-Integration MCP backend URL to add in cf-controlplane UI:
-  http://cf-integration-mcp-counter:5555/mcp
-
 Fresh bootstrap:
   up and up controlplane reset compose volumes by default.
   Set CF_FRESH_STACK=false to keep existing database state.
@@ -742,7 +739,6 @@ integration_stack_current() {
     redis
     fast_time_server
     fast_test_server
-    cf-integration-mcp-counter
   )
   local required_completed_services=(
     migration
