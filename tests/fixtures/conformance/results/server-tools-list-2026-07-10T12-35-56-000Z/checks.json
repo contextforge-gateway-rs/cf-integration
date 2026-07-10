@@ -1,0 +1,11 @@
+[
+  {
+    "id": "tools-list-warning",
+    "name": "ToolsListWarning",
+    "description": "A warning is a conformance failure for baseline purposes",
+    "status": "WARNING",
+    "timestamp": "2026-07-10T12:35:56.000Z",
+    "errorMessage": "tool metadata is incomplete",
+    "logs": ["warning"]
+  }
+]

@@ -1,0 +1,225 @@
+//! Docker Compose command construction and rendered-contract validation.
+
+use std::ffi::OsString;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::process::CommandSpec;
+
+const LEGACY_IMAGE_PREFIXES: &[&str] = &[
+    "ghcr.io/ibm/fast-time-server:",
+    "ghcr.io/ibm/fast-time-server@",
+    "mcpgateway/fast-test-server:",
+    "mcpgateway/fast-test-server@",
+];
+
+/// Immutable Compose project invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeProject {
+    project_name: OsString,
+    files: Vec<PathBuf>,
+    profiles: Vec<OsString>,
+}
+
+impl ComposeProject {
+    /// Builds the control-plane plus dataplane overlay project.
+    #[must_use]
+    pub fn dataplane(
+        repository_root: &Path,
+        controlplane_checkout: &Path,
+        project_name: OsString,
+        build_dataplane: bool,
+    ) -> Self {
+        let mut files = vec![
+            controlplane_checkout.join("docker-compose.yml"),
+            repository_root.join("docker/docker-compose.cf-controlplane-build-labels.yaml"),
+            repository_root.join("docker/docker-compose.cf-dataplane.yaml"),
+            repository_root.join("docker/docker-compose.cf-integration.yaml"),
+        ];
+        if build_dataplane {
+            files.push(repository_root.join("docker/docker-compose.cf-dataplane-build.yaml"));
+        }
+        Self {
+            project_name,
+            files,
+            profiles: Vec::new(),
+        }
+    }
+
+    /// Builds the stock control-plane-only project.
+    #[must_use]
+    pub fn controlplane(
+        repository_root: &Path,
+        controlplane_checkout: &Path,
+        project_name: OsString,
+        enable_sso: bool,
+    ) -> Self {
+        let mut profiles = vec![OsString::from("testing"), OsString::from("inspector")];
+        if enable_sso {
+            profiles.push(OsString::from("sso"));
+        }
+        Self {
+            project_name,
+            files: vec![
+                controlplane_checkout.join("docker-compose.yml"),
+                repository_root.join("docker/docker-compose.cf-controlplane-build-labels.yaml"),
+            ],
+            profiles,
+        }
+    }
+
+    /// Ordered Compose override files.
+    #[must_use]
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    /// Explicitly enabled Compose profiles.
+    #[must_use]
+    pub fn profiles(&self) -> &[OsString] {
+        &self.profiles
+    }
+
+    /// Replaces the enabled profile set, primarily for exhaustive cleanup.
+    #[must_use]
+    pub fn with_profiles<I, S>(mut self, profiles: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        self.profiles = profiles.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Creates a `docker compose` command with project, files, and profiles.
+    pub fn command<I, S>(&self, arguments: I) -> CommandSpec
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let mut command = CommandSpec::new("docker")
+            .arg("compose")
+            .arg("-p")
+            .arg(self.project_name.clone());
+        for file in &self.files {
+            command = command.arg("-f").arg(file.as_os_str().to_owned());
+        }
+        for profile in &self.profiles {
+            command = command.arg("--profile").arg(profile.clone());
+        }
+        // Compose 5.1.0 can deadlock while finalizing its interactive TTY
+        // renderer after up/down has otherwise completed. Plain progress also
+        // keeps every harness-owned Compose invocation deterministic.
+        command.args(arguments).env("COMPOSE_PROGRESS", "plain")
+    }
+}
+
+/// One deterministic integration Compose contract violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractViolation(String);
+
+impl fmt::Display for ContractViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Validates the rendered integration Compose configuration.
+///
+/// The order of returned violations is stable and intended for operator-facing
+/// diagnostics and regression tests.
+#[must_use]
+pub fn validate_integration_contract(
+    rendered: &Value,
+    expected_fast_time_image: &str,
+) -> Vec<ContractViolation> {
+    let Some(services) = rendered.get("services").and_then(Value::as_object) else {
+        return vec![violation("rendered Compose config has no services object")];
+    };
+    let mut violations = Vec::new();
+
+    match services.get("fast_time_server") {
+        None => violations.push(violation(
+            "fast_time_server is missing from the integration compose config",
+        )),
+        Some(service) => {
+            let image = service.get("image").and_then(Value::as_str).unwrap_or("");
+            if image != expected_fast_time_image {
+                violations.push(violation(format!(
+                    "fast_time_server image is {image:?}; expected {expected_fast_time_image:?}"
+                )));
+            }
+        }
+    }
+
+    for service_name in ["fast_test_server", "register_fast_test"] {
+        let Some(service) = services.get(service_name) else {
+            continue;
+        };
+        let has_profile = service
+            .get("profiles")
+            .and_then(Value::as_array)
+            .is_some_and(|profiles| !profiles.is_empty());
+        if !has_profile {
+            violations.push(violation(format!(
+                "{service_name} is active in the base integration stack; keep fast-test behind an explicit profile"
+            )));
+        }
+    }
+
+    let mut service_names = services.keys().collect::<Vec<_>>();
+    service_names.sort_unstable();
+    for service_name in service_names {
+        let image = services[service_name]
+            .get("image")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if LEGACY_IMAGE_PREFIXES
+            .iter()
+            .any(|prefix| image.starts_with(prefix))
+        {
+            violations.push(violation(format!(
+                "{service_name} uses legacy fast-test/time image {image:?}"
+            )));
+        }
+    }
+
+    let registration_command = services
+        .get("register_fast_time")
+        .and_then(|service| service.get("command"))
+        .map(command_text)
+        .unwrap_or_default();
+    if !registration_command.contains("http://fast_time_server:9080/health") {
+        violations.push(violation(
+            "register_fast_time does not wait for fast_time_server on port 9080",
+        ));
+    }
+    if !registration_command.contains("http://fast_time_server:9080/mcp") {
+        violations.push(violation(
+            "register_fast_time does not register the streamable HTTP endpoint at /mcp",
+        ));
+    }
+
+    violations
+}
+
+fn command_text(command: &Value) -> String {
+    match command {
+        Value::String(command) => command.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                part.as_str()
+                    .map_or_else(|| part.to_string(), str::to_owned)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn violation(message: impl Into<String>) -> ContractViolation {
+    ContractViolation(message.into())
+}

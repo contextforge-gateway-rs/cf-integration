@@ -5,30 +5,31 @@ the linked PRs.
 
 ## Headline
 
-**The full suite is green and deterministic**: two consecutive fresh
-`test-all-up-no-plugins` runs with identical results
+**The full suite is green and deterministic**: two consecutive fresh runs of
+the predecessor shell suite produced identical results. Its current equivalent
+is `cf-integration test suite --mode dataplane --start --exclude-plugins`
 (logs: `.integration/test-logs/cf-tests-20260708T090730Z.log` and the
 09:12 UTC rerun; every lane PASS, `EXIT=0` twice).
 
-| Lane          | Result | Detail |
-|---------------|--------|--------|
-| probe         | PASS   | 401 negative, initialize, tools/list, tools/call via nginx→dataplane |
-| smoke         | PASS   | 1-user locust, 10s, streamable HTTP, 0 failures |
-| live-mcp      | PASS   | 19 passed, 3 skipped |
-| live-rbac     | PASS   | 40 passed |
-| live-protocol | PASS   | 28 passed, 2 skipped |
-| live-all      | PASS   | pass 1: 112 passed · pass 2: 40 passed |
+| Lane | Result | Detail |
+|---|---|---|
+| probe | PASS | 401 negative, initialize, tools/list, tools/call via nginx→dataplane |
+| smoke | PASS | 1-user Locust, 10s, streamable HTTP, 0 failures |
+| MCP live | PASS | 19 passed, 3 skipped |
+| RBAC live | PASS | 40 passed |
+| protocol live | PASS | 28 passed, 2 skipped |
+| full live | PASS | pass 1: 112 passed · pass 2: 40 passed |
 
 ## Stack under test
 
-- **Harness** (cf-integration `main`): fresh-bootstrap `test-all-up*`
+- **Harness** (cf-integration `main`): fresh-bootstrap suite
   (volume reset + wait for a publisher snapshot containing the Fast
   Time server), nginx 400/404 replay to the control plane, stock SSE
   registration, 2s publisher, dataplane cache disabled, two-pass
-  `live-all`, plugin suites deselected (`CF_TEST_PLUGINS=false`;
-  plain `test-all` keeps their failures visible by design),
+  full live lane, plugin suites deselected (`--exclude-plugins`; the
+  default suite keeps their failures visible by design),
   password-change enforcement disabled for the test admin, and
-  `ensure_checkout` now tolerates upstream tag moves and offline
+  source synchronization tolerates upstream tag moves and offline
   fetches.
 - **cf-controlplane** from `user/luca/dataplane-integration-fixes`:
   open PRs [#5482](https://github.com/IBM/mcp-context-forge/pull/5482),
@@ -65,7 +66,7 @@ the linked PRs.
 
 1. **Gateway-proxy templated-resource read** — passed in the last four
    runs since the enforcement fix, but it failed intermittently in
-   live-all before root-cause was confirmed; watch for recurrence
+   full live lane before root-cause was confirmed; watch for recurrence
    before declaring it closed.
 2. **D1 — sliding-TTL user-config cache** (dataplane): harness runs
    with the cache disabled; the upstream fix is insertion-based TTL.
@@ -76,10 +77,11 @@ the linked PRs.
    workaround), no event-driven publish, publish loop shares the
    serving event loop.
 5. **Cross-plane token contract**: control-plane admin REST still
-   rejects dataplane-scoped tokens (`cf-jwt.py --admin` exists for
-   this).
+   rejects dataplane-scoped tokens (`cf-integration token --kind admin`
+   supplies the admin variant).
 6. **Plugin E2E suites** need a plugin-enforce gateway; excluded from
-   `test-all-up-no-plugins`, honestly failing under plain `test-all`.
+   `test suite --start --exclude-plugins`, honestly failing when the option is
+   omitted.
 
 ## Expected next state
 

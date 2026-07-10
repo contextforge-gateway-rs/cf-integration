@@ -1,0 +1,237 @@
+{
+  "mode": "dataplane",
+  "specification_version": "2025-11-25",
+  "cases": [
+    {
+      "name": "security.authentication-required",
+      "category": "Security",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#error-handling",
+      "detail": "unauthenticated initialize returned HTTP 401"
+    },
+    {
+      "name": "security.invalid-origin",
+      "category": "Security",
+      "status": "failed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning",
+      "detail": "expected HTTP 403, got 200"
+    },
+    {
+      "name": "security.authorization-wrong-server",
+      "category": "Security",
+      "status": "failed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#token-handling",
+      "detail": "wrong-server token returned HTTP 200"
+    },
+    {
+      "name": "protocol.initialize",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "initialize returned a valid JSON-RPC response"
+    },
+    {
+      "name": "protocol.initialize-result",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "initialize returned an object result"
+    },
+    {
+      "name": "protocol.version-negotiation",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "server selected the requested protocol version"
+    },
+    {
+      "name": "protocol.capability-negotiation",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "initialize advertised the tools capability required by the live fixture"
+    },
+    {
+      "name": "protocol.server-info",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "initialize advertised serverInfo"
+    },
+    {
+      "name": "session.creation",
+      "category": "Session handling",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "initialize returned a non-empty MCP session header"
+    },
+    {
+      "name": "protocol.initialized-notification",
+      "category": "Protocol negotiation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "initialized notification returned HTTP 202 with no body"
+    },
+    {
+      "name": "protocol.ping",
+      "category": "Utilities",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping",
+      "detail": "ping returned an empty object result"
+    },
+    {
+      "name": "session.reuse",
+      "category": "Session handling",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "post-initialize ping reused the assigned session"
+    },
+    {
+      "name": "preservation.tools-list",
+      "category": "Gateway preservation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "validated 6 tool definitions"
+    },
+    {
+      "name": "preservation.tool-schema-stability",
+      "category": "Gateway preservation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "repeated tools/list preserved exact tool definitions"
+    },
+    {
+      "name": "preservation.tool-result",
+      "category": "Gateway preservation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "tool result shape preserved for \"fast-time-echo\""
+    },
+    {
+      "name": "federation.resources-aggregation",
+      "category": "Federation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/resources",
+      "detail": "advertised resources capability returned a resources array"
+    },
+    {
+      "name": "federation.prompts-aggregation",
+      "category": "Federation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/prompts",
+      "detail": "advertised prompts capability returned a prompts array"
+    },
+    {
+      "name": "transport.invalid-protocol-version",
+      "category": "HTTP transport",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "invalid MCP-Protocol-Version returned HTTP 400"
+    },
+    {
+      "name": "session.invalid-session",
+      "category": "Session handling",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "invalid session returned HTTP 404"
+    },
+    {
+      "name": "transport.get-behaviour",
+      "category": "HTTP transport",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "GET returned an HTTP 200 SSE stream"
+    },
+    {
+      "name": "transport.malformed-json",
+      "category": "HTTP transport",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "malformed JSON returned HTTP error 415"
+    },
+    {
+      "name": "transport.malformed-jsonrpc",
+      "category": "HTTP transport",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "malformed JSON-RPC returned an HTTP error or a valid Invalid Request error"
+    },
+    {
+      "name": "virtualization.rest-to-mcp",
+      "category": "Virtualization",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "live fixture advertises no REST-generated MCP tool"
+    },
+    {
+      "name": "virtualization.grpc-to-mcp",
+      "category": "Virtualization",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "live fixture advertises no gRPC-generated MCP tool"
+    },
+    {
+      "name": "virtualization.a2a-to-mcp",
+      "category": "Virtualization",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "live fixture advertises no A2A-generated MCP tool"
+    },
+    {
+      "name": "federation.exposed-name-uniqueness",
+      "category": "Federation",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "federated catalog exposes unique tool names"
+    },
+    {
+      "name": "federation.duplicate-upstream-name",
+      "category": "Federation",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools",
+      "detail": "current live fixture does not register two upstream tools with the same name"
+    },
+    {
+      "name": "preservation.cancellation-progress",
+      "category": "Gateway preservation",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "detail": "current live fixture exposes no cancellable progress-emitting operation"
+    },
+    {
+      "name": "security.tenant-isolation",
+      "category": "Security",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning",
+      "detail": "current live fixture provisions one tenant and cannot establish cross-tenant isolation"
+    },
+    {
+      "name": "security.virtual-server-isolation",
+      "category": "Security",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning",
+      "detail": "a second live virtual-server fixture is not provisioned"
+    },
+    {
+      "name": "session.expired-session",
+      "category": "Session handling",
+      "status": "not-applicable",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "fixture does not expose a deterministic short session TTL"
+    },
+    {
+      "name": "session.delete",
+      "category": "Session handling",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "DELETE returned HTTP 202"
+    },
+    {
+      "name": "session.deleted-session",
+      "category": "Session handling",
+      "status": "passed",
+      "specification": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+      "detail": "deleted session was rejected with HTTP 404"
+    }
+  ]
+}
