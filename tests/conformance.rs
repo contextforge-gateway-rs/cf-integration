@@ -9,9 +9,9 @@ use cf_integration::conformance::{
     ComparisonClassification, ComparisonReport, ConformanceCheck, ConformanceResults,
     ConformanceScenarioResult, DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION,
     OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome, SpecReference,
-    audit_baseline, classify_outcomes, compare_result_sets, expected_server_scenarios,
-    load_baseline, load_server_results, official_server_command, parse_baseline,
-    project_official_baseline, render_comparison_markdown, validate_baseline,
+    audit_baseline, classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
+    expected_server_scenarios, load_baseline, load_server_results, official_server_command,
+    parse_baseline, project_official_baseline, render_comparison_markdown, validate_baseline,
     validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
     write_official_baseline_projection,
 };
@@ -535,6 +535,39 @@ fn explicit_missing_named_fixtures_are_not_implementation_failures() {
 }
 
 #[test]
+fn trusted_fixture_provenance_attributes_not_found_to_the_gateway() {
+    let scenario = ConformanceScenarioResult {
+        scenario: "resources-templates-read".to_owned(),
+        checks: vec![failing_check(
+            "fixture",
+            "Failed: MCP error -32002: Resource not found: test://static-text",
+        )],
+        source: PathBuf::from("resources-templates-read/checks.json"),
+    };
+
+    assert_eq!(scenario.outcome(), ScenarioOutcome::FixtureFailure);
+    assert_eq!(
+        scenario.outcome_with_trusted_fixture(true),
+        ScenarioOutcome::NonCompliant
+    );
+    assert_eq!(
+        scenario.outcome_with_trusted_fixture(false),
+        ScenarioOutcome::FixtureFailure
+    );
+    for unchanged in [
+        result("success", [CheckStatus::Success]),
+        result("failure", [CheckStatus::Failure]),
+        result("skipped", [CheckStatus::Skipped]),
+        result("ambiguous", [CheckStatus::Info]),
+    ] {
+        assert_eq!(
+            unchanged.outcome_with_trusted_fixture(true),
+            unchanged.outcome()
+        );
+    }
+}
+
+#[test]
 fn fresh_runs_reject_missing_official_fixtures() {
     let parsed = results([ConformanceScenarioResult {
         scenario: "tools-call-simple-text".to_owned(),
@@ -764,6 +797,82 @@ fn result_comparison_uses_independent_baselines_and_keeps_missing_results_ambigu
         by_name["missing-dataplane"].classification,
         ComparisonClassification::Ambiguous
     );
+}
+
+#[test]
+fn trusted_comparison_attributes_fixture_not_found_per_side() {
+    let fixture_result = |scenario: &str| ConformanceScenarioResult {
+        scenario: scenario.to_owned(),
+        checks: vec![failing_check(
+            "fixture",
+            "Failed: MCP error -32002: Resource not found: test://static-text",
+        )],
+        source: PathBuf::from(format!("{scenario}/checks.json")),
+    };
+    let controlplane = results([
+        fixture_result("control-failure"),
+        result("dataplane-failure", [CheckStatus::Success]),
+        fixture_result("shared-failure"),
+    ]);
+    let dataplane = results([
+        result("control-failure", [CheckStatus::Success]),
+        fixture_result("dataplane-failure"),
+        fixture_result("shared-failure"),
+    ]);
+    let empty = Baseline::default();
+
+    let trusted = compare_result_sets_with_fixture_trust(
+        &controlplane,
+        &dataplane,
+        &empty,
+        &empty,
+        true,
+        true,
+    )
+    .into_iter()
+    .map(|comparison| (comparison.scenario, comparison.classification))
+    .collect::<BTreeMap<_, _>>();
+    let controlplane_only_trusted = compare_result_sets_with_fixture_trust(
+        &controlplane,
+        &dataplane,
+        &empty,
+        &empty,
+        true,
+        false,
+    );
+    let dataplane_only_trusted = compare_result_sets_with_fixture_trust(
+        &controlplane,
+        &dataplane,
+        &empty,
+        &empty,
+        false,
+        true,
+    );
+    let historical = compare_result_sets(&controlplane, &dataplane, &empty, &empty);
+
+    assert_eq!(
+        trusted["control-failure"],
+        ComparisonClassification::ControlplaneOnlyFailure
+    );
+    assert_eq!(
+        trusted["dataplane-failure"],
+        ComparisonClassification::DataplaneOnlyFailure
+    );
+    assert_eq!(
+        trusted["shared-failure"],
+        ComparisonClassification::SharedFailure
+    );
+    assert!(controlplane_only_trusted.iter().any(|comparison| {
+        comparison.scenario == "shared-failure"
+            && comparison.classification == ComparisonClassification::FixtureFailure
+    }));
+    assert!(dataplane_only_trusted.iter().any(|comparison| {
+        comparison.scenario == "shared-failure"
+            && comparison.classification == ComparisonClassification::FixtureFailure
+    }));
+    assert!(historical.iter().all(|comparison| {
+        comparison.classification == ComparisonClassification::FixtureFailure
+    }));
 }
 
 #[test]

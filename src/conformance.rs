@@ -409,6 +409,19 @@ impl ConformanceScenarioResult {
         }
     }
 
+    /// Reduces the outcome using trusted pinned-fixture provenance.
+    ///
+    /// A fixture-shaped not-found result from a trusted fixture is attributed
+    /// to the gateway path as a compliance failure. Unknown or caller-managed
+    /// fixtures retain the historical fixture-failure outcome.
+    #[must_use]
+    pub fn outcome_with_trusted_fixture(&self, trusted_fixture: bool) -> ScenarioOutcome {
+        match (self.outcome(), trusted_fixture) {
+            (ScenarioOutcome::FixtureFailure, true) => ScenarioOutcome::NonCompliant,
+            (outcome, _) => outcome,
+        }
+    }
+
     fn has_official_failure(&self) -> bool {
         self.checks
             .iter()
@@ -438,11 +451,13 @@ pub struct ConformanceResults {
     pub scenarios: BTreeMap<String, ConformanceScenarioResult>,
 }
 
-/// Rejects fresh runs whose official fixture setup prevented conformance checks.
+/// Rejects fresh runs when an unknown or caller-managed fixture prevented checks.
 ///
 /// # Errors
 ///
 /// Returns an error listing every scenario with a fixture-failure outcome.
+/// Pinned fixtures with recorded provenance are handled by the runtime as
+/// gateway failures instead of calling this compatibility validator.
 pub fn validate_no_fixture_failures(results: &ConformanceResults) -> Result<()> {
     let fixture_failures = results
         .scenarios
@@ -922,6 +937,29 @@ pub fn compare_result_sets(
     controlplane_baseline: &Baseline,
     dataplane_baseline: &Baseline,
 ) -> Vec<ScenarioComparison> {
+    compare_result_sets_with_fixture_trust(
+        controlplane,
+        dataplane,
+        controlplane_baseline,
+        dataplane_baseline,
+        false,
+        false,
+    )
+}
+
+/// Compares results while independently attributing trusted fixture failures.
+///
+/// A trusted side converts fixture-shaped not-found results into ordinary
+/// implementation failures. An untrusted side preserves historical behavior.
+#[must_use]
+pub fn compare_result_sets_with_fixture_trust(
+    controlplane: &ConformanceResults,
+    dataplane: &ConformanceResults,
+    controlplane_baseline: &Baseline,
+    dataplane_baseline: &Baseline,
+    controlplane_trusted_fixture: bool,
+    dataplane_trusted_fixture: bool,
+) -> Vec<ScenarioComparison> {
     let controlplane_expected: BTreeSet<_> = controlplane_baseline
         .server
         .iter()
@@ -951,10 +989,10 @@ pub fn compare_result_sets(
             let controlplane_result = controlplane.scenarios.get(&scenario);
             let dataplane_result = dataplane.scenarios.get(&scenario);
             let controlplane_outcome = controlplane_result
-                .map(ConformanceScenarioResult::outcome)
+                .map(|result| result.outcome_with_trusted_fixture(controlplane_trusted_fixture))
                 .unwrap_or(ScenarioOutcome::Missing);
             let dataplane_outcome = dataplane_result
-                .map(ConformanceScenarioResult::outcome)
+                .map(|result| result.outcome_with_trusted_fixture(dataplane_trusted_fixture))
                 .unwrap_or(ScenarioOutcome::Missing);
 
             let mut expected_by = BTreeSet::new();

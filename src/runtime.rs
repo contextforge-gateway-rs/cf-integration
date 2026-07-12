@@ -26,8 +26,8 @@ use crate::compose::{ComposeProject, validate_integration_contract};
 use crate::config::AppConfig;
 use crate::conformance::{
     Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceResults, ScenarioOutcome,
-    audit_baseline, compare_result_sets, expected_server_scenarios, load_baseline,
-    load_server_results, official_server_command, validate_no_fixture_failures,
+    audit_baseline, compare_result_sets_with_fixture_trust, expected_server_scenarios,
+    load_baseline, load_server_results, official_server_command, validate_no_fixture_failures,
     validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
 };
 use crate::conformance_fixture::{
@@ -1806,7 +1806,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         }
         shutdown_result?;
         let results = results?;
-        validate_no_fixture_failures(&results).map_err(AppFailure::from)?;
+        if run.fixture.is_none() {
+            validate_no_fixture_failures(&results).map_err(AppFailure::from)?;
+        }
         mark_conformance_complete(
             &process_result,
             &results,
@@ -1999,12 +2001,18 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .as_ref()
                 .map(|artifact| &artifact.results),
             controlplane_gateway.as_ref(),
+            controlplane_official
+                .as_ref()
+                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
         );
         let dataplane = ModeCoverageEvidence::from_artifacts(
             dataplane_official
                 .as_ref()
                 .map(|artifact| &artifact.results),
             dataplane_gateway.as_ref(),
+            dataplane_official
+                .as_ref()
+                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
         );
         enrich_overlay_results(overlay, &controlplane, &dataplane);
         Ok(())
@@ -2063,7 +2071,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         )?;
         let empty_results = ConformanceResults::default();
         let empty_baseline = Baseline::default();
-        let scenarios = compare_result_sets(
+        let scenarios = compare_result_sets_with_fixture_trust(
             controlplane
                 .as_ref()
                 .map_or(&empty_results, |artifact| &artifact.results),
@@ -2076,6 +2084,12 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             dataplane
                 .as_ref()
                 .map_or(&empty_baseline, |artifact| &artifact.baseline),
+            controlplane
+                .as_ref()
+                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
+            dataplane
+                .as_ref()
+                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
         );
         let output = paths.report_output.join("mcp-conformance-comparison.md");
         write_comparison_report(
@@ -2284,12 +2298,13 @@ impl ModeCoverageEvidence {
     fn from_artifacts(
         official: Option<&ConformanceResults>,
         gateway: Option<&GatewayComplianceReport>,
+        trusted_official_fixture: bool,
     ) -> Self {
         let official_results = official
             .into_iter()
             .flat_map(|results| &results.scenarios)
             .map(|(scenario, result)| {
-                let result = match result.outcome() {
+                let result = match result.outcome_with_trusted_fixture(trusted_official_fixture) {
                     ScenarioOutcome::Compliant => CoverageResult::Pass,
                     ScenarioOutcome::NonCompliant => CoverageResult::Fail,
                     ScenarioOutcome::NotApplicable => CoverageResult::NotApplicable,
@@ -2762,16 +2777,16 @@ mod tests {
                 .expect("official runner output directory should be present");
             let scenarios =
                 expected_server_scenarios("active", "2025-11-25").expect("pinned active catalog");
-            for (index, scenario) in scenarios.into_iter().enumerate() {
+            for scenario in scenarios {
                 let directory = output.join(format!("server-{scenario}-2026-07-10T03-17-47-000Z"));
                 fs::create_dir_all(&directory)
                     .expect("official scenario directory should be created");
-                let fixture_failure = index == 0;
+                let fixture_failure = scenario == "resources-templates-read";
                 let checks = serde_json::to_vec(&serde_json::json!([{
                     "id": format!("{scenario}-check"),
                     "status": if fixture_failure { "FAILURE" } else { "SUCCESS" },
                     "errorMessage": fixture_failure
-                        .then_some("Failed: MCP error -32601: Tool not found: test_simple_text"),
+                        .then_some("Failed: MCP error -32002: Resource not found: test://static-text"),
                 }]))
                 .expect("official checks should serialize");
                 fs::write(directory.join("checks.json"), checks)
@@ -4664,6 +4679,25 @@ mod tests {
         }
     }
 
+    fn write_fixture_failure_result(root: &Path, scenario: &str) {
+        let directory = fs::read_dir(root)
+            .expect("official results directory should exist")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().contains(scenario))
+            .expect("fixture-failure scenario directory should exist")
+            .path();
+        fs::write(
+            directory.join("checks.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "id": "fixture-check",
+                "status": "FAILURE",
+                "errorMessage": "Failed: MCP error -32002: Resource not found: test://static-text",
+            }]))
+            .expect("fixture failure should serialize"),
+        )
+        .expect("fixture failure should be written");
+    }
+
     #[test]
     fn inspector_command_is_pinned_and_contains_no_credentials() {
         let command = inspector_command("http://127.0.0.1:49152/mcp-auth/random", "tools/list");
@@ -4772,7 +4806,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_fixture_failure_run_is_not_marked_complete_or_reportable() {
+    async fn caller_managed_resource_template_not_found_is_not_complete_or_reportable() {
         let artifacts = tempfile::tempdir().expect("temporary artifact root");
         let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
         let runtime = RuntimeExecutor::new(test_config([]), CompletedFixtureFailureRunner);
@@ -4807,6 +4841,96 @@ mod tests {
                 .to_string()
                 .contains("incomplete conformance artifacts")
         );
+    }
+
+    #[tokio::test]
+    async fn trusted_resource_template_not_found_is_complete_and_reportable_as_gateway_failure() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let runtime = RuntimeExecutor::new(test_config([]), CompletedFixtureFailureRunner);
+        let fixture = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            OFFICIAL_CONFORMANCE_REVISION,
+            "actual-provisioned-server",
+        );
+
+        let error = runtime
+            .run_official_conformance_mode(
+                &OfficialConformanceRun {
+                    mode: StackMode::Controlplane,
+                    server_id: "actual-provisioned-server",
+                    token: "token",
+                    spec_version: "2025-11-25",
+                    suite: "active",
+                    custom_baseline: None,
+                    fixture: Some(&fixture),
+                    cancellation: tokio::sync::watch::channel(false).1,
+                },
+                &paths,
+            )
+            .await
+            .expect_err("trusted gateway failure should remain a baseline audit failure");
+
+        assert!(error.to_string().contains("unexpected failures"));
+        let mode_paths = paths.conformance_mode(BaselineTarget::Controlplane);
+        assert!(mode_paths.completion.is_file());
+        let loaded = runtime
+            .load_conformance_artifact(&paths, BaselineTarget::Controlplane)
+            .expect("completed trusted artifacts should load")
+            .expect("trusted artifact should be present");
+        assert_eq!(loaded.metadata.fixture, Some(fixture));
+    }
+
+    #[test]
+    fn trusted_artifact_report_attributes_fixture_not_found_to_gateway() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let scenarios =
+            expected_server_scenarios("active", "2025-11-25").expect("pinned active catalog");
+        let fixture_scenario = "resources-templates-read";
+        let fixture = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            OFFICIAL_CONFORMANCE_REVISION,
+            "actual-provisioned-server",
+        );
+        for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
+            let mode_paths = paths.conformance_mode(target);
+            write_official_results(
+                &mode_paths.official_results,
+                scenarios.iter().copied(),
+                "SUCCESS",
+            );
+            if target == BaselineTarget::Controlplane {
+                write_fixture_failure_result(&mode_paths.official_results, fixture_scenario);
+            }
+            fs::write(&mode_paths.rich_baseline, "server: []\n")
+                .expect("empty rich baseline should be written");
+            write_run_metadata(
+                &mode_paths.metadata,
+                &ConformanceRunMetadata {
+                    oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                    target: target.label().to_owned(),
+                    spec_version: "2025-11-25".to_owned(),
+                    suite: "active".to_owned(),
+                    fixture: Some(fixture.clone()),
+                },
+            )
+            .expect("trusted metadata should be written");
+            write_completion_marker(&mode_paths.completion)
+                .expect("completion marker should be written");
+        }
+        let runtime = RuntimeExecutor::new(test_config([]), DefaultsRunner::default());
+
+        let report_path = runtime
+            .write_comparison_from_artifacts(&paths, None)
+            .expect("matching trusted provenance should be reportable");
+        let report = fs::read_to_string(report_path).expect("comparison report should be readable");
+
+        assert!(report.contains("| fixture failure | 0 |"));
+        assert!(report.contains("| control-plane only failure | 1 |"));
+        assert!(report.contains(&format!(
+            "| {fixture_scenario} | failure | compliant | control-plane only failure |"
+        )));
     }
 
     #[test]
@@ -5233,6 +5357,26 @@ mod tests {
 
         assert_eq!(
             overlay.requirements[0].controlplane_result,
+            CoverageResult::NotRun
+        );
+    }
+
+    #[test]
+    fn trusted_fixture_failure_is_failed_coverage_while_historical_is_not_run() {
+        let artifacts = tempfile::tempdir().expect("temporary official results");
+        write_official_results(artifacts.path(), ["resources-templates-read"], "SUCCESS");
+        write_fixture_failure_result(artifacts.path(), "resources-templates-read");
+        let results = load_server_results(artifacts.path()).expect("fixture failure should parse");
+
+        let trusted = ModeCoverageEvidence::from_artifacts(Some(&results), None, true);
+        let historical = ModeCoverageEvidence::from_artifacts(Some(&results), None, false);
+
+        assert_eq!(
+            trusted.official["resources-templates-read"],
+            CoverageResult::Fail
+        );
+        assert_eq!(
+            historical.official["resources-templates-read"],
             CoverageResult::NotRun
         );
     }
