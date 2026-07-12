@@ -15,15 +15,17 @@ split above, and `DATAPLANE_PUBLISHER=true` on the gateway so virtual-server
 configs reach `cf-dataplane` through Redis. Startup fails if Fast Time is not
 using `ghcr.io/ibm/cfex-mcp-fast-time-server:latest`, legacy Fast Time/Fast Test
 images appear in the rendered Compose config, or Fast Test services are active
-in the base integration stack.
+in the base integration stack. Fast Time remains the probe, load, and live-test
+fixture; the normal stack is unchanged by the profile-gated official
+conformance fixture.
 
 ## Requirements
 
 - Rust 1.97 or newer and Cargo
 - Docker Engine with Docker Compose v2
 - Git
-- Node.js 22.7.5 or newer with `npx` for official MCP conformance and Inspector
-  commands
+- Node.js 22.7.5 or newer with `npx` for the official MCP conformance runner and
+  Inspector commands
 - The control-plane development prerequisites (`uv`, pytest, and Make) for
   upstream live tests
 
@@ -77,7 +79,9 @@ The Fast Time backend is registered as virtual server
 `9779b6698cbd4b4995ee04a4fab38737`, so probes and load tests need no manual UI
 setup. It runs in dual-transport mode (`/mcp` streamable HTTP and `/sse`). The
 publisher exports streamable-HTTP backends to the dataplane; SSE-backed virtual
-servers remain on the control-plane route.
+servers remain on the control-plane route. Fast Time stays an ordinary
+probe/load/live fixture; official conformance runs provision their own
+dedicated fixture instead of changing its behavior.
 
 ## Modes
 
@@ -178,11 +182,16 @@ comma-separated set of listed safe tools.
 ## MCP compliance
 
 The [official MCP Conformance Test
-Framework](https://github.com/modelcontextprotocol/conformance) server oracle
-is pinned to `@modelcontextprotocol/conformance@0.1.16`. The default stable MCP
-revision is `2025-11-25`; `--suite active` excludes upstream pending scenarios,
-while the default `--suite all` includes every scenario tagged for that
-revision.
+Framework](https://github.com/modelcontextprotocol/conformance) runner is
+pinned to `@modelcontextprotocol/conformance@0.1.16`. Its official TypeScript
+conformance server is built from upstream commit
+`21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0`. The container applies one
+deployment-only line to the Docker Host allowlist; no MCP fixture behavior is
+changed. The linked upstream `everything-client` example is not used because
+it is a client-under-test; the official server runner remains the client-side
+oracle. The default stable MCP revision is `2025-11-25`; `--suite active`
+excludes upstream pending scenarios, while the default `--suite all` includes
+every scenario tagged for that revision.
 
 ```bash
 # Official framework only
@@ -198,12 +207,23 @@ cargo run --locked -- compliance all --mode all --start
 cargo run --locked -- compliance report
 ```
 
-Use `--server-id` for an existing fixture, `--spec-version` to select an
-explicit revision, and `--results-dir` to change the generated artifact root.
-The harness starts each selected stack when `--start` is present, uses the
-configured ID or the auto-registered Fast Time fixture, generates a
-mode-appropriate token, runs each topology independently, and preserves the
-command's failure status.
+Without a caller-managed server ID, `compliance conformance` and `compliance
+all` start the profile-gated official TypeScript fixture, register a dedicated
+gateway and virtual server, wait for dataplane publication when needed, and
+run the official runner through the public authenticated route. The harness
+removes the temporary API resources and service on success, failure, or
+Ctrl-C. Automatic provisioning is restricted to a loopback
+`MCP_CLI_BASE_URL`; remote or shared environments require a caller-managed
+server ID.
+
+`--server-id` bypasses automatic provisioning and targets a caller-managed,
+existing fixture. `MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` do the same when
+the CLI option is absent. Use `--spec-version` to select an explicit revision
+and `--results-dir` to change the generated artifact root. The harness starts
+each selected stack when `--start` is present, generates a mode-appropriate
+token, runs each topology independently, and preserves the command's failure
+status. Gateway-only compliance continues to use its configured/default
+fixture and does not provision the official TypeScript server.
 
 The official-only command passes supported dated revisions through to the
 pinned framework. Rust gateway cases are currently defined for
@@ -214,6 +234,11 @@ The official framework has no bearer-header option. The harness therefore
 binds a random-path loopback proxy with a fixed upstream endpoint and injects
 the Authorization header there. Tokens never appear in the `npx` argument
 list. The same proxy boundary is used for Inspector.
+
+Missing or incomplete `test_*` / `test://` fixture registrations abort setup
+or fresh-stack completion; they are not classified as gateway failures.
+Result metadata records fixture provenance, and comparison reports require
+matching provenance before comparing topologies.
 
 Expected failures are independent and mode-specific:
 

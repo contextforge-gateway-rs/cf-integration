@@ -51,6 +51,21 @@ fn run_host_patch(source: &str) -> (std::process::ExitStatus, String) {
 }
 
 #[test]
+fn readme_documents_the_official_conformance_fixture_contract() {
+    let readme = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+        .expect("read README");
+    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for fact in [
+        "official TypeScript conformance server",
+        "Fast Time remains the probe, load, and live-test fixture",
+        "`--server-id` bypasses automatic provisioning",
+    ] {
+        assert!(normalized.contains(fact), "README must document: {fact}");
+    }
+}
+
+#[test]
 fn dataplane_compose_files_are_in_override_order() {
     let project = ComposeProject::dataplane(
         Path::new("/repo"),
