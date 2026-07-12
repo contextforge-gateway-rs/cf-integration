@@ -2491,6 +2491,13 @@ fn compatible_metadata<'a>(
         ))
     })?;
     if let (Some(controlplane), Some(dataplane)) = (controlplane, dataplane)
+        && controlplane.fixture != dataplane.fixture
+    {
+        return Err(AppFailure::from(anyhow!(
+            "control-plane and dataplane conformance fixture provenance mismatch"
+        )));
+    }
+    if let (Some(controlplane), Some(dataplane)) = (controlplane, dataplane)
         && (controlplane.spec_version != dataplane.spec_version
             || controlplane.suite != dataplane.suite
             || controlplane.oracle != dataplane.oracle)
@@ -4852,6 +4859,103 @@ mod tests {
         let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
             .expect_err("mixed suites must not be reported as one comparison");
         assert!(error.to_string().contains("incompatible runs"));
+    }
+
+    fn paired_metadata(fixture: Option<ConformanceFixtureMetadata>) -> ConformanceRunMetadata {
+        ConformanceRunMetadata {
+            oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+            target: "control-plane".to_owned(),
+            spec_version: "2025-11-25".to_owned(),
+            suite: "active".to_owned(),
+            fixture,
+        }
+    }
+
+    fn fixture_metadata(
+        repository: &str,
+        revision: &str,
+        server_id: &str,
+    ) -> ConformanceFixtureMetadata {
+        ConformanceFixtureMetadata {
+            repository: repository.to_owned(),
+            revision: revision.to_owned(),
+            server_id: server_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn historical_paired_metadata_without_fixture_is_compatible() {
+        let controlplane = paired_metadata(None);
+        let mut dataplane = controlplane.clone();
+        dataplane.target = "dataplane".to_owned();
+
+        compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+            .expect("historical paired metadata should remain compatible");
+    }
+
+    #[test]
+    fn identical_paired_fixture_provenance_is_compatible() {
+        let controlplane = paired_metadata(Some(fixture_metadata(
+            "repository",
+            "revision",
+            "server-id",
+        )));
+        let mut dataplane = controlplane.clone();
+        dataplane.target = "dataplane".to_owned();
+
+        compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+            .expect("identical fixture provenance should be compatible");
+    }
+
+    #[test]
+    fn paired_metadata_rejects_fixture_presence_mismatch_without_leaking_values() {
+        let controlplane = paired_metadata(Some(fixture_metadata(
+            "sensitive-repository-value",
+            "sensitive-revision-value",
+            "sensitive-server-value",
+        )));
+        let mut dataplane = paired_metadata(None);
+        dataplane.target = "dataplane".to_owned();
+
+        let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+            .expect_err("fresh and historical fixture provenance must not be mixed");
+        let message = error.to_string();
+
+        assert!(message.contains("fixture provenance mismatch"));
+        for secret in [
+            "sensitive-repository-value",
+            "sensitive-revision-value",
+            "sensitive-server-value",
+        ] {
+            assert!(!message.contains(secret));
+        }
+    }
+
+    #[test]
+    fn paired_metadata_rejects_different_fixture_fields_without_leaking_values() {
+        for (repository, revision, server_id) in [
+            ("other-repository", "revision", "server-id"),
+            ("repository", "other-revision", "server-id"),
+            ("repository", "revision", "other-server-id"),
+        ] {
+            let controlplane = paired_metadata(Some(fixture_metadata(
+                "repository",
+                "revision",
+                "server-id",
+            )));
+            let mut dataplane =
+                paired_metadata(Some(fixture_metadata(repository, revision, server_id)));
+            dataplane.target = "dataplane".to_owned();
+
+            let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+                .expect_err("different fixture provenance must not be compared");
+
+            let message = error.to_string();
+            assert!(message.contains("fixture provenance mismatch"));
+            for value in [repository, revision, server_id] {
+                assert!(!message.contains(value));
+            }
+        }
     }
 
     #[test]
