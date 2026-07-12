@@ -466,7 +466,7 @@ fn result_loader_rejects_untrusted_directory_names_and_duplicate_scenarios() {
 fn baseline_audit_finds_expected_unexpected_stale_and_unobserved_entries() {
     let parsed = results([
         result("expected-failure", [CheckStatus::Failure]),
-        result("unexpected-warning", [CheckStatus::Warning]),
+        result("unexpected-failure", [CheckStatus::Failure]),
         result("fixed", [CheckStatus::Success]),
     ]);
     let baseline = Baseline {
@@ -480,10 +480,42 @@ fn baseline_audit_finds_expected_unexpected_stale_and_unobserved_entries() {
     let audit = audit_baseline(&parsed, &baseline);
 
     assert_eq!(audit.expected_failures, ["expected-failure"]);
-    assert_eq!(audit.unexpected_failures, ["unexpected-warning"]);
+    assert_eq!(audit.unexpected_failures, ["unexpected-failure"]);
     assert_eq!(audit.stale_entries, ["fixed"]);
     assert_eq!(audit.unobserved_entries, ["not-run"]);
     assert!(!audit.is_clean());
+}
+
+#[test]
+fn warning_only_scenario_is_not_applicable() {
+    assert_eq!(
+        result("warning", [CheckStatus::Warning]).outcome(),
+        ScenarioOutcome::NotApplicable
+    );
+}
+
+#[test]
+fn success_with_warning_scenario_is_compliant() {
+    assert_eq!(
+        result("warning", [CheckStatus::Success, CheckStatus::Warning]).outcome(),
+        ScenarioOutcome::Compliant
+    );
+}
+
+#[test]
+fn baseline_audit_does_not_treat_warnings_as_failures() {
+    let parsed = results([
+        result("warning-only", [CheckStatus::Warning]),
+        result(
+            "success-with-warning",
+            [CheckStatus::Success, CheckStatus::Warning],
+        ),
+    ]);
+
+    let audit = audit_baseline(&parsed, &Baseline::default());
+
+    assert!(audit.is_clean());
+    assert!(audit.unexpected_failures.is_empty());
 }
 
 #[test]
@@ -494,7 +526,7 @@ fn scenario_outcomes_follow_official_failure_and_skip_semantics() {
     );
     assert_eq!(
         result("warning", [CheckStatus::Success, CheckStatus::Warning]).outcome(),
-        ScenarioOutcome::NonCompliant
+        ScenarioOutcome::Compliant
     );
     assert_eq!(
         result("failure", [CheckStatus::Failure]).outcome(),

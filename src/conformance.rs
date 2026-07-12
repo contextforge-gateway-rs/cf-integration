@@ -256,7 +256,7 @@ pub enum CheckStatus {
     Success,
     /// Required check failed.
     Failure,
-    /// Warning; the official baseline logic treats this as a scenario failure.
+    /// Warning; does not count as a failure in the official runner summary.
     Warning,
     /// Scenario or check was explicitly skipped.
     Skipped,
@@ -373,13 +373,15 @@ impl ConformanceScenarioResult {
     #[must_use]
     pub fn outcome(&self) -> ScenarioOutcome {
         let mut has_success = false;
+        let mut has_warning = false;
         let mut has_skipped = false;
         let mut has_unknown = false;
         let mut failures = Vec::new();
 
         for check in &self.checks {
             match check.status {
-                CheckStatus::Failure | CheckStatus::Warning => failures.push(check),
+                CheckStatus::Failure => failures.push(check),
+                CheckStatus::Warning => has_warning = true,
                 CheckStatus::Success => has_success = true,
                 CheckStatus::Skipped => has_skipped = true,
                 CheckStatus::Other(_) => has_unknown = true,
@@ -402,7 +404,7 @@ impl ConformanceScenarioResult {
             ScenarioOutcome::Ambiguous
         } else if has_success {
             ScenarioOutcome::Compliant
-        } else if has_skipped {
+        } else if has_warning || has_skipped {
             ScenarioOutcome::NotApplicable
         } else {
             ScenarioOutcome::Ambiguous
@@ -425,7 +427,7 @@ impl ConformanceScenarioResult {
     fn has_official_failure(&self) -> bool {
         self.checks
             .iter()
-            .any(|check| matches!(check.status, CheckStatus::Failure | CheckStatus::Warning))
+            .any(|check| matches!(check.status, CheckStatus::Failure))
     }
 }
 
@@ -740,11 +742,11 @@ fn is_issue_reference(value: &str) -> bool {
 /// Difference between one rich baseline and parsed official results.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BaselineAudit {
-    /// Failures or warnings that are documented in the baseline.
+    /// Failures that are documented in the baseline.
     pub expected_failures: Vec<String>,
-    /// Failures or warnings absent from the baseline.
+    /// Failures absent from the baseline.
     pub unexpected_failures: Vec<String>,
-    /// Baseline entries whose observed scenario now has no failure or warning.
+    /// Baseline entries whose observed scenario now has no failure.
     pub stale_entries: Vec<String>,
     /// Baseline entries not present in the parsed result set.
     pub unobserved_entries: Vec<String>,
@@ -760,7 +762,7 @@ impl BaselineAudit {
     }
 }
 
-/// Compares parsed scenario results to a rich baseline using official warning semantics.
+/// Compares parsed scenario results to a rich baseline using official failure semantics.
 #[must_use]
 pub fn audit_baseline(results: &ConformanceResults, baseline: &Baseline) -> BaselineAudit {
     let expected: BTreeSet<_> = baseline
