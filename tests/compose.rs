@@ -58,8 +58,13 @@ fn readme_documents_the_official_conformance_fixture_contract() {
 
     for fact in [
         "official TypeScript conformance server",
-        "Fast Time remains the probe, load, and live-test fixture",
+        "Fast Time remains",
         "`--server-id` bypasses automatic provisioning",
+        "21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0",
+        "loopback `MCP_CLI_BASE_URL`",
+        "`MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` bypass automatic provisioning",
+        "fresh conformance-run completion",
+        "fixture provenance mismatch prevents comparison",
     ] {
         assert!(normalized.contains(fact), "README must document: {fact}");
     }

@@ -217,13 +217,14 @@ Ctrl-C. Automatic provisioning is restricted to a loopback
 server ID.
 
 `--server-id` bypasses automatic provisioning and targets a caller-managed,
-existing fixture. `MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` do the same when
-the CLI option is absent. Use `--spec-version` to select an explicit revision
-and `--results-dir` to change the generated artifact root. The harness starts
-each selected stack when `--start` is present, generates a mode-appropriate
-token, runs each topology independently, and preserves the command's failure
-status. Gateway-only compliance continues to use its configured/default
-fixture and does not provision the official TypeScript server.
+existing fixture. `MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` bypass automatic
+provisioning when the CLI option is absent. Use `--spec-version` to select an
+explicit revision and `--results-dir` to change the generated artifact root.
+The harness starts each selected stack when `--start` is present, generates a
+mode-appropriate token, runs each topology independently, and preserves the
+command's failure status. Gateway-only compliance continues to use its
+configured/default fixture and does not provision the official TypeScript
+server.
 
 The official-only command passes supported dated revisions through to the
 pinned framework. Rust gateway cases are currently defined for
@@ -236,9 +237,9 @@ the Authorization header there. Tokens never appear in the `npx` argument
 list. The same proxy boundary is used for Inspector.
 
 Missing or incomplete `test_*` / `test://` fixture registrations abort setup
-or fresh-stack completion; they are not classified as gateway failures.
-Result metadata records fixture provenance, and comparison reports require
-matching provenance before comparing topologies.
+or fresh conformance-run completion; they are not classified as gateway
+failures. Result metadata records fixture provenance. A fixture provenance
+mismatch prevents comparison between topologies.
 
 Expected failures are independent and mode-specific:
 
