@@ -4,7 +4,6 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use reqwest::header::HeaderValue;
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -89,8 +88,9 @@ impl ConformanceFixtureClientBuilder {
             return Err(anyhow!("max_attempts must be greater than zero"));
         }
         let base_url = validate_base_url(&self.base_url)?;
-        HeaderValue::from_str(&format!("Bearer {}", self.admin_token))
-            .map_err(|_| anyhow!("admin token is not a valid HTTP bearer token"))?;
+        if !is_valid_bearer_token(&self.admin_token) {
+            return Err(anyhow!("admin token must be a valid RFC 6750 bearer token"));
+        }
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -435,6 +435,16 @@ fn validate_base_url(base_url: &str) -> Result<Url> {
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
+}
+
+fn is_valid_bearer_token(token: &str) -> bool {
+    let unpadded_len = token.find('=').unwrap_or(token.len());
+    let (unpadded, padding) = token.split_at(unpadded_len);
+    !unpadded.is_empty()
+        && unpadded.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
+        && padding.bytes().all(|byte| byte == b'=')
 }
 
 fn safe_error(error: &anyhow::Error, token: &str) -> String {

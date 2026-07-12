@@ -155,16 +155,16 @@ fn gateway_record(id: &str) -> Value {
 fn catalogs(gateway_key: &str, prompt: bool) -> [Value; 3] {
     [
         json!([
-            {"id":"tool-id", "name":"test_simple_text", gateway_key:GATEWAY_ID},
+            {"id":"tool-1", "name":"test_simple_text", gateway_key:GATEWAY_ID},
             {"id":"foreign-tool", "name":"test_simple_text", gateway_key:"other-gateway"}
         ]),
         json!([
-            {"id":"resource-id", "uri":"test://static-text", gateway_key:GATEWAY_ID},
+            {"id":"resource-1", "uri":"test://static-text", gateway_key:GATEWAY_ID},
             {"id":"foreign-resource", "uri":"test://static-text", gateway_key:"other-gateway"}
         ]),
         if prompt {
             json!([
-                {"id":"prompt-id", "name":"test_simple_prompt", gateway_key:GATEWAY_ID},
+                {"id":"prompt-1", "name":"test_simple_prompt", gateway_key:GATEWAY_ID},
                 {"id":"foreign-prompt", "name":"test_simple_prompt", gateway_key:"other-gateway"}
             ])
         } else {
@@ -252,16 +252,18 @@ async fn provision_uses_authenticated_admin_api_in_exact_order() {
     let server = requests.last().expect("server request");
     assert_eq!(server.method, "POST");
     assert_eq!(server.path, "/servers");
-    let server = &server.body.as_ref().expect("server body")["server"];
-    assert_eq!(server["id"], OFFICIAL_CONFORMANCE_SERVER_ID);
-    assert_eq!(server["associated_tools"].as_array().map(Vec::len), Some(1));
     assert_eq!(
-        server["associated_resources"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(
-        server["associated_prompts"].as_array().map(Vec::len),
-        Some(1)
+        server.body.as_ref().expect("server body"),
+        &json!({
+            "server": {
+                "id": OFFICIAL_CONFORMANCE_SERVER_ID,
+                "name": "Official MCP Conformance Server",
+                "description": "Virtual server for the pinned official MCP conformance fixture.",
+                "associated_tools": ["tool-1"],
+                "associated_resources": ["resource-1"],
+                "associated_prompts": ["prompt-1"]
+            }
+        })
     );
     api.assert_complete();
 }
@@ -314,7 +316,7 @@ async fn provision_accepts_snake_case_gateway_ids() {
     let server = api.requests().pop().expect("server request");
     assert_eq!(
         server.body.expect("server body")["server"]["associated_tools"][0],
-        "tool-id"
+        "tool-1"
     );
     api.assert_complete();
 }
@@ -494,6 +496,31 @@ fn builder_rejects_invalid_base_url_and_zero_attempts() {
 
     assert!(format!("{invalid_url:#}").contains("base URL"));
     assert!(format!("{zero_attempts:#}").contains("max_attempts"));
+}
+
+#[test]
+fn builder_accepts_rfc6750_b64token_and_jwt_characters() {
+    for token in [
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signature_-~",
+        "abcDEF012-._~+/==",
+    ] {
+        ConformanceFixtureClient::builder("http://localhost", token)
+            .build()
+            .expect("valid RFC 6750 bearer token");
+    }
+}
+
+#[test]
+fn builder_rejects_empty_whitespace_and_internal_equals_without_echoing_token() {
+    for token in ["", "token with space", "abc=def"] {
+        let error = ConformanceFixtureClient::builder("http://localhost", token)
+            .build()
+            .expect_err("malformed bearer token");
+        let message = format!("{error:#}");
+        if !token.is_empty() {
+            assert!(!message.contains(token), "token leaked in: {message}");
+        }
+    }
 }
 
 #[tokio::test]
