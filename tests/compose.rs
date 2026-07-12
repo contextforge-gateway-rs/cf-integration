@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cf_integration::compose::{ComposeProject, validate_integration_contract};
 use serde_json::json;
@@ -31,6 +32,22 @@ fn messages(config: &serde_json::Value) -> Vec<String> {
         .into_iter()
         .map(|violation| violation.to_string())
         .collect()
+}
+
+fn run_host_patch(source: &str) -> (std::process::ExitStatus, String) {
+    let directory = tempfile::tempdir().expect("create patch test directory");
+    let target = directory.path().join("everything-server.ts");
+    fs::write(&target, source).expect("write patch test input");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docker/patch-mcp-conformance-hosts.mjs");
+
+    let output = Command::new("node")
+        .arg(script)
+        .arg(&target)
+        .output()
+        .expect("run conformance host patch");
+    let contents = fs::read_to_string(target).expect("read patch test output");
+    (output.status, contents)
 }
 
 #[test]
@@ -148,6 +165,14 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
         dockerfile
             .contains("ARG MCP_CONFORMANCE_REVISION=21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0")
     );
+    assert!(dockerfile.contains(
+        "git clone https://github.com/modelcontextprotocol/conformance.git mcp-conformance"
+    ));
+    assert!(
+        dockerfile
+            .contains("git -C mcp-conformance checkout --detach \"${MCP_CONFORMANCE_REVISION}\"")
+    );
+    assert!(dockerfile.contains("WORKDIR /opt/mcp-conformance/examples/servers/typescript"));
     assert!(dockerfile.contains("npm ci"));
     assert!(
         dockerfile
@@ -160,6 +185,14 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
         dockerfile
             .contains("git diff --numstat -- examples/servers/typescript/everything-server.ts")
     );
+    assert!(
+        dockerfile
+            .contains("awk 'NF == 3 && $1 == 1 && $2 == 1 { count++ } END { print count + 0 }'")
+    );
+    assert!(dockerfile.contains("END { print count + 0 }')\" = 1"));
+    assert!(dockerfile.contains("ENV PORT=3000"));
+    assert!(dockerfile.contains("EXPOSE 3000"));
+    assert!(dockerfile.contains("CMD [\"npm\", \"start\"]"));
 
     let old = "const app = createMcpExpressApp();";
     let replacement = "const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });";
@@ -171,7 +204,37 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
     assert!(compose.contains("mcp_conformance_server:"));
     assert!(compose.contains("profiles: [\"conformance\"]"));
     assert!(compose.contains("cf-integration/mcp-conformance-server:0.1.16"));
+    assert!(compose.contains(
+        "context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}"
+    ));
+    assert!(compose.contains("dockerfile: docker/mcp-conformance-server.Dockerfile"));
+    assert!(compose.contains("restart: \"no\""));
+    assert!(compose.contains("PORT: \"3000\""));
+    assert!(compose.contains("- mcpnet"));
+    assert!(compose.contains(
+        "fetch('http://127.0.0.1:3000/mcp').then(response => { if (response.status !== 400) process.exit(1); }).catch(() => process.exit(1))"
+    ));
+    assert!(compose.contains("interval: 2s"));
+    assert!(compose.contains("timeout: 2s"));
+    assert!(compose.contains("retries: 30"));
+    assert!(compose.contains("start_period: 2s"));
     assert!(!compose.contains("fast_time_server"));
+}
+
+#[test]
+fn conformance_host_patch_is_fail_closed_and_rewrites_exactly_one_target() {
+    let old = "const app = createMcpExpressApp();";
+    let replacement = "const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });";
+
+    let (status, patched) = run_host_patch(&format!("before\n{old}\nafter\n"));
+    assert!(status.success());
+    assert_eq!(patched, format!("before\n{replacement}\nafter\n"));
+
+    for unchanged in ["no patch target\n".to_owned(), format!("{old}\n{old}\n")] {
+        let (status, contents) = run_host_patch(&unchanged);
+        assert!(!status.success());
+        assert_eq!(contents, unchanged);
+    }
 }
 
 #[test]
