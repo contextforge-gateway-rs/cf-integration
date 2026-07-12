@@ -30,6 +30,8 @@ pub const OFFICIAL_CONFORMANCE_SERVER_ID: &str = "3f33286667d34b65a31c3bafd30e4c
 
 const SERVER_NAME: &str = "Official MCP Conformance Server";
 const SERVER_DESCRIPTION: &str = "Virtual server for the pinned official MCP conformance fixture.";
+const GATEWAY_DESCRIPTION: &str = "Official MCP conformance fixture";
+const GATEWAY_TRANSPORT: &str = "STREAMABLEHTTP";
 const REQUIRED_TOOL: &str = "test_simple_text";
 const REQUIRED_RESOURCE: &str = "test://static-text";
 const REQUIRED_PROMPT: &str = "test_simple_prompt";
@@ -133,6 +135,7 @@ impl ConformanceFixtureClientBuilder {
             return Err(anyhow!("admin token must be a valid RFC 6750 bearer token"));
         }
         let http = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(self.request_timeout)
             .build()
@@ -206,7 +209,12 @@ impl ConformanceFixtureClient {
     /// catalog identities do not appear within the configured attempts. A
     /// fixture created before the failure is cleaned up automatically.
     pub async fn provision(&self, backend_url: &str) -> Result<ProvisionedConformanceFixture> {
-        self.delete("servers", OFFICIAL_CONFORMANCE_SERVER_ID)
+        if backend_url != OFFICIAL_CONFORMANCE_BACKEND_URL {
+            return Err(anyhow!(
+                "official conformance backend URL does not match the pinned fixture"
+            ));
+        }
+        self.delete_owned_server(OFFICIAL_CONFORMANCE_SERVER_ID)
             .await?;
         self.delete_reserved_gateways_once().await?;
 
@@ -216,10 +224,20 @@ impl ConformanceFixtureClient {
                 &json!({
                     "name": OFFICIAL_CONFORMANCE_GATEWAY_NAME,
                     "url": backend_url,
-                    "transport": "STREAMABLEHTTP",
+                    "transport": GATEWAY_TRANSPORT,
+                    "description": GATEWAY_DESCRIPTION,
                 }),
             )
             .await;
+        let gateway_result = gateway_result.and_then(|gateway| {
+            if gateway.is_owned() {
+                Ok(gateway)
+            } else {
+                Err(anyhow!(
+                    "created gateway is not owned by the conformance fixture"
+                ))
+            }
+        });
         let gateway = match gateway_result {
             Ok(gateway) => gateway,
             Err(primary) => {
@@ -263,11 +281,11 @@ impl ConformanceFixtureClient {
         let server_id = fixture.map_or(OFFICIAL_CONFORMANCE_SERVER_ID, |value| {
             value.server_id.as_str()
         });
-        let server_result = self.delete("servers", server_id).await;
+        let server_result = self.delete_owned_server(server_id).await;
         let Some(fixture) = fixture else {
             return server_result;
         };
-        let gateway_result = self.delete("gateways", &fixture.gateway_id).await;
+        let gateway_result = self.delete_owned_gateway(&fixture.gateway_id).await;
         match (server_result, gateway_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -309,6 +327,11 @@ impl ConformanceFixtureClient {
             .iter()
             .filter(|gateway| gateway.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME)
             .collect();
+        if reserved.iter().any(|gateway| !gateway.is_owned()) {
+            return Err(anyhow!(
+                "reserved-name gateway collision is not owned by the conformance fixture"
+            ));
+        }
         for gateway in &reserved {
             if let Err(error) = self.delete("gateways", &gateway.id).await {
                 failures.push(safe_error(&error, &self.admin_token));
@@ -319,6 +342,42 @@ impl ConformanceFixtureClient {
         } else {
             Err(anyhow!(failures.join("; ")))
         }
+    }
+
+    async fn delete_owned_server(&self, id: &str) -> Result<()> {
+        let servers: Vec<ServerRecord> = self.get_json("/servers").await?;
+        if id != OFFICIAL_CONFORMANCE_SERVER_ID {
+            return Err(anyhow!(redact(
+                &format!("server {id} is not owned by the conformance fixture"),
+                &self.admin_token
+            )));
+        }
+        let matching: Vec<_> = servers.iter().filter(|server| server.id == id).collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        if matching.len() != 1 || !matching[0].is_owned() {
+            return Err(anyhow!(redact(
+                &format!("server {id} is not owned by the conformance fixture"),
+                &self.admin_token
+            )));
+        }
+        self.delete("servers", id).await
+    }
+
+    async fn delete_owned_gateway(&self, id: &str) -> Result<()> {
+        let gateways: Vec<GatewayRecord> = self.get_json("/gateways").await?;
+        let matching: Vec<_> = gateways.iter().filter(|gateway| gateway.id == id).collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        if matching.len() != 1 || !matching[0].is_owned() {
+            return Err(anyhow!(redact(
+                &format!("gateway {id} is not owned by the conformance fixture"),
+                &self.admin_token
+            )));
+        }
+        self.delete("gateways", id).await
     }
 
     async fn reconcile_reserved_gateways(&self) -> Result<()> {
@@ -466,6 +525,31 @@ impl ConformanceFixtureClient {
 struct GatewayRecord {
     id: String,
     name: String,
+    url: String,
+    transport: String,
+    description: String,
+}
+
+impl GatewayRecord {
+    fn is_owned(&self) -> bool {
+        self.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME
+            && self.url == OFFICIAL_CONFORMANCE_BACKEND_URL
+            && self.transport == GATEWAY_TRANSPORT
+            && self.description == GATEWAY_DESCRIPTION
+    }
+}
+
+#[derive(Deserialize)]
+struct ServerRecord {
+    id: String,
+    name: String,
+    description: String,
+}
+
+impl ServerRecord {
+    fn is_owned(&self) -> bool {
+        self.name == SERVER_NAME && self.description == SERVER_DESCRIPTION
+    }
 }
 
 #[derive(Deserialize)]

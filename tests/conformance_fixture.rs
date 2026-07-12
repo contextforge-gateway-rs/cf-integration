@@ -135,12 +135,7 @@ async fn never_responds() -> Response<Body> {
 
 async fn stalled_json_handler(request: Request<Body>) -> Response<Body> {
     match (request.method().as_str(), request.uri().path()) {
-        ("DELETE", path) if path == format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}") => {
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("{}"))
-                .expect("server delete response")
-        }
+        ("GET", "/servers") => json_http_response(StatusCode::OK, json!([])),
         ("GET", "/gateways") => {
             let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
             tokio::spawn(async move {
@@ -184,9 +179,7 @@ async fn unowned_catalog_handler(
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     match (method.as_str(), path.as_str()) {
-        ("DELETE", path) if path.starts_with("/servers/") => {
-            json_http_response(StatusCode::NOT_FOUND, json!({}))
-        }
+        ("GET", "/servers") => json_http_response(StatusCode::OK, json!([])),
         ("DELETE", path) if path.starts_with("/gateways/") => {
             json_http_response(StatusCode::NO_CONTENT, json!({}))
         }
@@ -233,12 +226,7 @@ async fn delayed_gateway_handler(
     request: Request<Body>,
 ) -> Response<Body> {
     match (request.method().as_str(), request.uri().path()) {
-        ("DELETE", path) if path == format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}") => {
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("{}"))
-                .expect("server delete response")
-        }
+        ("GET", "/servers") => json_http_response(StatusCode::OK, json!([])),
         ("GET", "/gateways") => {
             state.gateway_gets.fetch_add(1, Ordering::SeqCst);
             let gateways = if state.visible.load(Ordering::SeqCst) {
@@ -316,6 +304,14 @@ fn gateway_record(id: &str) -> Value {
     })
 }
 
+fn server_record(id: &str) -> Value {
+    json!({
+        "id": id,
+        "name": "Official MCP Conformance Server",
+        "description": "Virtual server for the pinned official MCP conformance fixture."
+    })
+}
+
 fn catalogs(gateway_key: &str, prompt: bool) -> [Value; 3] {
     [
         json!([
@@ -339,13 +335,306 @@ fn catalogs(gateway_key: &str, prompt: bool) -> [Value; 3] {
 
 fn provision_prefix(gateways: Value) -> Vec<ExpectedRequest> {
     vec![
+        response("GET", "/servers", json!([])),
+        response("GET", "/gateways", gateways),
+    ]
+}
+
+#[test]
+fn admin_client_builder_explicitly_disables_environment_proxies() {
+    let source = include_str!("../src/conformance_fixture.rs");
+    let builder = source
+        .split("let http = reqwest::Client::builder()")
+        .nth(1)
+        .expect("admin client builder");
+    let builder = builder
+        .split(".build()")
+        .next()
+        .expect("admin client build chain");
+
+    assert!(builder.contains(".no_proxy()"), "{builder}");
+}
+
+#[tokio::test]
+async fn provision_refuses_foreign_reserved_gateway_without_deleting_it() {
+    for foreign in [
+        json!({
+            "id":"foreign-url", "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+            "url":"http://foreign.test/mcp", "transport":"STREAMABLEHTTP",
+            "description":"Official MCP conformance fixture"
+        }),
+        json!({
+            "id":"foreign-transport", "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+            "url":OFFICIAL_CONFORMANCE_BACKEND_URL, "transport":"SSE",
+            "description":"Official MCP conformance fixture"
+        }),
+        json!({
+            "id":"foreign-description", "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+            "url":OFFICIAL_CONFORMANCE_BACKEND_URL, "transport":"STREAMABLEHTTP",
+            "description":"someone else's gateway"
+        }),
+    ] {
+        let api = FakeApi::start(vec![
+            response("GET", "/servers", json!([])),
+            response("GET", "/gateways", json!([foreign])),
+        ])
+        .await;
+
+        let error = test_client(&api.base_url)
+            .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+            .await
+            .expect_err("foreign reserved-name gateway must fail closed");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("not owned"), "{message}");
+        assert!(!message.contains(TOKEN), "{message}");
+        assert!(
+            api.requests()
+                .iter()
+                .all(|request| request.method != "DELETE")
+        );
+        api.assert_complete();
+    }
+}
+
+#[tokio::test]
+async fn provision_refuses_foreign_deterministic_server_without_deleting_it() {
+    let api = FakeApi::start(vec![response(
+        "GET",
+        "/servers",
+        json!([{
+            "id":OFFICIAL_CONFORMANCE_SERVER_ID,
+            "name":"Foreign Server",
+            "description":"not fixture owned"
+        }]),
+    )])
+    .await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("foreign deterministic server must fail closed");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("not owned"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
+    assert!(
+        api.requests()
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn provision_deletes_exact_owned_stale_server_and_gateway() {
+    let api = FakeApi::start(vec![
+        response(
+            "GET",
+            "/servers",
+            json!([server_record(OFFICIAL_CONFORMANCE_SERVER_ID)]),
+        ),
         status(
             "DELETE",
             format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
-            StatusCode::NOT_FOUND,
+            StatusCode::NO_CONTENT,
         ),
-        response("GET", "/gateways", gateways),
-    ]
+        response("GET", "/gateways", json!([gateway_record("stale-owned")])),
+        status("DELETE", "/gateways/stale-owned", StatusCode::NO_CONTENT),
+        response("POST", "/gateways", gateway_record(GATEWAY_ID)),
+        response(
+            "POST",
+            format!(
+                "/gateways/{GATEWAY_ID}/tools/refresh?include_resources=true&include_prompts=true"
+            ),
+            json!({}),
+        ),
+        response("GET", "/tools", catalogs("gatewayId", true)[0].clone()),
+        response("GET", "/resources", catalogs("gatewayId", true)[1].clone()),
+        response("GET", "/prompts", catalogs("gatewayId", true)[2].clone()),
+        response(
+            "POST",
+            "/servers",
+            server_record(OFFICIAL_CONFORMANCE_SERVER_ID),
+        ),
+    ])
+    .await;
+
+    test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect("owned stale resources should be deleted");
+
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn known_cleanup_refuses_replaced_resources_and_attempts_both() {
+    let fixture = ProvisionedConformanceFixture {
+        gateway_id: GATEWAY_ID.to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+    };
+    let api = FakeApi::start(vec![
+        response(
+            "GET",
+            "/servers",
+            json!([{
+                "id":OFFICIAL_CONFORMANCE_SERVER_ID,
+                "name":"Replacement",
+                "description":"foreign"
+            }]),
+        ),
+        response(
+            "GET",
+            "/gateways",
+            json!([{
+                "id":GATEWAY_ID,
+                "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                "url":"http://replacement.test/mcp",
+                "transport":"STREAMABLEHTTP",
+                "description":"Official MCP conformance fixture"
+            }]),
+        ),
+    ])
+    .await;
+
+    let error = test_client(&api.base_url)
+        .cleanup(Some(&fixture))
+        .await
+        .expect_err("replaced fixture resources must fail closed");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("server cleanup failed"), "{message}");
+    assert!(message.contains("gateway cleanup failed"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
+    assert!(
+        api.requests()
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn known_cleanup_refuses_non_deterministic_server_id_even_with_fixture_metadata() {
+    let fixture = ProvisionedConformanceFixture {
+        gateway_id: GATEWAY_ID.to_owned(),
+        server_id: "foreign-server-id".to_owned(),
+    };
+    let api = FakeApi::start(vec![
+        response(
+            "GET",
+            "/servers",
+            json!([server_record("foreign-server-id")]),
+        ),
+        response("GET", "/gateways", json!([])),
+    ])
+    .await;
+
+    let error = test_client(&api.base_url)
+        .cleanup(Some(&fixture))
+        .await
+        .expect_err("only the deterministic fixture server ID may be deleted");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("not owned"), "{message}");
+    assert!(
+        api.requests()
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn reconciliation_refuses_foreign_delayed_reserved_collision() {
+    let mut expected = provision_prefix(json!([]));
+    expected.extend([
+        raw_response("POST", "/gateways", StatusCode::CREATED, "{"),
+        response(
+            "GET",
+            "/gateways",
+            json!([{
+                "id":"delayed-foreign",
+                "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                "url":"http://foreign.test/mcp",
+                "transport":"STREAMABLEHTTP",
+                "description":"Official MCP conformance fixture"
+            }]),
+        ),
+    ]);
+    let api = FakeApi::start(expected).await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("foreign delayed collision must fail closed");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("reconciliation failed"), "{message}");
+    assert!(message.contains("not owned"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
+    assert!(
+        api.requests()
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn provision_refuses_foreign_gateway_create_response() {
+    let mut expected = provision_prefix(json!([]));
+    expected.extend([
+        response(
+            "POST",
+            "/gateways",
+            json!({
+                "id":GATEWAY_ID,
+                "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                "url":"http://foreign.test/mcp",
+                "transport":"STREAMABLEHTTP",
+                "description":"Official MCP conformance fixture"
+            }),
+        ),
+        response("GET", "/gateways", json!([])),
+        response("GET", "/gateways", json!([])),
+    ]);
+    let api = FakeApi::start(expected).await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("foreign gateway create response must fail closed");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("not owned"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
+    assert!(
+        api.requests()
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn provision_rejects_non_official_backend_before_admin_requests() {
+    let api = FakeApi::start(vec![]).await;
+
+    let error = test_client(&api.base_url)
+        .provision("http://foreign.test/mcp")
+        .await
+        .expect_err("fixture backend must be the pinned official service");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("official conformance backend URL"),
+        "{message}"
+    );
+    assert!(!message.contains(TOKEN), "{message}");
+    assert!(api.requests().is_empty());
+    api.assert_complete();
 }
 
 fn append_create_and_refresh(expected: &mut Vec<ExpectedRequest>) {
@@ -411,7 +700,8 @@ async fn provision_uses_authenticated_admin_api_in_exact_order() {
         &json!({
             "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
             "url":OFFICIAL_CONFORMANCE_BACKEND_URL,
-            "transport":"STREAMABLEHTTP"
+            "transport":"STREAMABLEHTTP",
+            "description":"Official MCP conformance fixture"
         })
     );
     let server = requests.last().expect("server request");
@@ -437,7 +727,7 @@ async fn provision_uses_authenticated_admin_api_in_exact_order() {
 async fn provision_deletes_every_stale_reserved_gateway_before_creation() {
     let mut expected = provision_prefix(json!([
         gateway_record("stale-one"),
-        {"id":"unrelated", "name":"another-gateway", "url":"http://example.test/mcp", "transport":"SSE"},
+        {"id":"unrelated", "name":"another-gateway", "url":"http://example.test/mcp", "transport":"SSE", "description":"unrelated"},
         gateway_record("stale-two")
     ]));
     expected.extend([
@@ -551,11 +841,8 @@ async fn provision_reports_missing_identity_and_cleans_partial_fixture() {
     append_catalogs(&mut expected, "gatewayId", false);
     append_catalogs(&mut expected, "gatewayId", false);
     expected.extend([
-        status(
-            "DELETE",
-            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
-            StatusCode::NOT_FOUND,
-        ),
+        response("GET", "/servers", json!([])),
+        response("GET", "/gateways", json!([gateway_record(GATEWAY_ID)])),
         status(
             "DELETE",
             format!("/gateways/{GATEWAY_ID}"),
@@ -592,11 +879,8 @@ async fn provision_rejects_prefixed_catalog_names_instead_of_weakening_identity(
         ]);
     }
     expected.extend([
-        status(
-            "DELETE",
-            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
-            StatusCode::NOT_FOUND,
-        ),
+        response("GET", "/servers", json!([])),
+        response("GET", "/gateways", json!([gateway_record(GATEWAY_ID)])),
         status(
             "DELETE",
             format!("/gateways/{GATEWAY_ID}"),
@@ -619,13 +903,23 @@ async fn provision_rejects_prefixed_catalog_names_instead_of_weakening_identity(
 #[tokio::test]
 async fn cleanup_deletes_server_before_gateway_and_accepts_not_found() {
     let api = FakeApi::start(vec![
-        status("DELETE", "/servers/server-old", StatusCode::NOT_FOUND),
+        response(
+            "GET",
+            "/servers",
+            json!([server_record(OFFICIAL_CONFORMANCE_SERVER_ID)]),
+        ),
+        status(
+            "DELETE",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
+            StatusCode::NOT_FOUND,
+        ),
+        response("GET", "/gateways", json!([gateway_record("gateway-old")])),
         status("DELETE", "/gateways/gateway-old", StatusCode::NOT_FOUND),
     ])
     .await;
     let fixture = ProvisionedConformanceFixture {
         gateway_id: "gateway-old".to_owned(),
-        server_id: "server-old".to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
     };
 
     test_client(&api.base_url)
@@ -639,7 +933,17 @@ async fn cleanup_deletes_server_before_gateway_and_accepts_not_found() {
 #[tokio::test]
 async fn cleanup_rejects_non_not_found_failure() {
     let api = FakeApi::start(vec![
-        status("DELETE", "/servers/server-old", StatusCode::NO_CONTENT),
+        response(
+            "GET",
+            "/servers",
+            json!([server_record(OFFICIAL_CONFORMANCE_SERVER_ID)]),
+        ),
+        status(
+            "DELETE",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
+            StatusCode::NO_CONTENT,
+        ),
+        response("GET", "/gateways", json!([gateway_record("gateway-old")])),
         status(
             "DELETE",
             "/gateways/gateway-old",
@@ -649,7 +953,7 @@ async fn cleanup_rejects_non_not_found_failure() {
     .await;
     let fixture = ProvisionedConformanceFixture {
         gateway_id: "gateway-old".to_owned(),
-        server_id: "server-old".to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
     };
 
     let error = test_client(&api.base_url)
@@ -664,17 +968,23 @@ async fn cleanup_rejects_non_not_found_failure() {
 #[tokio::test]
 async fn cleanup_still_attempts_gateway_after_server_delete_failure() {
     let api = FakeApi::start(vec![
+        response(
+            "GET",
+            "/servers",
+            json!([server_record(OFFICIAL_CONFORMANCE_SERVER_ID)]),
+        ),
         status(
             "DELETE",
-            "/servers/server-old",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
+        response("GET", "/gateways", json!([gateway_record("gateway-old")])),
         status("DELETE", "/gateways/gateway-old", StatusCode::NO_CONTENT),
     ])
     .await;
     let fixture = ProvisionedConformanceFixture {
         gateway_id: "gateway-old".to_owned(),
-        server_id: "server-old".to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
     };
 
     let error = test_client(&api.base_url)
@@ -695,10 +1005,11 @@ async fn provision_combines_primary_and_cleanup_failures_in_that_order() {
         format!("/gateways/{GATEWAY_ID}/tools/refresh?include_resources=true&include_prompts=true"),
         StatusCode::BAD_GATEWAY,
     ));
-    expected.push(status(
-        "DELETE",
-        format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
-        StatusCode::NOT_FOUND,
+    expected.push(response("GET", "/servers", json!([])));
+    expected.push(response(
+        "GET",
+        "/gateways",
+        json!([gateway_record(GATEWAY_ID)]),
     ));
     expected.push(status(
         "DELETE",
@@ -965,13 +1276,19 @@ async fn token_is_absent_from_debug_and_errors() {
 
 #[tokio::test]
 async fn token_is_redacted_when_it_matches_a_fixture_id() {
-    let token = "server-old";
+    let token = OFFICIAL_CONFORMANCE_SERVER_ID;
     let api = FakeApi::start(vec![
+        response(
+            "GET",
+            "/servers",
+            json!([server_record(OFFICIAL_CONFORMANCE_SERVER_ID)]),
+        ),
         status(
             "DELETE",
-            "/servers/server-old",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
+        response("GET", "/gateways", json!([gateway_record("gateway-old")])),
         status("DELETE", "/gateways/gateway-old", StatusCode::NO_CONTENT),
     ])
     .await;

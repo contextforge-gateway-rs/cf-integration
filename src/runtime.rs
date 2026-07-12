@@ -3411,7 +3411,7 @@ mod tests {
             let fail = state.fail_cleanup
                 && method == Method::DELETE
                 && uri.path().starts_with("/servers/")
-                && events.iter().any(|previous| previous == &event);
+                && events.iter().any(|previous| previous == "POST /servers");
             events.push(event);
             fail
         };
@@ -3485,13 +3485,49 @@ mod tests {
                 axum::Json(serde_json::json!({})),
             );
         }
+        let resource_exists = |created: &str, deleted_prefix: &str| {
+            let events = state.events.lock().expect("event lock");
+            let created = events.iter().rposition(|event| event == created);
+            let deleted = events
+                .iter()
+                .rposition(|event| event.starts_with(deleted_prefix));
+            created.is_some_and(|created| deleted.is_none_or(|deleted| created > deleted))
+        };
         let (status, body) = match (method, uri.path()) {
-            (Method::GET, "/gateways") => (StatusCode::OK, serde_json::json!([])),
+            (Method::GET, "/servers") => (
+                StatusCode::OK,
+                if resource_exists("POST /servers", "DELETE /servers/") {
+                    serde_json::json!([{
+                        "id": crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+                        "name": "Official MCP Conformance Server",
+                        "description": "Virtual server for the pinned official MCP conformance fixture."
+                    }])
+                } else {
+                    serde_json::json!([])
+                },
+            ),
+            (Method::GET, "/gateways") => (
+                StatusCode::OK,
+                if resource_exists("POST /gateways", "DELETE /gateways/") {
+                    serde_json::json!([{
+                        "id": "fixture-gateway",
+                        "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                        "url": crate::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
+                        "transport": "STREAMABLEHTTP",
+                        "description": "Official MCP conformance fixture"
+                    }])
+                } else {
+                    serde_json::json!([])
+                },
+            ),
             (Method::POST, "/gateways") => (
                 StatusCode::OK,
                 serde_json::json!({
                     "id": "fixture-gateway",
                     "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                    "url": crate::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
+                    "transport": "STREAMABLEHTTP",
+                    "description": "Official MCP conformance fixture",
                 }),
             ),
             (Method::GET, "/tools") => (
@@ -4566,7 +4602,7 @@ mod tests {
             .await
             .expect_err("unreachable fixture API should fail provisioning");
 
-        assert!(error.to_string().contains("DELETE /servers/"));
+        assert!(error.to_string().contains("GET /servers"));
         assert_eq!(
             *events.lock().expect("event lock"),
             [
