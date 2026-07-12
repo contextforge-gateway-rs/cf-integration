@@ -373,6 +373,15 @@ async fn provision_refuses_foreign_reserved_gateway_without_deleting_it() {
             "url":OFFICIAL_CONFORMANCE_BACKEND_URL, "transport":"STREAMABLEHTTP",
             "description":"someone else's gateway"
         }),
+        json!({
+            "id":"null-description", "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+            "url":OFFICIAL_CONFORMANCE_BACKEND_URL, "transport":"STREAMABLEHTTP",
+            "description":null
+        }),
+        json!({
+            "id":"missing-description", "name":OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+            "url":OFFICIAL_CONFORMANCE_BACKEND_URL, "transport":"STREAMABLEHTTP"
+        }),
     ] {
         let api = FakeApi::start(vec![
             response("GET", "/servers", json!([])),
@@ -399,30 +408,89 @@ async fn provision_refuses_foreign_reserved_gateway_without_deleting_it() {
 
 #[tokio::test]
 async fn provision_refuses_foreign_deterministic_server_without_deleting_it() {
-    let api = FakeApi::start(vec![response(
-        "GET",
-        "/servers",
-        json!([{
+    for foreign in [
+        json!({
             "id":OFFICIAL_CONFORMANCE_SERVER_ID,
             "name":"Foreign Server",
             "description":"not fixture owned"
-        }]),
-    )])
-    .await;
+        }),
+        json!({
+            "id":OFFICIAL_CONFORMANCE_SERVER_ID,
+            "name":"Official MCP Conformance Server",
+            "description":null
+        }),
+        json!({
+            "id":OFFICIAL_CONFORMANCE_SERVER_ID,
+            "name":"Official MCP Conformance Server"
+        }),
+    ] {
+        let api = FakeApi::start(vec![response("GET", "/servers", json!([foreign]))]).await;
 
-    let error = test_client(&api.base_url)
+        let error = test_client(&api.base_url)
+            .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+            .await
+            .expect_err("foreign deterministic server must fail closed");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("not owned"), "{message}");
+        assert!(!message.contains(TOKEN), "{message}");
+        assert!(
+            api.requests()
+                .iter()
+                .all(|request| request.method != "DELETE")
+        );
+        api.assert_complete();
+    }
+}
+
+#[tokio::test]
+async fn unrelated_nullable_descriptions_do_not_block_owned_fixture_detection() {
+    let mut expected = vec![
+        response(
+            "GET",
+            "/servers",
+            json!([
+                {"id":"unrelated-null", "name":"Unrelated", "description":null},
+                {"id":"unrelated-missing", "name":"Unrelated"},
+                server_record(OFFICIAL_CONFORMANCE_SERVER_ID)
+            ]),
+        ),
+        status(
+            "DELETE",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
+            StatusCode::NO_CONTENT,
+        ),
+        response(
+            "GET",
+            "/gateways",
+            json!([
+                {
+                    "id":"unrelated-null", "name":"another-null",
+                    "url":"http://example.test/mcp", "transport":"SSE", "description":null
+                },
+                {
+                    "id":"unrelated-missing", "name":"another-missing",
+                    "url":"http://example.test/mcp", "transport":"SSE"
+                },
+                gateway_record("owned-stale")
+            ]),
+        ),
+        status("DELETE", "/gateways/owned-stale", StatusCode::NO_CONTENT),
+    ];
+    append_create_and_refresh(&mut expected);
+    append_catalogs(&mut expected, "gatewayId", true);
+    expected.push(response(
+        "POST",
+        "/servers",
+        server_record(OFFICIAL_CONFORMANCE_SERVER_ID),
+    ));
+    let api = FakeApi::start(expected).await;
+
+    test_client(&api.base_url)
         .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
         .await
-        .expect_err("foreign deterministic server must fail closed");
+        .expect("unrelated nullable descriptions must not block provisioning");
 
-    let message = format!("{error:#}");
-    assert!(message.contains("not owned"), "{message}");
-    assert!(!message.contains(TOKEN), "{message}");
-    assert!(
-        api.requests()
-            .iter()
-            .all(|request| request.method != "DELETE")
-    );
     api.assert_complete();
 }
 

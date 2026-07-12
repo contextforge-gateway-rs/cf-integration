@@ -527,7 +527,8 @@ struct GatewayRecord {
     name: String,
     url: String,
     transport: String,
-    description: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl GatewayRecord {
@@ -535,7 +536,7 @@ impl GatewayRecord {
         self.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME
             && self.url == OFFICIAL_CONFORMANCE_BACKEND_URL
             && self.transport == GATEWAY_TRANSPORT
-            && self.description == GATEWAY_DESCRIPTION
+            && self.description.as_deref() == Some(GATEWAY_DESCRIPTION)
     }
 }
 
@@ -543,12 +544,13 @@ impl GatewayRecord {
 struct ServerRecord {
     id: String,
     name: String,
-    description: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl ServerRecord {
     fn is_owned(&self) -> bool {
-        self.name == SERVER_NAME && self.description == SERVER_DESCRIPTION
+        self.name == SERVER_NAME && self.description.as_deref() == Some(SERVER_DESCRIPTION)
     }
 }
 
