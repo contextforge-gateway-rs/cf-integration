@@ -1553,7 +1553,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                                             revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
                                             server_id: fixture.server_id.clone(),
                                         });
-                                        if mode == StackMode::Dataplane {
+                                        fixture_state = Some((client, fixture));
+                                        if interrupted {
+                                            mode_failure = Some(interrupted_conformance_failure());
+                                        } else if mode == StackMode::Dataplane {
                                             tokio::select! {
                                                 result = self.wait_for_publisher_snapshot(
                                                     &selected_server_id,
@@ -1569,10 +1572,6 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                                                     );
                                                 }
                                             }
-                                        }
-                                        fixture_state = Some((client, fixture));
-                                        if interrupted {
-                                            mode_failure = Some(interrupted_conformance_failure());
                                         }
                                     }
                                     Err(error) => {
@@ -2861,6 +2860,7 @@ mod tests {
         fail_cleanup: bool,
         expected_scoped_server_id: Option<String>,
         block_gateway: bool,
+        finish_provision_after_interrupt: bool,
     }
 
     struct CancellingFixtureRunner {
@@ -3459,6 +3459,26 @@ mod tests {
                 std::future::pending::<()>().await;
             }
         }
+        if state.finish_provision_after_interrupt && method == Method::GET && uri.path() == "/tools"
+        {
+            state
+                .events
+                .lock()
+                .expect("event lock")
+                .push("provision finishing".into());
+            loop {
+                if state
+                    .events
+                    .lock()
+                    .expect("event lock")
+                    .iter()
+                    .any(|event| event == "interrupt completed")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
         if fail {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3563,6 +3583,7 @@ mod tests {
                     fail_cleanup: false,
                     expected_scoped_server_id: None,
                     block_gateway: false,
+                    finish_provision_after_interrupt: false,
                 }));
             let server = tokio::spawn(async move {
                 axum::serve(listener, app)
@@ -3698,6 +3719,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: false,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3807,6 +3829,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: false,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3832,6 +3855,7 @@ mod tests {
                 crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
             ),
             block_gateway: false,
+            finish_provision_after_interrupt: false,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3924,6 +3948,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interruption_during_dataplane_provision_skips_publisher_and_cleans_fixture() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events: Arc::clone(&events),
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+                block_gateway: false,
+                finish_provision_after_interrupt: true,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+                fail_gateway_restore: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::Dataplane,
+            start: false,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+        let interrupt_events = Arc::clone(&events);
+        let interrupt = async move {
+            loop {
+                if interrupt_events
+                    .lock()
+                    .expect("event lock")
+                    .iter()
+                    .any(|event| event == "provision finishing")
+                {
+                    interrupt_events
+                        .lock()
+                        .expect("event lock")
+                        .push("interrupt completed".into());
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let error = runtime
+            .run_compliance_workflow_with_interrupt(
+                &common,
+                Some(ConformanceSuite::Active),
+                false,
+                None,
+                interrupt,
+            )
+            .await
+            .expect_err("injected interruption should remain primary");
+
+        assert!(error.to_string().contains("interrupted by Ctrl-C"));
+        let events = events.lock().expect("event lock");
+        assert!(events.iter().all(|event| !event.starts_with("publisher ")));
+        assert!(events.iter().all(|event| event != "npx"));
+        let interrupt = events
+            .iter()
+            .position(|event| event == "interrupt completed")
+            .expect("interrupt should complete during provisioning");
+        let delete = events
+            .iter()
+            .rposition(|event| event.starts_with("DELETE /"))
+            .expect("owned fixture API cleanup should run");
+        let rm = events
+            .iter()
+            .position(|event| event == "compose fixture rm")
+            .expect("fixture service cleanup should run");
+        assert!(interrupt < delete && delete < rm, "{events:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn interruption_after_provision_cleans_api_before_async_service_removal() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3937,6 +4052,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: false,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -4047,6 +4163,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: true,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -4146,6 +4263,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: true,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -4234,6 +4352,7 @@ mod tests {
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
                 block_gateway: false,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -4611,6 +4730,7 @@ mod tests {
                 fail_cleanup: true,
                 expected_scoped_server_id: None,
                 block_gateway: false,
+                finish_provision_after_interrupt: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
