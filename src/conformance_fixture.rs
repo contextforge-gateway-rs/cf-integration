@@ -32,6 +32,9 @@ const REQUIRED_PROMPT: &str = "test_simple_prompt";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_ATTEMPTS: usize = 40;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_RECONCILIATION_ATTEMPTS: usize = 5;
+const DEFAULT_RECONCILIATION_INTERVAL: Duration = Duration::from_millis(100);
+const REQUIRED_RECONCILIATION_QUIET_ATTEMPTS: usize = 2;
 const REDACTED: &str = "<redacted>";
 
 /// IDs created for one official conformance fixture.
@@ -52,6 +55,8 @@ pub struct ConformanceFixtureClientBuilder {
     poll_interval: Duration,
     max_attempts: usize,
     request_timeout: Duration,
+    reconciliation_attempts: usize,
+    reconciliation_interval: Duration,
 }
 
 impl fmt::Debug for ConformanceFixtureClientBuilder {
@@ -63,6 +68,8 @@ impl fmt::Debug for ConformanceFixtureClientBuilder {
             .field("poll_interval", &self.poll_interval)
             .field("max_attempts", &self.max_attempts)
             .field("request_timeout", &self.request_timeout)
+            .field("reconciliation_attempts", &self.reconciliation_attempts)
+            .field("reconciliation_interval", &self.reconciliation_interval)
             .finish()
     }
 }
@@ -86,18 +93,36 @@ impl ConformanceFixtureClientBuilder {
         self
     }
 
+    /// Sets the bounded number of gateway reconciliation polls. Defaults to five.
+    pub fn reconciliation_attempts(mut self, reconciliation_attempts: usize) -> Self {
+        self.reconciliation_attempts = reconciliation_attempts;
+        self
+    }
+
+    /// Sets the delay between gateway reconciliation polls. Defaults to 100ms.
+    pub fn reconciliation_interval(mut self, reconciliation_interval: Duration) -> Self {
+        self.reconciliation_interval = reconciliation_interval;
+        self
+    }
+
     /// Validates configuration and builds the client.
     ///
     /// # Errors
     ///
     /// Returns an error when the base URL or bearer token is invalid, or when
-    /// `max_attempts` or `request_timeout` is zero.
+    /// `max_attempts` or `request_timeout` is zero, or fewer than two gateway
+    /// reconciliation attempts are configured.
     pub fn build(self) -> Result<ConformanceFixtureClient> {
         if self.max_attempts == 0 {
             return Err(anyhow!("max_attempts must be greater than zero"));
         }
         if self.request_timeout.is_zero() {
             return Err(anyhow!("request_timeout must be greater than zero"));
+        }
+        if self.reconciliation_attempts < REQUIRED_RECONCILIATION_QUIET_ATTEMPTS {
+            return Err(anyhow!(
+                "reconciliation_attempts must allow at least two quiet polls"
+            ));
         }
         let base_url = validate_base_url(&self.base_url)?;
         if !is_valid_bearer_token(&self.admin_token) {
@@ -114,6 +139,8 @@ impl ConformanceFixtureClientBuilder {
             poll_interval: self.poll_interval,
             max_attempts: self.max_attempts,
             request_timeout: self.request_timeout,
+            reconciliation_attempts: self.reconciliation_attempts,
+            reconciliation_interval: self.reconciliation_interval,
             http,
         })
     }
@@ -127,6 +154,8 @@ pub struct ConformanceFixtureClient {
     poll_interval: Duration,
     max_attempts: usize,
     request_timeout: Duration,
+    reconciliation_attempts: usize,
+    reconciliation_interval: Duration,
     http: reqwest::Client,
 }
 
@@ -142,6 +171,8 @@ impl fmt::Debug for ConformanceFixtureClient {
             .field("poll_interval", &self.poll_interval)
             .field("max_attempts", &self.max_attempts)
             .field("request_timeout", &self.request_timeout)
+            .field("reconciliation_attempts", &self.reconciliation_attempts)
+            .field("reconciliation_interval", &self.reconciliation_interval)
             .finish_non_exhaustive()
     }
 }
@@ -158,6 +189,8 @@ impl ConformanceFixtureClient {
             poll_interval: DEFAULT_POLL_INTERVAL,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            reconciliation_attempts: DEFAULT_RECONCILIATION_ATTEMPTS,
+            reconciliation_interval: DEFAULT_RECONCILIATION_INTERVAL,
         }
     }
 
@@ -171,7 +204,7 @@ impl ConformanceFixtureClient {
     pub async fn provision(&self, backend_url: &str) -> Result<ProvisionedConformanceFixture> {
         self.delete("servers", OFFICIAL_CONFORMANCE_SERVER_ID)
             .await?;
-        self.delete_reserved_gateways().await?;
+        self.delete_reserved_gateways_once().await?;
 
         let gateway_result: Result<GatewayRecord> = self
             .post_json(
@@ -186,7 +219,7 @@ impl ConformanceFixtureClient {
         let gateway = match gateway_result {
             Ok(gateway) => gateway,
             Err(primary) => {
-                return match self.delete_reserved_gateways().await {
+                return match self.reconcile_reserved_gateways().await {
                     Ok(()) => Err(anyhow!(safe_error(&primary, &self.admin_token))),
                     Err(reconciliation) => Err(anyhow!(
                         "{}; gateway-create reconciliation failed: {}",
@@ -265,22 +298,44 @@ impl ConformanceFixtureClient {
         .await
     }
 
-    async fn delete_reserved_gateways(&self) -> Result<()> {
+    async fn delete_reserved_gateways_once(&self) -> Result<bool> {
         let gateways: Vec<GatewayRecord> = self.get_json("/gateways").await?;
         let mut failures = Vec::new();
-        for gateway in gateways
+        let reserved: Vec<_> = gateways
             .iter()
             .filter(|gateway| gateway.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME)
-        {
+            .collect();
+        for gateway in &reserved {
             if let Err(error) = self.delete("gateways", &gateway.id).await {
                 failures.push(safe_error(&error, &self.admin_token));
             }
         }
         if failures.is_empty() {
-            Ok(())
+            Ok(!reserved.is_empty())
         } else {
             Err(anyhow!(failures.join("; ")))
         }
+    }
+
+    async fn reconcile_reserved_gateways(&self) -> Result<()> {
+        let mut quiet_attempts = 0;
+        for attempt in 0..self.reconciliation_attempts {
+            if self.delete_reserved_gateways_once().await? {
+                quiet_attempts = 0;
+            } else {
+                quiet_attempts += 1;
+                if quiet_attempts == REQUIRED_RECONCILIATION_QUIET_ATTEMPTS {
+                    return Ok(());
+                }
+            }
+            if attempt + 1 < self.reconciliation_attempts {
+                tokio::time::sleep(self.reconciliation_interval).await;
+            }
+        }
+        Err(anyhow!(
+            "gateway reconciliation did not reach two consecutive quiet polls after {} attempts",
+            self.reconciliation_attempts
+        ))
     }
 
     async fn poll_catalogs(&self, gateway_id: &str) -> Result<CatalogIds> {
@@ -355,11 +410,16 @@ impl ConformanceFixtureClient {
                 &self.admin_token
             )));
         }
-        response.json().await.map_err(|_| {
-            anyhow!(redact(
-                &format!("request to {path} returned invalid JSON"),
-                &self.admin_token
-            ))
+        response.json().await.map_err(|error| {
+            let message = if error.is_timeout() {
+                format!(
+                    "response body from {path} timed out after {:?}",
+                    self.request_timeout
+                )
+            } else {
+                format!("request to {path} returned invalid JSON")
+            };
+            anyhow!(redact(&message, &self.admin_token))
         })
     }
 

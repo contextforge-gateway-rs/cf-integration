@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::routing::any;
@@ -13,6 +15,7 @@ use cf_integration::conformance_fixture::{
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::ReceiverStream;
 
 const TOKEN: &str = "fixture-admin-secret";
 const GATEWAY_ID: &str = "gateway-new";
@@ -125,6 +128,80 @@ async fn never_responds() -> Response<Body> {
     std::future::pending().await
 }
 
+async fn stalled_json_handler(request: Request<Body>) -> Response<Body> {
+    match (request.method().as_str(), request.uri().path()) {
+        ("DELETE", path) if path == format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}") => {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("{}"))
+                .expect("server delete response")
+        }
+        ("GET", "/gateways") => {
+            let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
+            tokio::spawn(async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from_stream(ReceiverStream::new(receiver)))
+                .expect("stalled JSON response")
+        }
+        (method, path) => panic!("unexpected stalled JSON request: {method} {path}"),
+    }
+}
+
+#[derive(Clone, Default)]
+struct DelayedGatewayState {
+    visible: Arc<AtomicBool>,
+    deleted: Arc<AtomicBool>,
+    gateway_gets: Arc<AtomicUsize>,
+}
+
+async fn delayed_gateway_handler(
+    State(state): State<DelayedGatewayState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    match (request.method().as_str(), request.uri().path()) {
+        ("DELETE", path) if path == format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}") => {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("{}"))
+                .expect("server delete response")
+        }
+        ("GET", "/gateways") => {
+            state.gateway_gets.fetch_add(1, Ordering::SeqCst);
+            let gateways = if state.visible.load(Ordering::SeqCst) {
+                json!([gateway_record("gateway-delayed")])
+            } else {
+                json!([])
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(gateways.to_string()))
+                .expect("gateway list response")
+        }
+        ("POST", "/gateways") => {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(45)).await;
+                state.visible.store(true, Ordering::SeqCst);
+            });
+            std::future::pending().await
+        }
+        ("DELETE", "/gateways/gateway-delayed") => {
+            state.visible.store(false, Ordering::SeqCst);
+            state.deleted.store(true, Ordering::SeqCst);
+            Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("gateway delete response")
+        }
+        (method, path) => panic!("unexpected delayed-gateway request: {method} {path}"),
+    }
+}
+
 fn response(method: &'static str, path: impl Into<String>, response: Value) -> ExpectedRequest {
     ExpectedRequest {
         method,
@@ -224,6 +301,7 @@ fn test_client(base_url: &str) -> ConformanceFixtureClient {
     ConformanceFixtureClient::builder(base_url, TOKEN)
         .poll_interval(Duration::ZERO)
         .max_attempts(2)
+        .reconciliation_interval(Duration::ZERO)
         .build()
         .expect("valid fixture client")
 }
@@ -517,6 +595,8 @@ async fn malformed_gateway_create_response_reconciles_reserved_gateway() {
             "/gateways/gateway-committed",
             StatusCode::NO_CONTENT,
         ),
+        response("GET", "/gateways", json!([])),
+        response("GET", "/gateways", json!([])),
     ]);
     let api = FakeApi::start(expected).await;
 
@@ -554,6 +634,43 @@ async fn gateway_create_and_reconciliation_failures_are_combined_primary_first()
         "{message}"
     );
     api.assert_complete();
+}
+
+#[tokio::test]
+async fn gateway_create_timeout_reconciles_a_delayed_committed_gateway() {
+    let state = DelayedGatewayState::default();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind delayed gateway API");
+    let address = listener.local_addr().expect("delayed gateway API address");
+    let app = Router::new()
+        .fallback(any(delayed_gateway_handler))
+        .with_state(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve delayed gateway API");
+    });
+    let client = ConformanceFixtureClient::builder(format!("http://{address}"), TOKEN)
+        .request_timeout(Duration::from_millis(20))
+        .reconciliation_attempts(5)
+        .reconciliation_interval(Duration::from_millis(35))
+        .build()
+        .expect("valid fixture client");
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL),
+    )
+    .await
+    .expect("reconciliation must remain bounded")
+    .expect_err("gateway creation must retain timeout failure");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("timed out"), "{message}");
+    assert!(!message.contains("reconciliation failed"), "{message}");
+    assert!(state.deleted.load(Ordering::SeqCst));
+    assert!(state.gateway_gets.load(Ordering::SeqCst) >= 4);
 }
 
 #[test]
@@ -609,6 +726,18 @@ fn builder_rejects_zero_request_timeout() {
     assert!(format!("{error:#}").contains("request_timeout"));
 }
 
+#[test]
+fn builder_rejects_reconciliation_without_two_quiet_attempts() {
+    for attempts in [0, 1] {
+        let error = ConformanceFixtureClient::builder("http://localhost", TOKEN)
+            .reconciliation_attempts(attempts)
+            .build()
+            .expect_err("insufficient reconciliation attempts");
+
+        assert!(format!("{error:#}").contains("reconciliation_attempts"));
+    }
+}
+
 #[tokio::test]
 async fn request_timeout_bounds_a_non_responding_admin_api() {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -632,6 +761,36 @@ async fn request_timeout_bounds_a_non_responding_admin_api() {
 
     let message = format!("{error:#}");
     assert!(message.contains("timed out"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
+}
+
+#[tokio::test]
+async fn stalled_json_body_is_reported_as_a_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled JSON API");
+    let address = listener.local_addr().expect("stalled JSON API address");
+    tokio::spawn(async move {
+        axum::serve(listener, Router::new().fallback(any(stalled_json_handler)))
+            .await
+            .expect("serve stalled JSON API");
+    });
+    let client = ConformanceFixtureClient::builder(format!("http://{address}"), TOKEN)
+        .request_timeout(Duration::from_millis(25))
+        .build()
+        .expect("valid fixture client");
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL),
+    )
+    .await
+    .expect("stalled response body must remain bounded")
+    .expect_err("stalled JSON body must fail");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("timed out"), "{message}");
+    assert!(!message.contains("invalid JSON"), "{message}");
     assert!(!message.contains(TOKEN), "{message}");
 }
 
