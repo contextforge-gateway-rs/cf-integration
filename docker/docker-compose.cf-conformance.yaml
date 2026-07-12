@@ -1,4 +1,7 @@
 services:
+  gateway:
+    environment:
+      GATEWAY_TOOL_NAME_SEPARATOR: "_"
   mcp_conformance_server:
     profiles: ["conformance"]
     image: cf-integration/mcp-conformance-server:0.1.16

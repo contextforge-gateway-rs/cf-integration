@@ -212,7 +212,12 @@ all` start the profile-gated official TypeScript fixture, register a dedicated
 gateway and virtual server, wait for dataplane publication when needed, and
 run the official runner through the public authenticated route. The harness
 removes the temporary API resources and service on success, failure, or
-Ctrl-C. Automatic provisioning is restricted to a loopback
+Ctrl-C. The conformance-only Compose overlay temporarily sets the gateway tool
+name separator to `_` and reserves gateway name `_`; its empty slug preserves
+the canonical upstream `test_*` tool and prompt names. After fixture removal,
+the harness recreates the gateway from the normal Compose project so ordinary
+Fast Time probe, load, and live lanes retain their base configuration.
+Automatic provisioning is restricted to a loopback
 `MCP_CLI_BASE_URL`; remote or shared environments require a caller-managed
 server ID.
 

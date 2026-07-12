@@ -20,6 +20,11 @@ use tokio_stream::wrappers::ReceiverStream;
 const TOKEN: &str = "fixture-admin-secret";
 const GATEWAY_ID: &str = "gateway-new";
 
+#[test]
+fn official_fixture_uses_empty_slug_gateway_name() {
+    assert_eq!(OFFICIAL_CONFORMANCE_GATEWAY_NAME, "_");
+}
+
 #[derive(Clone, Debug)]
 struct ExpectedRequest {
     method: &'static str,
@@ -567,6 +572,47 @@ async fn provision_reports_missing_identity_and_cleans_partial_fixture() {
     let message = format!("{error:#}");
     assert!(message.contains("test_simple_prompt"), "{message}");
     assert!(message.contains(GATEWAY_ID), "{message}");
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn provision_rejects_prefixed_catalog_names_instead_of_weakening_identity() {
+    let prefixed_catalogs = [
+        json!([{"id":"tool-1", "name":"fixture_test_simple_text", "gatewayId":GATEWAY_ID}]),
+        json!([{"id":"resource-1", "uri":"test://static-text", "gatewayId":GATEWAY_ID}]),
+        json!([{"id":"prompt-1", "name":"fixture_test_simple_prompt", "gatewayId":GATEWAY_ID}]),
+    ];
+    let mut expected = provision_prefix(json!([]));
+    append_create_and_refresh(&mut expected);
+    for _ in 0..2 {
+        expected.extend([
+            response("GET", "/tools", prefixed_catalogs[0].clone()),
+            response("GET", "/resources", prefixed_catalogs[1].clone()),
+            response("GET", "/prompts", prefixed_catalogs[2].clone()),
+        ]);
+    }
+    expected.extend([
+        status(
+            "DELETE",
+            format!("/servers/{OFFICIAL_CONFORMANCE_SERVER_ID}"),
+            StatusCode::NOT_FOUND,
+        ),
+        status(
+            "DELETE",
+            format!("/gateways/{GATEWAY_ID}"),
+            StatusCode::NO_CONTENT,
+        ),
+    ]);
+    let api = FakeApi::start(expected).await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("prefixed identities must remain a setup error");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("test_simple_text"), "{message}");
+    assert!(message.contains("test_simple_prompt"), "{message}");
     api.assert_complete();
 }
 

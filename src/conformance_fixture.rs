@@ -20,7 +20,11 @@ pub const OFFICIAL_CONFORMANCE_SERVICE: &str = "mcp_conformance_server";
 /// Backend URL reachable from the control-plane container.
 pub const OFFICIAL_CONFORMANCE_BACKEND_URL: &str = "http://mcp_conformance_server:3000/mcp";
 /// Reserved gateway name used by the fixture.
-pub const OFFICIAL_CONFORMANCE_GATEWAY_NAME: &str = "cf_integration_conformance";
+///
+/// `_` intentionally produces an empty gateway slug when paired with the
+/// conformance-only underscore separator. This preserves the upstream
+/// `test_*` tool and prompt names exactly.
+pub const OFFICIAL_CONFORMANCE_GATEWAY_NAME: &str = "_";
 /// Deterministic virtual-server ID used by the fixture.
 pub const OFFICIAL_CONFORMANCE_SERVER_ID: &str = "3f33286667d34b65a31c3bafd30e4c21";
 

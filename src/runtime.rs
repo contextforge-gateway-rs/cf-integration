@@ -1008,6 +1008,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             "-d",
             "--build",
             "--wait",
+            "gateway",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
         let command = self.compose_environment(command, mode, true)?;
@@ -1015,14 +1016,26 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     async fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
-        let command = self.conformance_compose_project(mode).command([
+        let remove = self.conformance_compose_project(mode).command([
             "rm",
             "--stop",
             "--force",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
-        let command = self.compose_environment(command, mode, true)?;
-        self.runner.run_async(&command).await
+        let remove = match self.compose_environment(remove, mode, true) {
+            Ok(command) => self.runner.run_async(&command).await,
+            Err(error) => Err(error),
+        };
+
+        let restore = self
+            .compose_project(mode)
+            .command(["up", "-d", "--wait", "gateway"]);
+        let restore = match self.compose_environment(restore, mode, true) {
+            Ok(command) => self.runner.run_async(&command).await,
+            Err(error) => Err(error),
+        };
+
+        combine_cleanup_results(remove, restore)
     }
 
     async fn execute_test(&self, action: TestAction) -> AppResult<()> {
@@ -2808,6 +2821,7 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         fail_service_start: bool,
         fail_service_stop: bool,
+        fail_gateway_restore: bool,
     }
 
     struct FixtureApiState {
@@ -2927,11 +2941,27 @@ mod tests {
             spec: &'a CommandSpec,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
             if spec.program() != "npx" {
+                let arguments = spec
+                    .arguments()
+                    .iter()
+                    .map(|value| value.to_string_lossy())
+                    .collect::<Vec<_>>();
                 if spec
                     .arguments()
                     .iter()
                     .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
                 {
+                    if arguments.iter().any(|value| value == "up") {
+                        let gateway = arguments
+                            .iter()
+                            .position(|value| value == "gateway")
+                            .expect("conformance start must recreate gateway");
+                        let server = arguments
+                            .iter()
+                            .position(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
+                            .expect("conformance server target");
+                        assert!(gateway < server, "gateway must precede conformance server");
+                    }
                     let event = if spec.arguments().iter().any(|value| value == "up") {
                         "compose fixture up"
                     } else {
@@ -2946,6 +2976,26 @@ mod tests {
                     if self.fail_service_stop && event.ends_with("rm") {
                         return Box::pin(async {
                             Err(AppFailure::from(anyhow!("fixture stop failed")))
+                        });
+                    }
+                    return Box::pin(async { Ok(()) });
+                }
+                if arguments.iter().any(|value| value == "up")
+                    && arguments.iter().any(|value| value == "gateway")
+                {
+                    assert!(arguments.iter().any(|value| value == "--wait"));
+                    assert!(
+                        !arguments
+                            .iter()
+                            .any(|value| value.ends_with("docker-compose.cf-conformance.yaml"))
+                    );
+                    self.events
+                        .lock()
+                        .expect("event lock")
+                        .push("compose gateway restore".into());
+                    if self.fail_gateway_restore {
+                        return Box::pin(async {
+                            Err(AppFailure::from(anyhow!("gateway restore failed")))
                         });
                     }
                     return Box::pin(async { Ok(()) });
@@ -3482,6 +3532,7 @@ mod tests {
                     events: Arc::clone(&events),
                     fail_service_start: false,
                     fail_service_stop: false,
+                    fail_gateway_restore: false,
                 },
             );
             let common = ResolvedComplianceCommon {
@@ -3540,6 +3591,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -3610,6 +3662,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -3664,7 +3717,17 @@ mod tests {
             .iter()
             .position(|event| event == "compose fixture rm")
             .expect("fixture service should be removed");
-        assert!(up < create && create < runner && runner < cleanup_delete && cleanup_delete < rm);
+        let restore = events
+            .iter()
+            .position(|event| event == "compose gateway restore")
+            .expect("base gateway configuration should be restored");
+        assert!(
+            up < create
+                && create < runner
+                && runner < cleanup_delete
+                && cleanup_delete < rm
+                && rm < restore
+        );
         assert!(events.iter().any(|event| {
             event
                 == &format!(
@@ -3740,6 +3803,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -3840,6 +3904,7 @@ mod tests {
                     events: Arc::clone(&events),
                     fail_service_start: false,
                     fail_service_stop: false,
+                    fail_gateway_restore: false,
                 },
             },
         );
@@ -3895,7 +3960,13 @@ mod tests {
             .iter()
             .position(|event| event == "compose fixture rm")
             .expect("async service cleanup should run");
-        assert!(create < child_terminated && child_terminated < delete && delete < rm);
+        let restore = events
+            .iter()
+            .position(|event| event == "compose gateway restore")
+            .expect("base gateway configuration should be restored");
+        assert!(
+            create < child_terminated && child_terminated < delete && delete < rm && rm < restore
+        );
         assert!(events.iter().all(|event| event != "npx"));
         assert!(
             events
@@ -3940,6 +4011,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4000,7 +4072,11 @@ mod tests {
             .iter()
             .position(|event| event == "compose fixture rm")
             .expect("fixture service cleanup should run");
-        assert!(gateway < cancelled && cancelled < delete && delete < rm);
+        let restore = events
+            .iter()
+            .position(|event| event == "compose gateway restore")
+            .expect("base gateway configuration should be restored");
+        assert!(gateway < cancelled && cancelled < delete && delete < rm && rm < restore);
         server.abort();
     }
 
@@ -4034,6 +4110,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4123,6 +4200,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4164,9 +4242,18 @@ mod tests {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         assert_eq!(fixture_removals.len(), 2, "{events:?}");
-        assert!(fixture_removals[0] < controlplane_down);
+        let gateway_restores = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.as_str() == "compose gateway restore")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(gateway_restores.len(), 2, "{events:?}");
+        assert!(fixture_removals[0] < gateway_restores[0]);
+        assert!(gateway_restores[0] < controlplane_down);
         assert!(controlplane_down < dataplane_up);
-        assert!(fixture_removals[1] < dataplane_down);
+        assert!(fixture_removals[1] < gateway_restores[1]);
+        assert!(gateway_restores[1] < dataplane_down);
         let server_cleanup = format!(
             "DELETE /servers/{}",
             crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
@@ -4210,6 +4297,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: true,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4228,7 +4316,11 @@ mod tests {
         assert!(error.to_string().starts_with("fixture start failed"));
         assert_eq!(
             *events.lock().expect("event lock"),
-            ["compose fixture up", "compose fixture rm"]
+            [
+                "compose fixture up",
+                "compose fixture rm",
+                "compose gateway restore"
+            ]
         );
     }
 
@@ -4245,6 +4337,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4263,7 +4356,11 @@ mod tests {
         assert!(error.to_string().contains("DELETE /servers/"));
         assert_eq!(
             *events.lock().expect("event lock"),
-            ["compose fixture up", "compose fixture rm"]
+            [
+                "compose fixture up",
+                "compose fixture rm",
+                "compose gateway restore"
+            ]
         );
     }
 
@@ -4280,6 +4377,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
         let explicit = ResolvedComplianceCommon {
@@ -4345,12 +4443,13 @@ mod tests {
                 "-d",
                 "--build",
                 "--wait",
+                "gateway",
                 OFFICIAL_CONFORMANCE_SERVICE,
             ]);
         let debug = format!("{command:?}");
         let error = finish_with_cleanup(
             Some(AppFailure::from(anyhow!("primary"))),
-            Err(AppFailure::from(anyhow!("cleanup"))),
+            Err(AppFailure::from(anyhow!("gateway restore failed"))),
         )
         .expect_err("combined failure should remain an error")
         .to_string();
@@ -4378,6 +4477,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: false,
+                fail_gateway_restore: false,
             },
         );
 
@@ -4392,7 +4492,11 @@ mod tests {
 
         assert_eq!(
             *events.lock().expect("event lock"),
-            ["compose fixture up", "compose fixture rm"]
+            [
+                "compose fixture up",
+                "compose fixture rm",
+                "compose gateway restore"
+            ]
         );
     }
 
@@ -4426,6 +4530,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_service_start: false,
                 fail_service_stop: true,
+                fail_gateway_restore: true,
             },
         );
         let common = ResolvedComplianceCommon {
@@ -4449,7 +4554,10 @@ mod tests {
         let service = message
             .find("fixture stop failed")
             .expect("service cleanup error");
-        assert!(primary < api && api < service);
+        let restore_error = message
+            .find("gateway restore failed")
+            .expect("gateway restore error");
+        assert!(primary < api && api < service && service < restore_error);
         assert!(message.contains("additionally conformance cleanup failed"));
         let events = events.lock().expect("event lock");
         let cleanup_delete = events
@@ -4460,7 +4568,11 @@ mod tests {
             .iter()
             .position(|event| event == "compose fixture rm")
             .expect("service cleanup should run");
-        assert!(cleanup_delete < rm);
+        let restore = events
+            .iter()
+            .position(|event| event == "compose gateway restore")
+            .expect("gateway restore should run despite removal failure");
+        assert!(cleanup_delete < rm && rm < restore);
         server.abort();
     }
 

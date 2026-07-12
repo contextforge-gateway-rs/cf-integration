@@ -229,6 +229,9 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
     let expected_compose: serde_yaml::Value = serde_yaml::from_str(
         r#"
 services:
+  gateway:
+    environment:
+      GATEWAY_TOOL_NAME_SEPARATOR: "_"
   mcp_conformance_server:
     profiles: ["conformance"]
     image: cf-integration/mcp-conformance-server:0.1.16
