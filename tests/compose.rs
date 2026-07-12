@@ -190,6 +190,9 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
             .contains("awk 'NF == 3 && $1 == 1 && $2 == 1 { count++ } END { print count + 0 }'")
     );
     assert!(dockerfile.contains("END { print count + 0 }')\" = 1"));
+    assert!(dockerfile.contains(
+        "grep -Fxc \"const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });\" examples/servers/typescript/everything-server.ts"
+    ));
     assert!(dockerfile.contains("ENV PORT=3000"));
     assert!(dockerfile.contains("EXPOSE 3000"));
     assert!(dockerfile.contains("CMD [\"npm\", \"start\"]"));
@@ -201,24 +204,36 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
     assert!(patch.contains("replacementCount !== 1"));
     assert!(patch.contains("process.argv[2]"));
 
-    assert!(compose.contains("mcp_conformance_server:"));
-    assert!(compose.contains("profiles: [\"conformance\"]"));
-    assert!(compose.contains("cf-integration/mcp-conformance-server:0.1.16"));
-    assert!(compose.contains(
-        "context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}"
-    ));
-    assert!(compose.contains("dockerfile: docker/mcp-conformance-server.Dockerfile"));
-    assert!(compose.contains("restart: \"no\""));
-    assert!(compose.contains("PORT: \"3000\""));
-    assert!(compose.contains("- mcpnet"));
-    assert!(compose.contains(
-        "fetch('http://127.0.0.1:3000/mcp').then(response => { if (response.status !== 400) process.exit(1); }).catch(() => process.exit(1))"
-    ));
-    assert!(compose.contains("interval: 2s"));
-    assert!(compose.contains("timeout: 2s"));
-    assert!(compose.contains("retries: 30"));
-    assert!(compose.contains("start_period: 2s"));
-    assert!(!compose.contains("fast_time_server"));
+    let actual_compose: serde_yaml::Value =
+        serde_yaml::from_str(&compose).expect("parse conformance Compose overlay");
+    let expected_compose: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+services:
+  mcp_conformance_server:
+    profiles: ["conformance"]
+    image: cf-integration/mcp-conformance-server:0.1.16
+    build:
+      context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
+      dockerfile: docker/mcp-conformance-server.Dockerfile
+    restart: "no"
+    environment:
+      PORT: "3000"
+    networks:
+      - mcpnet
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/mcp').then(response => { if (response.status !== 400) process.exit(1); }).catch(() => process.exit(1))
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+"#,
+    )
+    .expect("parse expected conformance Compose contract");
+    assert_eq!(actual_compose, expected_compose);
 }
 
 #[test]
