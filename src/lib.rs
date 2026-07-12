@@ -8,6 +8,7 @@ pub mod cli;
 pub mod compose;
 pub mod config;
 pub mod conformance;
+pub mod conformance_fixture;
 pub mod coverage;
 pub mod error;
 pub mod gateway;
