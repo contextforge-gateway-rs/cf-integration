@@ -2571,6 +2571,7 @@ mod tests {
     struct FixtureApiState {
         events: Arc<Mutex<Vec<String>>>,
         fail_cleanup: bool,
+        expected_scoped_server_id: Option<String>,
     }
 
     impl ProcessRunner for FixtureLifecycleRunner {
@@ -2601,11 +2602,98 @@ mod tests {
                     return Err(AppFailure::from(anyhow!("fixture stop failed")));
                 }
             }
+            if spec.program() == "docker" && arguments.iter().any(|value| value == "down") {
+                let project = arguments
+                    .windows(2)
+                    .find(|values| values[0] == "-p")
+                    .map_or("unknown", |values| values[1].as_ref());
+                self.events
+                    .lock()
+                    .expect("event lock")
+                    .push(format!("stack down {project}"));
+            }
+            if spec.program() == "docker"
+                && arguments.iter().any(|value| value == "up")
+                && !arguments
+                    .iter()
+                    .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
+            {
+                let project = arguments
+                    .windows(2)
+                    .find(|values| values[0] == "-p")
+                    .map_or("unknown", |values| values[1].as_ref());
+                self.events
+                    .lock()
+                    .expect("event lock")
+                    .push(format!("stack up {project}"));
+            }
             Ok(())
+        }
+
+        fn run_async<'a>(
+            &'a self,
+            spec: &'a CommandSpec,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+            if spec.program() != "npx" {
+                return Box::pin(async move { self.run(spec) });
+            }
+            Box::pin(async move {
+                self.events.lock().expect("event lock").push("npx".into());
+                let endpoint = spec
+                    .arguments()
+                    .windows(2)
+                    .find(|values| values[0] == "--url")
+                    .map(|values| values[1].to_string_lossy().into_owned())
+                    .expect("official runner URL should be present");
+                reqwest::Client::new()
+                    .get(endpoint)
+                    .send()
+                    .await
+                    .expect("official proxy request should complete");
+                self.events
+                    .lock()
+                    .expect("event lock")
+                    .push("official proxy complete".into());
+                Err(AppFailure::from(anyhow!("intentional npx failure")))
+            })
         }
 
         fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
             match spec.program().to_str() {
+                Some("docker") if spec.arguments().iter().any(|value| value == "config") => {
+                    Ok(serde_json::to_vec(&serde_json::json!({
+                        "services": {
+                            "fast_time_server": {
+                                "image": "ghcr.io/ibm/cfex-mcp-fast-time-server:latest"
+                            },
+                            "register_fast_time": {
+                                "command": [
+                                    "wait for http://fast_time_server:9080/health",
+                                    "register http://fast_time_server:9080/mcp"
+                                ]
+                            }
+                        }
+                    }))
+                    .expect("valid Compose JSON"))
+                }
+                Some("docker")
+                    if spec.arguments().first().is_some_and(|value| value == "ps")
+                        && spec.arguments().iter().any(|value| {
+                            value
+                                .to_string_lossy()
+                                .contains("com.docker.compose.service=redis")
+                        }) =>
+                {
+                    Ok(b"redis-container\n".to_vec())
+                }
+                Some("docker")
+                    if spec
+                        .arguments()
+                        .first()
+                        .is_some_and(|value| value == "exec") =>
+                {
+                    Ok(b"1\n".to_vec())
+                }
                 Some("docker") => Ok(Vec::new()),
                 Some("git") => Ok(b"revision\n".to_vec()),
                 Some("id") if spec.arguments().first().is_some_and(|value| value == "-u") => {
@@ -2854,6 +2942,9 @@ mod tests {
             ("CF_INTEGRATION_DIR", integration_dir.as_os_str()),
             ("CF_CONTROLPLANE_DIR", controlplane_dir.as_os_str()),
             ("MCP_CLI_BASE_URL", OsStr::new(base_url)),
+            ("MCPGATEWAY_BEARER_TOKEN", OsStr::new("")),
+            ("CF_FRESH_STACK", OsStr::new("false")),
+            ("CF_COMPOSE_BUILD", OsStr::new("false")),
         ] {
             environment.insert(OsString::from(key), value.to_owned());
         }
@@ -2866,6 +2957,7 @@ mod tests {
         State(state): State<Arc<FixtureApiState>>,
         method: Method,
         uri: Uri,
+        headers: axum::http::HeaderMap,
     ) -> (StatusCode, axum::Json<serde_json::Value>) {
         let event = format!("{} {}", method, uri.path());
         let fail = {
@@ -2877,6 +2969,42 @@ mod tests {
             events.push(event);
             fail
         };
+        if uri.path().ends_with("/mcp") {
+            let authorization = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok());
+            if authorization.is_none() {
+                return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({})));
+            }
+            let has_expected_scope = authorization
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .and_then(|token| {
+                    let mut validation =
+                        jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+                    validation.set_audience(&["mcpgateway-api"]);
+                    jsonwebtoken::decode::<serde_json::Value>(
+                        token,
+                        &jsonwebtoken::DecodingKey::from_secret(
+                            b"my-test-key-but-now-longer-than-32-bytes",
+                        ),
+                        &validation,
+                    )
+                    .ok()
+                })
+                .and_then(|data| {
+                    data.claims["scopes"]["server_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                == state.expected_scoped_server_id;
+            if has_expected_scope && state.expected_scoped_server_id.is_some() {
+                state
+                    .events
+                    .lock()
+                    .expect("event lock")
+                    .push(format!("scoped {}", uri.path()));
+            }
+        }
         if fail {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2936,6 +3064,7 @@ mod tests {
             .with_state(Arc::new(FixtureApiState {
                 events: Arc::clone(&events),
                 fail_cleanup: false,
+                expected_scoped_server_id: None,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3000,6 +3129,178 @@ mod tests {
                     crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
                 )
         }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn combined_workflow_routes_official_and_gateway_checks_to_scoped_fixture() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let api_state = Arc::new(FixtureApiState {
+            events: Arc::clone(&events),
+            fail_cleanup: false,
+            expected_scoped_server_id: Some(
+                crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+            ),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::clone(&api_state));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::Dataplane,
+            start: false,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+
+        runtime
+            .run_compliance_workflow(&common, Some(ConformanceSuite::Active), true, None)
+            .await
+            .expect_err("intentional official and gateway responses should fail");
+
+        let events = events.lock().expect("event lock");
+        let npx = events
+            .iter()
+            .position(|event| event == "npx")
+            .expect("npx event");
+        let official_complete = events
+            .iter()
+            .position(|event| event == "official proxy complete")
+            .expect("official proxy boundary");
+        let expected_path = format!(
+            "/servers/{}/mcp",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+        );
+        assert!(
+            events[npx + 1..official_complete]
+                .iter()
+                .any(|event| event.ends_with(&expected_path))
+        );
+        assert!(
+            events[official_complete + 1..]
+                .iter()
+                .any(|event| event.ends_with(&expected_path))
+        );
+        let scoped_event = format!("scoped {expected_path}");
+        assert!(
+            events[npx + 1..official_complete]
+                .iter()
+                .any(|event| event == &scoped_event),
+            "{events:?}"
+        );
+        assert!(
+            events[official_complete + 1..]
+                .iter()
+                .any(|event| event == &scoped_event)
+        );
+        assert!(events.iter().all(|event| {
+            !event.contains(&format!("/servers/{}/mcp", runtime.default_server_id()))
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn all_mode_cleans_each_fixture_before_stack_down_and_next_mode() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events: Arc::clone(&events),
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        fs::write(controlplane.join("docker-compose.yml"), "services: {}\n")
+            .expect("fake Compose file should exist for stack cleanup");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::All,
+            start: true,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+
+        let workflow_error = runtime
+            .run_compliance_workflow(&common, Some(ConformanceSuite::Active), false, None)
+            .await
+            .expect_err("intentional conformance responses should fail");
+
+        let events = events.lock().expect("event lock");
+        let controlplane_down = events
+            .iter()
+            .position(|event| event == "stack down cf-controlplane-only")
+            .expect("controlplane stack should be stopped");
+        let dataplane_up = events
+            .iter()
+            .position(|event| event == "stack up cf-integration")
+            .unwrap_or_else(|| {
+                panic!("dataplane stack should start second: {events:?}; {workflow_error}")
+            });
+        let dataplane_down = events
+            .iter()
+            .position(|event| event == "stack down cf-integration")
+            .expect("dataplane stack should be stopped");
+        let fixture_removals = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.as_str() == "compose fixture rm")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(fixture_removals.len(), 2, "{events:?}");
+        assert!(fixture_removals[0] < controlplane_down);
+        assert!(controlplane_down < dataplane_up);
+        assert!(fixture_removals[1] < dataplane_down);
+        for (rm, down) in [
+            (fixture_removals[0], controlplane_down),
+            (fixture_removals[1], dataplane_down),
+        ] {
+            let api_cleanup = events[..rm]
+                .iter()
+                .rposition(|event| event.starts_with("DELETE /servers/"))
+                .expect("fixture API cleanup should precede service removal");
+            assert!(api_cleanup < rm && rm < down);
+        }
         server.abort();
     }
 
@@ -3099,7 +3400,20 @@ mod tests {
             .run_compliance_workflow(&explicit, Some(ConformanceSuite::Active), false, None)
             .await
             .expect_err("intentional runner failure should occur without fixture setup");
-        assert_eq!(*events.lock().expect("event lock"), ["npx"]);
+        assert!(
+            events
+                .lock()
+                .expect("event lock")
+                .iter()
+                .any(|event| event == "npx")
+        );
+        assert!(
+            events
+                .lock()
+                .expect("event lock")
+                .iter()
+                .all(|event| !event.starts_with("compose fixture"))
+        );
 
         events.lock().expect("event lock").clear();
         let gateway_only = ResolvedComplianceCommon {
@@ -3161,6 +3475,7 @@ mod tests {
             .with_state(Arc::new(FixtureApiState {
                 events: Arc::clone(&events),
                 fail_cleanup: true,
+                expected_scoped_server_id: None,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
