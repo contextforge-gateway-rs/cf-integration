@@ -32,7 +32,7 @@ use crate::conformance::{
 };
 use crate::conformance_fixture::{
     ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
-    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVICE,
+    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID, OFFICIAL_CONFORMANCE_SERVICE,
 };
 use crate::coverage::{
     CoverageOverlay, CoverageResult, GatewayApplicability, PINNED_SOURCE_COMMIT,
@@ -1806,7 +1806,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         }
         shutdown_result?;
         let results = results?;
-        if run.fixture.is_none() {
+        if !is_trusted_official_fixture(run.fixture) {
             validate_no_fixture_failures(&results).map_err(AppFailure::from)?;
         }
         mark_conformance_complete(
@@ -2003,7 +2003,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             controlplane_gateway.as_ref(),
             controlplane_official
                 .as_ref()
-                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
+                .and_then(|artifact| artifact.metadata.fixture.as_ref()),
         );
         let dataplane = ModeCoverageEvidence::from_artifacts(
             dataplane_official
@@ -2012,7 +2012,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             dataplane_gateway.as_ref(),
             dataplane_official
                 .as_ref()
-                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
+                .and_then(|artifact| artifact.metadata.fixture.as_ref()),
         );
         enrich_overlay_results(overlay, &controlplane, &dataplane);
         Ok(())
@@ -2084,12 +2084,16 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             dataplane
                 .as_ref()
                 .map_or(&empty_baseline, |artifact| &artifact.baseline),
-            controlplane
-                .as_ref()
-                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
-            dataplane
-                .as_ref()
-                .is_some_and(|artifact| artifact.metadata.fixture.is_some()),
+            is_trusted_official_fixture(
+                controlplane
+                    .as_ref()
+                    .and_then(|artifact| artifact.metadata.fixture.as_ref()),
+            ),
+            is_trusted_official_fixture(
+                dataplane
+                    .as_ref()
+                    .and_then(|artifact| artifact.metadata.fixture.as_ref()),
+            ),
         );
         let output = paths.report_output.join("mcp-conformance-comparison.md");
         write_comparison_report(
@@ -2270,6 +2274,14 @@ struct ConformanceFixtureMetadata {
     server_id: String,
 }
 
+fn is_trusted_official_fixture(fixture: Option<&ConformanceFixtureMetadata>) -> bool {
+    fixture.is_some_and(|fixture| {
+        fixture.repository == OFFICIAL_CONFORMANCE_REPOSITORY
+            && fixture.revision == OFFICIAL_CONFORMANCE_REVISION
+            && fixture.server_id == OFFICIAL_CONFORMANCE_SERVER_ID
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConformanceRunMetadata {
@@ -2298,8 +2310,9 @@ impl ModeCoverageEvidence {
     fn from_artifacts(
         official: Option<&ConformanceResults>,
         gateway: Option<&GatewayComplianceReport>,
-        trusted_official_fixture: bool,
+        official_fixture: Option<&ConformanceFixtureMetadata>,
     ) -> Self {
+        let trusted_official_fixture = is_trusted_official_fixture(official_fixture);
         let official_results = official
             .into_iter()
             .flat_map(|results| &results.scenarios)
@@ -4805,6 +4818,34 @@ mod tests {
         assert!(reserialized.get("fixture").is_none());
     }
 
+    #[test]
+    fn trusted_official_fixture_requires_exact_pinned_provenance() {
+        let exact = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            OFFICIAL_CONFORMANCE_REVISION,
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+        );
+
+        assert!(is_trusted_official_fixture(Some(&exact)));
+        assert!(!is_trusted_official_fixture(None));
+        for mismatch in [
+            ConformanceFixtureMetadata {
+                repository: "https://example.test/untrusted".to_owned(),
+                ..exact.clone()
+            },
+            ConformanceFixtureMetadata {
+                revision: "untrusted-revision".to_owned(),
+                ..exact.clone()
+            },
+            ConformanceFixtureMetadata {
+                server_id: "untrusted-server".to_owned(),
+                ..exact.clone()
+            },
+        ] {
+            assert!(!is_trusted_official_fixture(Some(&mismatch)));
+        }
+    }
+
     #[tokio::test]
     async fn caller_managed_resource_template_not_found_is_not_complete_or_reportable() {
         let artifacts = tempfile::tempdir().expect("temporary artifact root");
@@ -4851,14 +4892,14 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             OFFICIAL_CONFORMANCE_REVISION,
-            "actual-provisioned-server",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
 
         let error = runtime
             .run_official_conformance_mode(
                 &OfficialConformanceRun {
                     mode: StackMode::Controlplane,
-                    server_id: "actual-provisioned-server",
+                    server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
                     token: "token",
                     spec_version: "2025-11-25",
                     suite: "active",
@@ -4881,6 +4922,43 @@ mod tests {
         assert_eq!(loaded.metadata.fixture, Some(fixture));
     }
 
+    #[tokio::test]
+    async fn mismatched_fixture_provenance_does_not_bypass_fresh_fixture_validation() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let runtime = RuntimeExecutor::new(test_config([]), CompletedFixtureFailureRunner);
+        let fixture = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            "untrusted-revision",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+        );
+
+        let error = runtime
+            .run_official_conformance_mode(
+                &OfficialConformanceRun {
+                    mode: StackMode::Controlplane,
+                    server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+                    token: "token",
+                    spec_version: "2025-11-25",
+                    suite: "active",
+                    custom_baseline: None,
+                    fixture: Some(&fixture),
+                    cancellation: tokio::sync::watch::channel(false).1,
+                },
+                &paths,
+            )
+            .await
+            .expect_err("untrusted provenance must retain fresh fixture validation");
+
+        assert!(error.to_string().contains("official fixture setup failed"));
+        assert!(
+            !paths
+                .conformance_mode(BaselineTarget::Controlplane)
+                .completion
+                .exists()
+        );
+    }
+
     #[test]
     fn trusted_artifact_report_attributes_fixture_not_found_to_gateway() {
         let artifacts = tempfile::tempdir().expect("temporary artifact root");
@@ -4891,7 +4969,7 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             OFFICIAL_CONFORMANCE_REVISION,
-            "actual-provisioned-server",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
         for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
             let mode_paths = paths.conformance_mode(target);
@@ -4930,6 +5008,57 @@ mod tests {
         assert!(report.contains("| control-plane only failure | 1 |"));
         assert!(report.contains(&format!(
             "| {fixture_scenario} | failure | compliant | control-plane only failure |"
+        )));
+    }
+
+    #[test]
+    fn mismatched_fixture_provenance_remains_fixture_failure_in_report() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let scenarios =
+            expected_server_scenarios("active", "2025-11-25").expect("pinned active catalog");
+        let fixture_scenario = "resources-templates-read";
+        let fixture = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            "untrusted-revision",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+        );
+        for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
+            let mode_paths = paths.conformance_mode(target);
+            write_official_results(
+                &mode_paths.official_results,
+                scenarios.iter().copied(),
+                "SUCCESS",
+            );
+            if target == BaselineTarget::Controlplane {
+                write_fixture_failure_result(&mode_paths.official_results, fixture_scenario);
+            }
+            fs::write(&mode_paths.rich_baseline, "server: []\n")
+                .expect("empty rich baseline should be written");
+            write_run_metadata(
+                &mode_paths.metadata,
+                &ConformanceRunMetadata {
+                    oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                    target: target.label().to_owned(),
+                    spec_version: "2025-11-25".to_owned(),
+                    suite: "active".to_owned(),
+                    fixture: Some(fixture.clone()),
+                },
+            )
+            .expect("mismatched metadata should be written");
+            write_completion_marker(&mode_paths.completion)
+                .expect("completion marker should be written");
+        }
+        let runtime = RuntimeExecutor::new(test_config([]), DefaultsRunner::default());
+
+        let report_path = runtime
+            .write_comparison_from_artifacts(&paths, None)
+            .expect("matching mismatched provenance should remain historically reportable");
+        let report = fs::read_to_string(report_path).expect("comparison report should be readable");
+
+        assert!(report.contains("| fixture failure | 1 |"));
+        assert!(report.contains(&format!(
+            "| {fixture_scenario} | fixture failure | compliant | fixture failure |"
         )));
     }
 
@@ -5368,8 +5497,20 @@ mod tests {
         write_fixture_failure_result(artifacts.path(), "resources-templates-read");
         let results = load_server_results(artifacts.path()).expect("fixture failure should parse");
 
-        let trusted = ModeCoverageEvidence::from_artifacts(Some(&results), None, true);
-        let historical = ModeCoverageEvidence::from_artifacts(Some(&results), None, false);
+        let exact = fixture_metadata(
+            OFFICIAL_CONFORMANCE_REPOSITORY,
+            OFFICIAL_CONFORMANCE_REVISION,
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+        );
+        let mismatch = ConformanceFixtureMetadata {
+            revision: "untrusted-revision".to_owned(),
+            ..exact.clone()
+        };
+
+        let trusted = ModeCoverageEvidence::from_artifacts(Some(&results), None, Some(&exact));
+        let historical = ModeCoverageEvidence::from_artifacts(Some(&results), None, None);
+        let mismatched =
+            ModeCoverageEvidence::from_artifacts(Some(&results), None, Some(&mismatch));
 
         assert_eq!(
             trusted.official["resources-templates-read"],
@@ -5377,6 +5518,10 @@ mod tests {
         );
         assert_eq!(
             historical.official["resources-templates-read"],
+            CoverageResult::NotRun
+        );
+        assert_eq!(
+            mismatched.official["resources-templates-read"],
             CoverageResult::NotRun
         );
     }
