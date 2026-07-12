@@ -290,7 +290,15 @@ async fn mock_gateway(State(state): State<MockState>, request: Request<Body>) ->
             return empty_response(state.behavior.malformed_request_status);
         }
         if state.behavior.malformed_error_envelope {
-            return json_response(StatusCode::OK, json!({"error": {"code": -32600}}), None);
+            return json_response(
+                StatusCode::OK,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 22,
+                    "error": {"code": -32600, "message": "Invalid Request"}
+                }),
+                None,
+            );
         }
         return json_response(
             StatusCode::OK,
@@ -813,6 +821,10 @@ async fn malformed_inputs_do_not_accept_server_errors_or_invalid_error_envelopes
         case(&malformed_report, "transport.malformed-jsonrpc").status,
         GatewayCaseStatus::Failed
     );
+    assert_eq!(
+        case(&malformed_report, "transport.malformed-jsonrpc").detail,
+        "malformed JSON-RPC returned HTTP 200 without HTTP 400 or a valid -32600 Invalid Request envelope"
+    );
 }
 
 #[tokio::test]
@@ -1016,6 +1028,27 @@ fn report_rendering_uses_the_selected_version_and_writes_round_trip_artifacts() 
         std::fs::read_to_string(markdown_path).expect("Markdown report should be readable"),
         rendered
     );
+}
+
+#[test]
+fn report_rendering_ends_with_exactly_one_newline() {
+    let report = GatewayComplianceReport {
+        mode: "dataplane".to_owned(),
+        specification_version: SPEC_VERSION.to_owned(),
+        cases: vec![GatewayCaseResult {
+            name: "transport.example".to_owned(),
+            category: "HTTP transport".to_owned(),
+            status: GatewayCaseStatus::Failed,
+            specification: "https://example.test/spec".to_owned(),
+            detail: "unexpected response".to_owned(),
+            failure_evidence: None,
+        }],
+    };
+
+    let rendered = render_gateway_report(&report);
+
+    assert!(rendered.ends_with('\n'));
+    assert!(!rendered.ends_with("\n\n"));
 }
 
 #[test]

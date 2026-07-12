@@ -1677,7 +1677,7 @@ async fn transport_negative_cases(
                     "HTTP transport",
                     TRANSPORT_SPEC,
                     format!(
-                        "malformed JSON-RPC returned HTTP {} without HTTP 400 or -32600",
+                        "malformed JSON-RPC returned HTTP {} without HTTP 400 or a valid -32600 Invalid Request envelope",
                         exchange.status()
                     ),
                     evidence,
@@ -2200,6 +2200,9 @@ pub fn render_gateway_report(report: &GatewayComplianceReport) -> String {
                 ),
             }
         }
+    }
+    while output.ends_with("\n\n") {
+        output.pop();
     }
     output
 }
