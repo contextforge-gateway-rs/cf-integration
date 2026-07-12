@@ -12,7 +12,8 @@ use cf_integration::conformance::{
     audit_baseline, classify_outcomes, compare_result_sets, expected_server_scenarios,
     load_baseline, load_server_results, official_server_command, parse_baseline,
     project_official_baseline, render_comparison_markdown, validate_baseline,
-    validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
+    validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
+    write_official_baseline_projection,
 };
 
 const SPEC_REFERENCE: &str =
@@ -531,6 +532,75 @@ fn explicit_missing_named_fixtures_are_not_implementation_failures() {
         };
         assert_eq!(scenario.outcome(), ScenarioOutcome::FixtureFailure);
     }
+}
+
+#[test]
+fn fresh_runs_reject_missing_official_fixtures() {
+    let parsed = results([ConformanceScenarioResult {
+        scenario: "tools-call-simple-text".to_owned(),
+        checks: vec![failing_check(
+            "fixture",
+            "Failed: MCP error -32601: Tool not found: test_simple_text",
+        )],
+        source: PathBuf::from("tools-call-simple-text/checks.json"),
+    }]);
+
+    let error = validate_no_fixture_failures(&parsed)
+        .expect_err("missing official fixtures must reject a fresh run")
+        .to_string();
+
+    assert!(error.contains("tools-call-simple-text"));
+    assert!(error.contains("official fixture setup"));
+}
+
+#[test]
+fn fresh_run_fixture_failures_are_listed_deterministically() {
+    let fixture_result = |scenario: &str, message: &str| ConformanceScenarioResult {
+        scenario: scenario.to_owned(),
+        checks: vec![failing_check("fixture", message)],
+        source: PathBuf::from(format!("{scenario}/checks.json")),
+    };
+    let parsed = results([
+        fixture_result(
+            "tools-call-simple-text",
+            "Failed: MCP error -32601: Tool not found: test_simple_text",
+        ),
+        fixture_result(
+            "prompts-get-simple",
+            "Failed: MCP error -32002: Prompt not found: test_simple_prompt",
+        ),
+    ]);
+
+    let error = validate_no_fixture_failures(&parsed)
+        .expect_err("all missing official fixtures must be reported")
+        .to_string();
+
+    assert_eq!(
+        error,
+        "official fixture setup failed for conformance scenarios: prompts-get-simple, tools-call-simple-text"
+    );
+}
+
+#[test]
+fn fresh_runs_accept_successful_scenarios() {
+    let parsed = results([result("tools-call-simple-text", [CheckStatus::Success])]);
+
+    validate_no_fixture_failures(&parsed).expect("successful scenarios must be accepted");
+}
+
+#[test]
+fn fresh_runs_accept_non_fixture_gateway_failures() {
+    let parsed = results([ConformanceScenarioResult {
+        scenario: "logging-set-level".to_owned(),
+        checks: vec![failing_check(
+            "gateway",
+            "Failed: MCP error -32601: logging/setLevel",
+        )],
+        source: PathBuf::from("logging-set-level/checks.json"),
+    }]);
+
+    validate_no_fixture_failures(&parsed)
+        .expect("gateway protocol failures remain conformance results");
 }
 
 #[test]

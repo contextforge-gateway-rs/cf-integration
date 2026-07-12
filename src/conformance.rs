@@ -438,6 +438,29 @@ pub struct ConformanceResults {
     pub scenarios: BTreeMap<String, ConformanceScenarioResult>,
 }
 
+/// Rejects fresh runs whose official fixture setup prevented conformance checks.
+///
+/// # Errors
+///
+/// Returns an error listing every scenario with a fixture-failure outcome.
+pub fn validate_no_fixture_failures(results: &ConformanceResults) -> Result<()> {
+    let fixture_failures = results
+        .scenarios
+        .iter()
+        .filter_map(|(scenario, result)| {
+            (result.outcome() == ScenarioOutcome::FixtureFailure).then_some(scenario.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    if !fixture_failures.is_empty() {
+        bail!(
+            "official fixture setup failed for conformance scenarios: {}",
+            fixture_failures.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Returns the exact pinned server scenario set for one supported suite/spec pair.
 ///
 /// # Errors
