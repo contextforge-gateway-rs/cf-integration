@@ -1003,16 +1003,20 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     async fn start_conformance_service(&self, mode: StackMode) -> AppResult<()> {
-        let command = self.conformance_compose_project(mode).command([
+        let project = self.conformance_compose_project(mode);
+        let build = project.command(["build", OFFICIAL_CONFORMANCE_SERVICE]);
+        let build = self.compose_environment(build, mode, true)?;
+        self.runner.run_async(&build).await?;
+
+        let up = project.command([
             "up",
             "-d",
-            "--build",
             "--wait",
             "gateway",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
-        let command = self.compose_environment(command, mode, true)?;
-        self.runner.run_async(&command).await
+        let up = self.compose_environment(up, mode, true)?;
+        self.runner.run_async(&up).await
     }
 
     async fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
@@ -2951,7 +2955,27 @@ mod tests {
                     .iter()
                     .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
                 {
+                    if arguments.iter().any(|value| value == "build") {
+                        assert!(
+                            !arguments.iter().any(|value| value == "gateway"),
+                            "fixture build must not rebuild gateway"
+                        );
+                        let mut events = self.events.lock().expect("event lock");
+                        let fail = events.iter().any(|event| event == "fail fixture build");
+                        events.push("compose fixture build".into());
+                        drop(events);
+                        if fail {
+                            return Box::pin(async {
+                                Err(AppFailure::from(anyhow!("fixture build failed")))
+                            });
+                        }
+                        return Box::pin(async { Ok(()) });
+                    }
                     if arguments.iter().any(|value| value == "up") {
+                        assert!(
+                            !arguments.iter().any(|value| value == "--build"),
+                            "fixture up must use the separately built image"
+                        );
                         let gateway = arguments
                             .iter()
                             .position(|value| value == "gateway")
@@ -2962,7 +2986,7 @@ mod tests {
                             .expect("conformance server target");
                         assert!(gateway < server, "gateway must precede conformance server");
                     }
-                    let event = if spec.arguments().iter().any(|value| value == "up") {
+                    let event = if arguments.iter().any(|value| value == "up") {
                         "compose fixture up"
                     } else {
                         "compose fixture rm"
@@ -4317,7 +4341,49 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event lock"),
             [
+                "compose fixture build",
                 "compose fixture up",
+                "compose fixture rm",
+                "compose gateway restore"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn conformance_service_build_failure_skips_up_restores_and_preserves_build_error() {
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let events = Arc::new(Mutex::new(vec!["fail fixture build".into()]));
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config("http://127.0.0.1:9", state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+                fail_gateway_restore: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::Controlplane,
+            start: false,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+
+        let error = runtime
+            .run_compliance_workflow(&common, Some(ConformanceSuite::Active), false, None)
+            .await
+            .expect_err("service build should fail");
+
+        assert!(error.to_string().starts_with("fixture build failed"));
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            [
+                "fail fixture build",
+                "compose fixture build",
                 "compose fixture rm",
                 "compose gateway restore"
             ]
@@ -4357,6 +4423,7 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event lock"),
             [
+                "compose fixture build",
                 "compose fixture up",
                 "compose fixture rm",
                 "compose gateway restore"
@@ -4436,17 +4503,18 @@ mod tests {
             .bearer_token(StackMode::Dataplane, "official-server")
             .expect("scoped token should mint");
 
-        let command = runtime
-            .conformance_compose_project(StackMode::Controlplane)
-            .command([
+        let project = runtime.conformance_compose_project(StackMode::Controlplane);
+        let commands = [
+            project.command(["build", OFFICIAL_CONFORMANCE_SERVICE]),
+            project.command([
                 "up",
                 "-d",
-                "--build",
                 "--wait",
                 "gateway",
                 OFFICIAL_CONFORMANCE_SERVICE,
-            ]);
-        let debug = format!("{command:?}");
+            ]),
+        ];
+        let debug = format!("{commands:?}");
         let error = finish_with_cleanup(
             Some(AppFailure::from(anyhow!("primary"))),
             Err(AppFailure::from(anyhow!("gateway restore failed"))),
@@ -4454,12 +4522,12 @@ mod tests {
         .expect_err("combined failure should remain an error")
         .to_string();
         for token in [admin, scoped] {
-            assert!(
+            assert!(commands.iter().all(|command| {
                 command
                     .arguments()
                     .iter()
                     .all(|argument| !argument.to_string_lossy().contains(&token))
-            );
+            }));
             assert!(!debug.contains(&token));
             assert!(!error.contains(&token));
         }
@@ -4493,6 +4561,7 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event lock"),
             [
+                "compose fixture build",
                 "compose fixture up",
                 "compose fixture rm",
                 "compose gateway restore"
