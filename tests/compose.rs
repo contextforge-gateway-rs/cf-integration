@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use cf_integration::compose::{ComposeProject, validate_integration_contract};
@@ -88,6 +89,89 @@ fn source_dataplane_adds_build_overlay_last() {
             "/repo/docker/docker-compose.cf-dataplane-build.yaml"
         ))
     );
+}
+
+#[test]
+fn conformance_fixture_is_an_explicit_overlay_and_profile() {
+    let default_project = ComposeProject::dataplane(
+        Path::new("/repo"),
+        Path::new("/checkout"),
+        OsString::from("project"),
+        false,
+    );
+
+    assert!(default_project.profiles().is_empty());
+    assert!(
+        !default_project
+            .files()
+            .iter()
+            .any(|file| file.ends_with("docker-compose.cf-conformance.yaml"))
+    );
+
+    let conformance = default_project
+        .clone()
+        .with_profiles(["testing"])
+        .with_conformance_fixture(Path::new("/repo"));
+    assert_eq!(conformance.profiles(), ["testing", "conformance"]);
+    assert_eq!(
+        &conformance.files()[..default_project.files().len()],
+        default_project.files()
+    );
+    assert_eq!(
+        conformance.files().last().map(PathBuf::as_path),
+        Some(Path::new("/repo/docker/docker-compose.cf-conformance.yaml"))
+    );
+    let deduplicated = conformance.with_conformance_fixture(Path::new("/repo"));
+    assert_eq!(deduplicated.profiles(), ["testing", "conformance"]);
+    assert_eq!(
+        deduplicated
+            .files()
+            .iter()
+            .filter(|file| file.ends_with("docker-compose.cf-conformance.yaml"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dockerfile = fs::read_to_string(root.join("docker/mcp-conformance-server.Dockerfile"))
+        .expect("read conformance Dockerfile");
+    let patch = fs::read_to_string(root.join("docker/patch-mcp-conformance-hosts.mjs"))
+        .expect("read host patch script");
+    let compose = fs::read_to_string(root.join("docker/docker-compose.cf-conformance.yaml"))
+        .expect("read conformance Compose overlay");
+
+    assert!(dockerfile.contains("FROM node:22-bookworm-slim"));
+    assert!(
+        dockerfile
+            .contains("ARG MCP_CONFORMANCE_REVISION=21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0")
+    );
+    assert!(dockerfile.contains("npm ci"));
+    assert!(
+        dockerfile
+            .contains("node /usr/local/bin/patch-mcp-conformance-hosts.mjs everything-server.ts")
+    );
+    assert!(dockerfile.contains(
+        "git diff --exit-code -- . ':(exclude)examples/servers/typescript/everything-server.ts'"
+    ));
+    assert!(
+        dockerfile
+            .contains("git diff --numstat -- examples/servers/typescript/everything-server.ts")
+    );
+
+    let old = "const app = createMcpExpressApp();";
+    let replacement = "const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });";
+    assert!(patch.contains(old));
+    assert!(patch.contains(replacement));
+    assert!(patch.contains("replacementCount !== 1"));
+    assert!(patch.contains("process.argv[2]"));
+
+    assert!(compose.contains("mcp_conformance_server:"));
+    assert!(compose.contains("profiles: [\"conformance\"]"));
+    assert!(compose.contains("cf-integration/mcp-conformance-server:0.1.16"));
+    assert!(!compose.contains("fast_time_server"));
 }
 
 #[test]

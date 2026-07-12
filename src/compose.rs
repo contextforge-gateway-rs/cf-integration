@@ -93,6 +93,22 @@ impl ComposeProject {
         self
     }
 
+    /// Enables the isolated official MCP conformance server fixture.
+    #[must_use]
+    pub fn with_conformance_fixture(mut self, repository_root: &Path) -> Self {
+        let overlay = repository_root.join("docker/docker-compose.cf-conformance.yaml");
+        if !self.files.contains(&overlay) {
+            self.files.push(overlay);
+        }
+
+        let profile = OsString::from("conformance");
+        if !self.profiles.contains(&profile) {
+            self.profiles.push(profile);
+        }
+
+        self
+    }
+
     /// Creates a `docker compose` command with project, files, and profiles.
     pub fn command<I, S>(&self, arguments: I) -> CommandSpec
     where
