@@ -1473,6 +1473,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let mut last_failure = None;
         let mut interrupted = false;
         tokio::pin!(interrupt);
+        let (cancellation_sender, cancellation_receiver) = tokio::sync::watch::channel(false);
 
         for mode in selected_modes(common.mode) {
             let base_server_id = caller_server_id
@@ -1598,6 +1599,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                                     spec_version: &common.spec_version,
                                     suite: suite_name,
                                     custom_baseline,
+                                    cancellation: cancellation_receiver.clone(),
                                 },
                                 &paths,
                             )
@@ -1627,6 +1629,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                         failure = &mut tests => mode_failure = failure,
                         () = interrupt.as_mut() => {
                             interrupted = true;
+                            cancellation_sender.send_replace(true);
+                            let _ = tests.await;
                             mode_failure = Some(interrupted_conformance_failure());
                         }
                     }
@@ -1737,7 +1741,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             )
             .cwd(self.config.root()),
         );
-        let process_result = self.runner.run_async(&command).await;
+        let process_result = self
+            .runner
+            .run_async_cancellable(&command, run.cancellation.clone())
+            .await;
         let shutdown_result = proxy
             .shutdown()
             .await
@@ -2321,6 +2328,7 @@ struct OfficialConformanceRun<'a> {
     spec_version: &'a str,
     suite: &'a str,
     custom_baseline: Option<&'a Path>,
+    cancellation: tokio::sync::watch::Receiver<bool>,
 }
 
 fn inspector_command(endpoint: &str, method: &str) -> CommandSpec {
@@ -2714,6 +2722,64 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         fail_cleanup: bool,
         expected_scoped_server_id: Option<String>,
+    }
+
+    struct CancellingFixtureRunner {
+        inner: FixtureLifecycleRunner,
+    }
+
+    impl ProcessRunner for CancellingFixtureRunner {
+        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+            self.inner.run(spec)
+        }
+
+        fn run_async<'a>(
+            &'a self,
+            spec: &'a CommandSpec,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+            self.inner.run_async(spec)
+        }
+
+        fn run_async_cancellable<'a>(
+            &'a self,
+            spec: &'a CommandSpec,
+            mut cancellation: tokio::sync::watch::Receiver<bool>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+            if spec.program() != "npx" {
+                return self.inner.run_async_cancellable(spec, cancellation);
+            }
+            Box::pin(async move {
+                self.inner
+                    .events
+                    .lock()
+                    .expect("event lock")
+                    .push("child started".into());
+                while !*cancellation.borrow_and_update() {
+                    cancellation
+                        .changed()
+                        .await
+                        .expect("runtime cancellation sender should remain alive");
+                }
+                self.inner
+                    .events
+                    .lock()
+                    .expect("event lock")
+                    .push("child terminated".into());
+                Err(AppFailure::from(anyhow!("child cancelled and reaped")))
+            })
+        }
+
+        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+            self.inner.capture_stdout(spec)
+        }
+
+        fn capture_output(&self, spec: &CommandSpec) -> AppResult<CapturedOutput> {
+            self.inner.capture_output(spec)
+        }
+
+        fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> AppResult<()> {
+            self.inner.run_to_log(spec, log_path)
+        }
     }
 
     impl ProcessRunner for FixtureLifecycleRunner {
@@ -3639,10 +3705,12 @@ mod tests {
         let reports = tempfile::tempdir().expect("temporary compliance artifacts");
         let runtime = RuntimeExecutor::new(
             fixture_test_config(&base_url, state.path(), &controlplane),
-            FixtureLifecycleRunner {
-                events: Arc::clone(&events),
-                fail_service_start: false,
-                fail_service_stop: false,
+            CancellingFixtureRunner {
+                inner: FixtureLifecycleRunner {
+                    events: Arc::clone(&events),
+                    fail_service_start: false,
+                    fail_service_stop: false,
+                },
             },
         );
         let common = ResolvedComplianceCommon {
@@ -3659,7 +3727,7 @@ mod tests {
                     .lock()
                     .expect("event lock")
                     .iter()
-                    .any(|event| event == "POST /servers")
+                    .any(|event| event == "child started")
                 {
                     return;
                 }
@@ -3684,6 +3752,10 @@ mod tests {
             .iter()
             .position(|event| event == "POST /servers")
             .expect("fixture should finish provisioning");
+        let child_terminated = events
+            .iter()
+            .position(|event| event == "child terminated")
+            .expect("active child should terminate before fixture cleanup");
         let delete = events[create + 1..]
             .iter()
             .position(|event| event.starts_with("DELETE /servers/"))
@@ -3693,7 +3765,7 @@ mod tests {
             .iter()
             .position(|event| event == "compose fixture rm")
             .expect("async service cleanup should run");
-        assert!(create < delete && delete < rm);
+        assert!(create < child_terminated && child_terminated < delete && delete < rm);
         assert!(events.iter().all(|event| event != "npx"));
         assert!(
             events
@@ -4684,6 +4756,7 @@ mod tests {
                     spec_version: "2025-11-25",
                     suite: "active",
                     custom_baseline: None,
+                    cancellation: tokio::sync::watch::channel(false).1,
                 },
                 &paths,
             )

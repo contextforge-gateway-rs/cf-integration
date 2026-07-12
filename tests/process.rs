@@ -248,6 +248,54 @@ async fn async_runner_keeps_a_single_thread_executor_responsive() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancellable_async_runner_kills_and_reaps_active_child() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let pid_path = directory.path().join("child.pid");
+    let script = executable_script(
+        &directory,
+        "long-lived.sh",
+        "printf '%s' \"$$\" > \"$PROCESS_PID_FILE\"\nexec sleep 60",
+    );
+    let spec = CommandSpec::new(script).env("PROCESS_PID_FILE", pid_path.as_os_str());
+    let (cancellation_sender, cancellation_receiver) = tokio::sync::watch::channel(false);
+    let cancellation_pid_path = pid_path.clone();
+    let cancel = tokio::spawn(async move {
+        for _ in 0..200 {
+            if cancellation_pid_path.is_file() {
+                cancellation_sender.send_replace(true);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("child did not publish its PID before cancellation deadline");
+    });
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        SystemProcessRunner.run_async_cancellable(&spec, cancellation_receiver),
+    )
+    .await
+    .expect("cancellable child should return promptly")
+    .expect_err("cancellation should be reported");
+    cancel.await.expect("cancellation task should join");
+
+    assert!(error.to_string().contains("cancelled and reaped"));
+    let pid = fs::read_to_string(&pid_path)
+        .expect("child PID should be recorded")
+        .parse::<u32>()
+        .expect("child PID should be numeric");
+    let still_running = std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("kill probe should execute")
+        .success();
+    assert!(!still_running, "cancelled child {pid} must be gone");
+}
+
+#[cfg(unix)]
 #[test]
 fn capture_stdout_returns_exact_bytes_while_stderr_is_inherited() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");

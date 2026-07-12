@@ -163,6 +163,26 @@ pub trait ProcessRunner {
         Box::pin(async move { self.run(spec) })
     }
 
+    /// Runs asynchronously and returns after cancellation is observed.
+    ///
+    /// The default is intended for fake runners without owned OS children.
+    fn run_async_cancellable<'a>(
+        &'a self,
+        spec: &'a CommandSpec,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+        Box::pin(async move {
+            let process = self.run_async(spec);
+            tokio::pin!(process);
+            tokio::select! {
+                result = &mut process => result,
+                () = wait_for_cancellation(&mut cancellation) => {
+                    Err(cancelled_failure(spec))
+                }
+            }
+        })
+    }
+
     /// Captures standard output while inheriting standard error.
     fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, AppFailure>;
 
@@ -205,6 +225,37 @@ impl ProcessRunner for SystemProcessRunner {
                 .await
                 .with_context(|| operation_context("wait for", spec))?;
             require_success(spec, status)
+        })
+    }
+
+    fn run_async_cancellable<'a>(
+        &'a self,
+        spec: &'a CommandSpec,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+        Box::pin(async move {
+            let mut command = tokio::process::Command::from(command(spec));
+            command
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .with_context(|| operation_context("spawn", spec))?;
+            tokio::select! {
+                status = child.wait() => {
+                    let status = status.with_context(|| operation_context("wait for", spec))?;
+                    require_success(spec, status)
+                }
+                () = wait_for_cancellation(&mut cancellation) => {
+                    let _ = child.start_kill();
+                    child
+                        .wait()
+                        .await
+                        .with_context(|| operation_context("reap cancelled", spec))?;
+                    Err(cancelled_failure(spec))
+                }
+            }
         })
     }
 
@@ -276,6 +327,21 @@ fn require_success(spec: &CommandSpec, status: ExitStatus) -> Result<(), AppFail
     } else {
         Err(AppFailure::child_exit(spec.program.to_owned(), status))
     }
+}
+
+async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*cancellation.borrow_and_update() {
+        if cancellation.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+fn cancelled_failure(spec: &CommandSpec) -> AppFailure {
+    AppFailure::from(anyhow::anyhow!(
+        "program {:?} cancelled and reaped",
+        spec.program()
+    ))
 }
 
 fn operation_context(operation: &str, spec: &CommandSpec) -> String {
