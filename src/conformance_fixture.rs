@@ -31,6 +31,7 @@ const REQUIRED_RESOURCE: &str = "test://static-text";
 const REQUIRED_PROMPT: &str = "test_simple_prompt";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_MAX_ATTEMPTS: usize = 40;
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REDACTED: &str = "<redacted>";
 
 /// IDs created for one official conformance fixture.
@@ -50,6 +51,7 @@ pub struct ConformanceFixtureClientBuilder {
     admin_token: String,
     poll_interval: Duration,
     max_attempts: usize,
+    request_timeout: Duration,
 }
 
 impl fmt::Debug for ConformanceFixtureClientBuilder {
@@ -60,6 +62,7 @@ impl fmt::Debug for ConformanceFixtureClientBuilder {
             .field("admin_token", &REDACTED)
             .field("poll_interval", &self.poll_interval)
             .field("max_attempts", &self.max_attempts)
+            .field("request_timeout", &self.request_timeout)
             .finish()
     }
 }
@@ -77,15 +80,24 @@ impl ConformanceFixtureClientBuilder {
         self
     }
 
+    /// Sets the total timeout for each admin HTTP request. Defaults to 30 seconds.
+    pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
+
     /// Validates configuration and builds the client.
     ///
     /// # Errors
     ///
     /// Returns an error when the base URL or bearer token is invalid, or when
-    /// `max_attempts` is zero.
+    /// `max_attempts` or `request_timeout` is zero.
     pub fn build(self) -> Result<ConformanceFixtureClient> {
         if self.max_attempts == 0 {
             return Err(anyhow!("max_attempts must be greater than zero"));
+        }
+        if self.request_timeout.is_zero() {
+            return Err(anyhow!("request_timeout must be greater than zero"));
         }
         let base_url = validate_base_url(&self.base_url)?;
         if !is_valid_bearer_token(&self.admin_token) {
@@ -93,6 +105,7 @@ impl ConformanceFixtureClientBuilder {
         }
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(self.request_timeout)
             .build()
             .map_err(|_| anyhow!("failed to build conformance fixture HTTP client"))?;
         Ok(ConformanceFixtureClient {
@@ -100,6 +113,7 @@ impl ConformanceFixtureClientBuilder {
             admin_token: self.admin_token,
             poll_interval: self.poll_interval,
             max_attempts: self.max_attempts,
+            request_timeout: self.request_timeout,
             http,
         })
     }
@@ -112,6 +126,7 @@ pub struct ConformanceFixtureClient {
     admin_token: String,
     poll_interval: Duration,
     max_attempts: usize,
+    request_timeout: Duration,
     http: reqwest::Client,
 }
 
@@ -126,6 +141,7 @@ impl fmt::Debug for ConformanceFixtureClient {
             .field("admin_token", &REDACTED)
             .field("poll_interval", &self.poll_interval)
             .field("max_attempts", &self.max_attempts)
+            .field("request_timeout", &self.request_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -141,6 +157,7 @@ impl ConformanceFixtureClient {
             admin_token: admin_token.into(),
             poll_interval: DEFAULT_POLL_INTERVAL,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 
@@ -154,15 +171,9 @@ impl ConformanceFixtureClient {
     pub async fn provision(&self, backend_url: &str) -> Result<ProvisionedConformanceFixture> {
         self.delete("servers", OFFICIAL_CONFORMANCE_SERVER_ID)
             .await?;
-        let gateways: Vec<GatewayRecord> = self.get_json("/gateways").await?;
-        for gateway in gateways
-            .iter()
-            .filter(|gateway| gateway.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME)
-        {
-            self.delete("gateways", &gateway.id).await?;
-        }
+        self.delete_reserved_gateways().await?;
 
-        let gateway: GatewayRecord = self
+        let gateway_result: Result<GatewayRecord> = self
             .post_json(
                 "/gateways",
                 &json!({
@@ -171,7 +182,20 @@ impl ConformanceFixtureClient {
                     "transport": "STREAMABLEHTTP",
                 }),
             )
-            .await?;
+            .await;
+        let gateway = match gateway_result {
+            Ok(gateway) => gateway,
+            Err(primary) => {
+                return match self.delete_reserved_gateways().await {
+                    Ok(()) => Err(anyhow!(safe_error(&primary, &self.admin_token))),
+                    Err(reconciliation) => Err(anyhow!(
+                        "{}; gateway-create reconciliation failed: {}",
+                        safe_error(&primary, &self.admin_token),
+                        safe_error(&reconciliation, &self.admin_token)
+                    )),
+                };
+            }
+        };
         let fixture = ProvisionedConformanceFixture {
             gateway_id: gateway.id,
             server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
@@ -239,6 +263,24 @@ impl ConformanceFixtureClient {
             })),
         )
         .await
+    }
+
+    async fn delete_reserved_gateways(&self) -> Result<()> {
+        let gateways: Vec<GatewayRecord> = self.get_json("/gateways").await?;
+        let mut failures = Vec::new();
+        for gateway in gateways
+            .iter()
+            .filter(|gateway| gateway.name == OFFICIAL_CONFORMANCE_GATEWAY_NAME)
+        {
+            if let Err(error) = self.delete("gateways", &gateway.id).await {
+                failures.push(safe_error(&error, &self.admin_token));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("; ")))
+        }
     }
 
     async fn poll_catalogs(&self, gateway_id: &str) -> Result<CatalogIds> {
@@ -338,14 +380,20 @@ impl ConformanceFixtureClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        request.send().await.map_err(|_| {
-            anyhow!(redact(
-                &format!(
+        request.send().await.map_err(|error| {
+            let message = if error.is_timeout() {
+                format!(
+                    "{} {path} timed out after {:?}",
+                    method.as_str(),
+                    self.request_timeout
+                )
+            } else {
+                format!(
                     "{} {path} failed before receiving a response",
                     method.as_str()
-                ),
-                &self.admin_token
-            ))
+                )
+            };
+            anyhow!(redact(&message, &self.admin_token))
         })
     }
 }
@@ -423,7 +471,7 @@ impl CatalogIds {
 }
 
 fn validate_base_url(base_url: &str) -> Result<Url> {
-    let mut url = Url::parse(base_url).map_err(|_| anyhow!("base URL is invalid"))?;
+    let url = Url::parse(base_url).map_err(|_| anyhow!("base URL is invalid"))?;
     if !matches!(url.scheme(), "http" | "https") || !url.has_host() || url.cannot_be_a_base() {
         return Err(anyhow!(
             "base URL must be an absolute hierarchical HTTP URL"
@@ -432,8 +480,11 @@ fn validate_base_url(base_url: &str) -> Result<Url> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(anyhow!("base URL must not contain credentials"));
     }
-    url.set_query(None);
-    url.set_fragment(None);
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!(
+            "base URL must contain only an HTTP origin with a root path"
+        ));
+    }
     Ok(url)
 }
 

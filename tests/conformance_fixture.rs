@@ -22,7 +22,7 @@ struct ExpectedRequest {
     method: &'static str,
     path: String,
     status: StatusCode,
-    response: Value,
+    response: String,
 }
 
 #[derive(Clone, Debug)]
@@ -117,8 +117,12 @@ async fn fake_api_handler(State(state): State<ApiState>, request: Request<Body>)
     Response::builder()
         .status(expected.status)
         .header("content-type", "application/json")
-        .body(Body::from(expected.response.to_string()))
+        .body(Body::from(expected.response))
         .expect("fake response")
+}
+
+async fn never_responds() -> Response<Body> {
+    std::future::pending().await
 }
 
 fn response(method: &'static str, path: impl Into<String>, response: Value) -> ExpectedRequest {
@@ -126,7 +130,7 @@ fn response(method: &'static str, path: impl Into<String>, response: Value) -> E
         method,
         path: path.into(),
         status: StatusCode::OK,
-        response,
+        response: response.to_string(),
     }
 }
 
@@ -135,7 +139,21 @@ fn status(method: &'static str, path: impl Into<String>, status: StatusCode) -> 
         method,
         path: path.into(),
         status,
-        response: json!({"detail": status.as_u16()}),
+        response: json!({"detail": status.as_u16()}).to_string(),
+    }
+}
+
+fn raw_response(
+    method: &'static str,
+    path: impl Into<String>,
+    status: StatusCode,
+    response: impl Into<String>,
+) -> ExpectedRequest {
+    ExpectedRequest {
+        method,
+        path: path.into(),
+        status,
+        response: response.into(),
     }
 }
 
@@ -484,6 +502,60 @@ async fn provision_combines_primary_and_cleanup_failures_in_that_order() {
     api.assert_complete();
 }
 
+#[tokio::test]
+async fn malformed_gateway_create_response_reconciles_reserved_gateway() {
+    let mut expected = provision_prefix(json!([]));
+    expected.extend([
+        raw_response("POST", "/gateways", StatusCode::CREATED, "{"),
+        response(
+            "GET",
+            "/gateways",
+            json!([gateway_record("gateway-committed")]),
+        ),
+        status(
+            "DELETE",
+            "/gateways/gateway-committed",
+            StatusCode::NO_CONTENT,
+        ),
+    ]);
+    let api = FakeApi::start(expected).await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("malformed gateway response must fail");
+
+    assert!(format!("{error:#}").contains("invalid JSON"));
+    api.assert_complete();
+}
+
+#[tokio::test]
+async fn gateway_create_and_reconciliation_failures_are_combined_primary_first() {
+    let mut expected = provision_prefix(json!([]));
+    expected.extend([
+        raw_response("POST", "/gateways", StatusCode::CREATED, "{"),
+        status("GET", "/gateways", StatusCode::INTERNAL_SERVER_ERROR),
+    ]);
+    let api = FakeApi::start(expected).await;
+
+    let error = test_client(&api.base_url)
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect_err("create and reconciliation must fail");
+
+    let message = format!("{error:#}");
+    let primary = message.find("invalid JSON").expect("primary diagnostic");
+    let reconciliation = message
+        .find("reconciliation")
+        .expect("reconciliation diagnostic");
+    let reconciliation_status = message.rfind("500").expect("reconciliation status");
+    assert!(
+        primary < reconciliation && reconciliation < reconciliation_status,
+        "{message}"
+    );
+    api.assert_complete();
+}
+
 #[test]
 fn builder_rejects_invalid_base_url_and_zero_attempts() {
     let invalid_url = ConformanceFixtureClient::builder("not a URL", TOKEN)
@@ -499,6 +571,23 @@ fn builder_rejects_invalid_base_url_and_zero_attempts() {
 }
 
 #[test]
+fn builder_accepts_only_http_origins_with_root_path() {
+    for base_url in [
+        "http://localhost/api",
+        "http://localhost/?scope=fixture",
+        "https://localhost/#fixture",
+    ] {
+        let error = ConformanceFixtureClient::builder(base_url, TOKEN)
+            .build()
+            .expect_err("non-origin base URL");
+        assert!(format!("{error:#}").contains("base URL"));
+    }
+    ConformanceFixtureClient::builder("https://localhost/", TOKEN)
+        .build()
+        .expect("root HTTPS origin");
+}
+
+#[test]
 fn builder_accepts_rfc6750_b64token_and_jwt_characters() {
     for token in [
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signature_-~",
@@ -508,6 +597,42 @@ fn builder_accepts_rfc6750_b64token_and_jwt_characters() {
             .build()
             .expect("valid RFC 6750 bearer token");
     }
+}
+
+#[test]
+fn builder_rejects_zero_request_timeout() {
+    let error = ConformanceFixtureClient::builder("http://localhost", TOKEN)
+        .request_timeout(Duration::ZERO)
+        .build()
+        .expect_err("zero request timeout");
+
+    assert!(format!("{error:#}").contains("request_timeout"));
+}
+
+#[tokio::test]
+async fn request_timeout_bounds_a_non_responding_admin_api() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind hanging API");
+    let address = listener.local_addr().expect("hanging API address");
+    tokio::spawn(async move {
+        axum::serve(listener, Router::new().fallback(any(never_responds)))
+            .await
+            .expect("serve hanging API");
+    });
+    let client = ConformanceFixtureClient::builder(format!("http://{address}"), TOKEN)
+        .request_timeout(Duration::from_millis(25))
+        .build()
+        .expect("valid fixture client");
+
+    let error = tokio::time::timeout(Duration::from_secs(1), client.cleanup(None))
+        .await
+        .expect("client request timeout must bound the operation")
+        .expect_err("hanging request must fail");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("timed out"), "{message}");
+    assert!(!message.contains(TOKEN), "{message}");
 }
 
 #[test]
