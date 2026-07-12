@@ -1583,11 +1583,15 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             }
 
             if mode_failure.is_none() {
+                let mut tests_cancellation = cancellation_receiver.clone();
                 let tests = async {
                     let token = match self.bearer_token(mode, &selected_server_id) {
                         Ok(token) => token,
                         Err(error) => return Some(error),
                     };
+                    if *tests_cancellation.borrow() {
+                        return Some(interrupted_conformance_failure());
+                    }
                     let mut failure = None;
                     if let Some(suite_name) = suite_name
                         && let Err(error) = self
@@ -1607,19 +1611,28 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     {
                         failure = Some(error);
                     }
-                    if run_gateway
-                        && let Err(error) = self
-                            .run_gateway_compliance_mode(
+                    tokio::task::yield_now().await;
+                    if *tests_cancellation.borrow() {
+                        return Some(interrupted_conformance_failure());
+                    }
+                    if run_gateway {
+                        let gateway_result = tokio::select! {
+                            result = self.run_gateway_compliance_mode(
                                 mode,
                                 &selected_server_id,
                                 &token,
                                 &common.spec_version,
                                 &paths,
-                            )
-                            .await
-                        && failure.is_none()
-                    {
-                        failure = Some(error);
+                            ) => result,
+                            () = wait_for_runtime_cancellation(&mut tests_cancellation) => {
+                                return Some(interrupted_conformance_failure());
+                            }
+                        };
+                        if let Err(error) = gateway_result
+                            && failure.is_none()
+                        {
+                            failure = Some(error);
+                        }
                     }
                     failure
                 };
@@ -2645,6 +2658,14 @@ where
     }
 }
 
+async fn wait_for_runtime_cancellation(cancellation: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*cancellation.borrow_and_update() {
+        if cancellation.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 fn interrupted_conformance_failure() -> AppFailure {
     AppFailure::from(anyhow!("conformance workflow interrupted by Ctrl-C"))
 }
@@ -2722,6 +2743,7 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         fail_cleanup: bool,
         expected_scoped_server_id: Option<String>,
+        block_gateway: bool,
     }
 
     struct CancellingFixtureRunner {
@@ -3255,6 +3277,14 @@ mod tests {
                     .expect("event lock")
                     .push(format!("scoped {}", uri.path()));
             }
+            if state.block_gateway && method == Method::POST {
+                state
+                    .events
+                    .lock()
+                    .expect("event lock")
+                    .push("gateway started".into());
+                std::future::pending::<()>().await;
+            }
         }
         if fail {
             return (
@@ -3359,6 +3389,7 @@ mod tests {
                     events: Arc::clone(&events),
                     fail_cleanup: false,
                     expected_scoped_server_id: None,
+                    block_gateway: false,
                 }));
             let server = tokio::spawn(async move {
                 axum::serve(listener, app)
@@ -3481,6 +3512,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
+                block_gateway: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3564,6 +3596,7 @@ mod tests {
                 events,
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
+                block_gateway: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3588,6 +3621,7 @@ mod tests {
             expected_scoped_server_id: Some(
                 crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
             ),
+            block_gateway: false,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3691,6 +3725,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
+                block_gateway: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3781,6 +3816,187 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interruption_during_blocked_gateway_finishes_before_fixture_cleanup() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events: Arc::clone(&events),
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+                block_gateway: true,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::Controlplane,
+            start: false,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+        let interrupt_events = Arc::clone(&events);
+        let interrupt = async move {
+            loop {
+                if interrupt_events
+                    .lock()
+                    .expect("event lock")
+                    .iter()
+                    .any(|event| event == "gateway started")
+                {
+                    interrupt_events
+                        .lock()
+                        .expect("event lock")
+                        .push("gateway cancellation sent".into());
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.run_compliance_workflow_with_interrupt(
+                &common,
+                Some(ConformanceSuite::Active),
+                true,
+                None,
+                interrupt,
+            ),
+        )
+        .await
+        .expect("blocked gateway cancellation should return promptly")
+        .expect_err("injected interruption should remain primary");
+
+        assert!(error.to_string().contains("interrupted by Ctrl-C"));
+        let events = events.lock().expect("event lock");
+        let gateway = events
+            .iter()
+            .position(|event| event == "gateway started")
+            .expect("gateway request should start");
+        let cancelled = events
+            .iter()
+            .position(|event| event == "gateway cancellation sent")
+            .expect("gateway cancellation should be recorded");
+        let delete = events
+            .iter()
+            .rposition(|event| event.starts_with("DELETE /servers/"))
+            .expect("fixture API cleanup should run");
+        let rm = events
+            .iter()
+            .position(|event| event == "compose fixture rm")
+            .expect("fixture service cleanup should run");
+        assert!(gateway < cancelled && cancelled < delete && delete < rm);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn interruption_after_official_completion_prevents_gateway_start() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events: Arc::clone(&events),
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+                block_gateway: true,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::Controlplane,
+            start: false,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+        let interrupt_events = Arc::clone(&events);
+        let interrupt = async move {
+            loop {
+                if interrupt_events
+                    .lock()
+                    .expect("event lock")
+                    .iter()
+                    .any(|event| event == "official proxy complete")
+                {
+                    interrupt_events
+                        .lock()
+                        .expect("event lock")
+                        .push("post-official cancellation sent".into());
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.run_compliance_workflow_with_interrupt(
+                &common,
+                Some(ConformanceSuite::Active),
+                true,
+                None,
+                interrupt,
+            ),
+        )
+        .await
+        .expect("post-official cancellation should return promptly")
+        .expect_err("injected interruption should remain primary");
+
+        assert!(error.to_string().contains("interrupted by Ctrl-C"));
+        let events = events.lock().expect("event lock");
+        let official_complete = events
+            .iter()
+            .position(|event| event == "official proxy complete")
+            .expect("official runner should complete first");
+        assert!(
+            events[official_complete + 1..]
+                .iter()
+                .all(|event| event != "gateway started" && !event.starts_with("POST /servers/"))
+        );
+        assert!(events.iter().any(|event| event == "compose fixture rm"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn all_mode_cleans_each_fixture_before_stack_down_and_next_mode() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3793,6 +4009,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_cleanup: false,
                 expected_scoped_server_id: None,
+                block_gateway: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -4087,6 +4304,7 @@ mod tests {
                 events: Arc::clone(&events),
                 fail_cleanup: true,
                 expected_scoped_server_id: None,
+                block_gateway: false,
             }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
