@@ -27,11 +27,12 @@ use crate::config::AppConfig;
 use crate::conformance::{
     Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceResults, ScenarioOutcome,
     audit_baseline, compare_result_sets, expected_server_scenarios, load_baseline,
-    load_server_results, official_server_command, validate_server_scenario_set,
-    write_comparison_report, write_official_baseline_projection,
+    load_server_results, official_server_command, validate_no_fixture_failures,
+    validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
 };
 use crate::conformance_fixture::{
-    ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_SERVICE,
+    ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
+    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVICE,
 };
 use crate::coverage::{
     CoverageOverlay, CoverageResult, GatewayApplicability, PINNED_SOURCE_COMMIT,
@@ -1493,6 +1494,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     .err()
             };
             let mut fixture_state = None;
+            let mut fixture_metadata = None;
             let mut selected_server_id = base_server_id;
 
             if mode_failure.is_none() && auto_fixture {
@@ -1529,6 +1531,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                                             Some(&fixture.server_id),
                                         )
                                         .to_owned();
+                                        fixture_metadata = Some(ConformanceFixtureMetadata {
+                                            repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+                                            revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+                                            server_id: fixture.server_id.clone(),
+                                        });
                                         if mode == StackMode::Dataplane {
                                             tokio::select! {
                                                 result = self.wait_for_publisher_snapshot(
@@ -1603,6 +1610,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                                     spec_version: &common.spec_version,
                                     suite: suite_name,
                                     custom_baseline,
+                                    fixture: fixture_metadata.as_ref(),
                                     cancellation: cancellation_receiver.clone(),
                                 },
                                 &paths,
@@ -1730,6 +1738,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 target: target.label().to_owned(),
                 spec_version: run.spec_version.to_owned(),
                 suite: run.suite.to_owned(),
+                fixture: run.fixture.cloned(),
             },
         )?;
 
@@ -1780,6 +1789,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         }
         shutdown_result?;
         let results = results?;
+        validate_no_fixture_failures(&results).map_err(AppFailure::from)?;
         mark_conformance_complete(
             &process_result,
             &results,
@@ -2223,11 +2233,21 @@ struct GatewayModePaths {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConformanceFixtureMetadata {
+    repository: String,
+    revision: String,
+    server_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConformanceRunMetadata {
     oracle: String,
     target: String,
     spec_version: String,
     suite: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixture: Option<ConformanceFixtureMetadata>,
 }
 
 struct LoadedConformanceArtifact {
@@ -2341,6 +2361,7 @@ struct OfficialConformanceRun<'a> {
     spec_version: &'a str,
     suite: &'a str,
     custom_baseline: Option<&'a Path>,
+    fixture: Option<&'a ConformanceFixtureMetadata>,
     cancellation: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -2704,6 +2725,49 @@ mod tests {
     use axum::extract::State;
     use axum::http::{Method, StatusCode, Uri};
     use axum::routing::{any, get};
+
+    struct CompletedFixtureFailureRunner;
+
+    impl ProcessRunner for CompletedFixtureFailureRunner {
+        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+            let output = spec
+                .arguments()
+                .windows(2)
+                .find(|values| values[0] == "--output-dir")
+                .map(|values| PathBuf::from(&values[1]))
+                .expect("official runner output directory should be present");
+            let scenarios =
+                expected_server_scenarios("active", "2025-11-25").expect("pinned active catalog");
+            for (index, scenario) in scenarios.into_iter().enumerate() {
+                let directory = output.join(format!("server-{scenario}-2026-07-10T03-17-47-000Z"));
+                fs::create_dir_all(&directory)
+                    .expect("official scenario directory should be created");
+                let fixture_failure = index == 0;
+                let checks = serde_json::to_vec(&serde_json::json!([{
+                    "id": format!("{scenario}-check"),
+                    "status": if fixture_failure { "FAILURE" } else { "SUCCESS" },
+                    "errorMessage": fixture_failure
+                        .then_some("Failed: MCP error -32601: Tool not found: test_simple_text"),
+                }]))
+                .expect("official checks should serialize");
+                fs::write(directory.join("checks.json"), checks)
+                    .expect("official checks should be written");
+            }
+            Ok(())
+        }
+
+        fn capture_stdout(&self, _spec: &CommandSpec) -> AppResult<Vec<u8>> {
+            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        }
+
+        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        }
+
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+            Err(AppFailure::from(anyhow!("unexpected log command")))
+        }
+    }
 
     #[derive(Default)]
     struct DefaultsRunner {
@@ -3426,6 +3490,16 @@ mod tests {
                 .await
                 .expect_err("intentional official runner failure should remain");
 
+            let metadata_path =
+                CompliancePaths::new(reports.path(), reports.path().join("reports"))
+                    .conformance_mode(BaselineTarget::Dataplane)
+                    .metadata;
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &fs::read(metadata_path).expect("caller-managed metadata should be written"),
+            )
+            .expect("caller-managed metadata should parse");
+            assert!(metadata.get("fixture").is_none());
+
             let events = events.lock().expect("event lock");
             assert!(
                 events
@@ -3545,6 +3619,20 @@ mod tests {
             .expect_err("intentional runner failure should remain primary");
 
         assert!(error.to_string().contains("intentional npx failure"));
+        let metadata = read_run_metadata(
+            &CompliancePaths::new(reports.path(), reports.path().join("reports"))
+                .conformance_mode(BaselineTarget::Controlplane)
+                .metadata,
+        )
+        .expect("automatic fixture metadata should be readable");
+        assert_eq!(
+            metadata.fixture,
+            Some(ConformanceFixtureMetadata {
+                repository: crate::conformance_fixture::OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+                revision: crate::conformance_fixture::OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+                server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+            })
+        );
         let events = events.lock().expect("event lock");
         let up = events
             .iter()
@@ -4198,6 +4286,16 @@ mod tests {
             .run_compliance_workflow(&explicit, Some(ConformanceSuite::Active), false, None)
             .await
             .expect_err("intentional runner failure should occur without fixture setup");
+        let explicit_metadata: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                CompliancePaths::new(reports.path(), reports.path().join("reports"))
+                    .conformance_mode(BaselineTarget::Controlplane)
+                    .metadata,
+            )
+            .expect("explicit server metadata should be written"),
+        )
+        .expect("explicit server metadata should parse");
+        assert!(explicit_metadata.get("fixture").is_none());
         assert!(
             events
                 .lock()
@@ -4448,6 +4546,147 @@ mod tests {
     }
 
     #[test]
+    fn conformance_metadata_roundtrips_exact_fixture_provenance() {
+        let metadata = ConformanceRunMetadata {
+            oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+            target: "control-plane".to_owned(),
+            spec_version: "2025-11-25".to_owned(),
+            suite: "active".to_owned(),
+            fixture: Some(ConformanceFixtureMetadata {
+                repository: "https://example.test/conformance".to_owned(),
+                revision: "exact-revision".to_owned(),
+                server_id: "actual-provisioned-server".to_owned(),
+            }),
+        };
+
+        let serialized = serde_json::to_vec(&metadata).expect("metadata should serialize");
+        let roundtrip: ConformanceRunMetadata =
+            serde_json::from_slice(&serialized).expect("metadata should deserialize");
+
+        assert_eq!(roundtrip, metadata);
+    }
+
+    #[test]
+    fn historical_metadata_without_fixture_roundtrips_without_new_field() {
+        let historical = serde_json::to_vec(&serde_json::json!({
+            "oracle": crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE,
+            "target": "control-plane",
+            "spec_version": "2025-11-25",
+            "suite": "active",
+        }))
+        .expect("historical metadata should serialize");
+
+        let metadata: ConformanceRunMetadata =
+            serde_json::from_slice(&historical).expect("historical metadata should deserialize");
+        let reserialized = serde_json::to_value(metadata).expect("metadata should reserialize");
+
+        assert!(reserialized.get("fixture").is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_fixture_failure_run_is_not_marked_complete_or_reportable() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let runtime = RuntimeExecutor::new(test_config([]), CompletedFixtureFailureRunner);
+
+        let error = runtime
+            .run_official_conformance_mode(
+                &OfficialConformanceRun {
+                    mode: StackMode::Controlplane,
+                    server_id: "server-id",
+                    token: "token",
+                    spec_version: "2025-11-25",
+                    suite: "active",
+                    custom_baseline: None,
+                    fixture: None,
+                    cancellation: tokio::sync::watch::channel(false).1,
+                },
+                &paths,
+            )
+            .await
+            .expect_err("fresh fixture failures must reject completion");
+
+        assert!(error.to_string().contains("official fixture setup failed"));
+        let mode_paths = paths.conformance_mode(BaselineTarget::Controlplane);
+        assert!(!mode_paths.completion.exists());
+        let report_error =
+            match runtime.load_conformance_artifact(&paths, BaselineTarget::Controlplane) {
+                Err(error) => error,
+                Ok(_) => panic!("report-only mode must reject incomplete fresh artifacts"),
+            };
+        assert!(
+            report_error
+                .to_string()
+                .contains("incomplete conformance artifacts")
+        );
+    }
+
+    #[test]
+    fn historical_completed_fixture_failure_artifact_remains_readable() {
+        let artifacts = tempfile::tempdir().expect("temporary artifact root");
+        let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
+        let mode_paths = paths.conformance_mode(BaselineTarget::Controlplane);
+        let scenarios =
+            expected_server_scenarios("active", "2025-11-25").expect("pinned active catalog");
+        write_official_results(&mode_paths.official_results, scenarios.clone(), "SUCCESS");
+        let fixture_scenario = scenarios.into_iter().next().expect("active scenario");
+        let fixture_directory = fs::read_dir(&mode_paths.official_results)
+            .expect("official results directory")
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(fixture_scenario)
+            })
+            .expect("fixture scenario directory")
+            .path();
+        fs::write(
+            fixture_directory.join("checks.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "id": "fixture-check",
+                "status": "FAILURE",
+                "errorMessage": "Failed: MCP error -32601: Tool not found: test_simple_text",
+            }]))
+            .expect("fixture failure should serialize"),
+        )
+        .expect("fixture failure should be written");
+        fs::create_dir_all(&mode_paths.root).expect("artifact root should exist");
+        fs::write(&mode_paths.rich_baseline, "server: []\n")
+            .expect("empty rich baseline should be written");
+        fs::write(
+            &mode_paths.metadata,
+            serde_json::to_vec(&serde_json::json!({
+                "oracle": crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE,
+                "target": "control-plane",
+                "spec_version": "2025-11-25",
+                "suite": "active",
+            }))
+            .expect("historical metadata should serialize"),
+        )
+        .expect("historical metadata should be written");
+        write_completion_marker(&mode_paths.completion)
+            .expect("historical completion marker should be written");
+        let runtime = RuntimeExecutor::new(test_config([]), DefaultsRunner::default());
+
+        let loaded = runtime
+            .load_conformance_artifact(&paths, BaselineTarget::Controlplane)
+            .expect("historical fixture-failure artifacts should remain readable")
+            .expect("historical artifact should be present");
+
+        assert_eq!(loaded.metadata.fixture, None);
+        assert_eq!(
+            loaded
+                .results
+                .scenarios
+                .get(fixture_scenario)
+                .expect("fixture scenario should be loaded")
+                .outcome(),
+            ScenarioOutcome::FixtureFailure
+        );
+    }
+
+    #[test]
     fn normal_nonzero_conformance_exit_marks_dirty_results_complete_and_reportable() {
         let artifacts = tempfile::tempdir().expect("temporary artifact root");
         let paths = CompliancePaths::new(artifacts.path(), artifacts.path().join("reports"));
@@ -4466,6 +4705,7 @@ mod tests {
                 target: BaselineTarget::Controlplane.label().to_owned(),
                 spec_version: "2025-11-25".to_owned(),
                 suite: "active".to_owned(),
+                fixture: None,
             },
         )
         .expect("metadata should be written");
@@ -4516,6 +4756,7 @@ mod tests {
                 target: BaselineTarget::Controlplane.label().to_owned(),
                 spec_version: "2025-11-25".to_owned(),
                 suite: "active".to_owned(),
+                fixture: None,
             },
         )
         .expect("metadata should be written");
@@ -4602,6 +4843,7 @@ mod tests {
             target: "control-plane".to_owned(),
             spec_version: "2025-11-25".to_owned(),
             suite: "active".to_owned(),
+            fixture: None,
         };
         let mut dataplane = controlplane.clone();
         dataplane.target = "dataplane".to_owned();
@@ -4974,6 +5216,7 @@ mod tests {
                     spec_version: "2025-11-25",
                     suite: "active",
                     custom_baseline: None,
+                    fixture: None,
                     cancellation: tokio::sync::watch::channel(false).1,
                 },
                 &paths,
