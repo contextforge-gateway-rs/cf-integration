@@ -3267,6 +3267,10 @@ mod tests {
             .expect_err("intentional conformance responses should fail");
 
         let events = events.lock().expect("event lock");
+        let controlplane_up = events
+            .iter()
+            .position(|event| event == "stack up cf-controlplane-only")
+            .expect("controlplane stack should start first");
         let controlplane_down = events
             .iter()
             .position(|event| event == "stack down cf-controlplane-only")
@@ -3291,15 +3295,32 @@ mod tests {
         assert!(fixture_removals[0] < controlplane_down);
         assert!(controlplane_down < dataplane_up);
         assert!(fixture_removals[1] < dataplane_down);
-        for (rm, down) in [
-            (fixture_removals[0], controlplane_down),
-            (fixture_removals[1], dataplane_down),
+        let server_cleanup = format!(
+            "DELETE /servers/{}",
+            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+        );
+        for (start, rm, down) in [
+            (controlplane_up, fixture_removals[0], controlplane_down),
+            (dataplane_up, fixture_removals[1], dataplane_down),
         ] {
-            let api_cleanup = events[..rm]
+            let server_creation = events[start..rm]
                 .iter()
-                .rposition(|event| event.starts_with("DELETE /servers/"))
-                .expect("fixture API cleanup should precede service removal");
-            assert!(api_cleanup < rm && rm < down);
+                .position(|event| event == "POST /servers")
+                .map(|index| start + index)
+                .expect("fixture virtual server should be created before cleanup");
+            let server_delete = events[server_creation + 1..rm]
+                .iter()
+                .position(|event| event == &server_cleanup)
+                .map(|index| server_creation + 1 + index)
+                .expect("created fixture server should be deleted before service removal");
+            let gateway_delete = events[server_creation + 1..rm]
+                .iter()
+                .position(|event| event == "DELETE /gateways/fixture-gateway")
+                .map(|index| server_creation + 1 + index)
+                .expect("created fixture gateway should be deleted before service removal");
+            assert!(server_creation < server_delete);
+            assert!(server_delete < gateway_delete);
+            assert!(gateway_delete < rm && rm < down);
         }
         server.abort();
     }
