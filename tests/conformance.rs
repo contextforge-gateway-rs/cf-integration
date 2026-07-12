@@ -487,10 +487,10 @@ fn baseline_audit_finds_expected_unexpected_stale_and_unobserved_entries() {
 }
 
 #[test]
-fn warning_only_scenario_is_not_applicable() {
+fn warning_only_scenario_is_compliant() {
     assert_eq!(
         result("warning", [CheckStatus::Warning]).outcome(),
-        ScenarioOutcome::NotApplicable
+        ScenarioOutcome::Compliant
     );
 }
 
@@ -503,7 +503,7 @@ fn success_with_warning_scenario_is_compliant() {
 }
 
 #[test]
-fn baseline_audit_does_not_treat_warnings_as_failures() {
+fn baseline_audit_treats_warnings_as_expected_failures() {
     let parsed = results([
         result("warning-only", [CheckStatus::Warning]),
         result(
@@ -514,8 +514,42 @@ fn baseline_audit_does_not_treat_warnings_as_failures() {
 
     let audit = audit_baseline(&parsed, &Baseline::default());
 
-    assert!(audit.is_clean());
-    assert!(audit.unexpected_failures.is_empty());
+    assert!(!audit.is_clean());
+    assert_eq!(
+        audit.unexpected_failures,
+        ["success-with-warning", "warning-only"]
+    );
+}
+
+#[test]
+fn scenario_outcome_mixed_status_precedence_matches_official_summary() {
+    assert_eq!(
+        result(
+            "failure-warning",
+            [CheckStatus::Failure, CheckStatus::Warning]
+        )
+        .outcome(),
+        ScenarioOutcome::NonCompliant
+    );
+    assert_eq!(
+        result(
+            "unknown-warning",
+            [
+                CheckStatus::Other("FUTURE".to_owned()),
+                CheckStatus::Warning
+            ],
+        )
+        .outcome(),
+        ScenarioOutcome::Ambiguous
+    );
+    assert_eq!(
+        result(
+            "skipped-warning",
+            [CheckStatus::Skipped, CheckStatus::Warning]
+        )
+        .outcome(),
+        ScenarioOutcome::Compliant
+    );
 }
 
 #[test]
