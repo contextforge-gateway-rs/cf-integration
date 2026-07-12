@@ -159,6 +159,70 @@ struct DelayedGatewayState {
     gateway_gets: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Default)]
+struct UnownedCatalogState {
+    server_body: Arc<Mutex<Option<Value>>>,
+}
+
+fn json_http_response(status: StatusCode, body: Value) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("JSON HTTP response")
+}
+
+async fn unowned_catalog_handler(
+    State(state): State<UnownedCatalogState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+    match (method.as_str(), path.as_str()) {
+        ("DELETE", path) if path.starts_with("/servers/") => {
+            json_http_response(StatusCode::NOT_FOUND, json!({}))
+        }
+        ("DELETE", path) if path.starts_with("/gateways/") => {
+            json_http_response(StatusCode::NO_CONTENT, json!({}))
+        }
+        ("GET", "/gateways") => json_http_response(StatusCode::OK, json!([])),
+        ("POST", "/gateways") => {
+            json_http_response(StatusCode::CREATED, gateway_record(GATEWAY_ID))
+        }
+        ("POST", path) if path == format!("/gateways/{GATEWAY_ID}/tools/refresh") => {
+            json_http_response(StatusCode::OK, json!({}))
+        }
+        ("GET", "/tools") => json_http_response(
+            StatusCode::OK,
+            json!([
+                {"id":"a2a-unowned", "name":"unrelated_a2a", "gatewayId":null},
+                {"id":"missing-owner", "name":"unrelated_missing_owner"},
+                {"id":"official-tool", "name":"test_simple_text", "gatewayId":GATEWAY_ID}
+            ]),
+        ),
+        ("GET", "/resources") => json_http_response(
+            StatusCode::OK,
+            json!([{"id":"resource-1", "uri":"test://static-text", "gatewayId":GATEWAY_ID}]),
+        ),
+        ("GET", "/prompts") => json_http_response(
+            StatusCode::OK,
+            json!([{"id":"prompt-1", "name":"test_simple_prompt", "gatewayId":GATEWAY_ID}]),
+        ),
+        ("POST", "/servers") => {
+            let body = to_bytes(request.into_body(), 1024 * 1024)
+                .await
+                .expect("server request body");
+            let body = serde_json::from_slice(&body).expect("server request JSON");
+            *state.server_body.lock().expect("server body lock") = Some(body);
+            json_http_response(
+                StatusCode::CREATED,
+                json!({"id":OFFICIAL_CONFORMANCE_SERVER_ID}),
+            )
+        }
+        _ => panic!("unexpected unowned-catalog request: {method} {path}"),
+    }
+}
+
 async fn delayed_gateway_handler(
     State(state): State<DelayedGatewayState>,
     request: Request<Body>,
@@ -415,6 +479,36 @@ async fn provision_accepts_snake_case_gateway_ids() {
         "tool-1"
     );
     api.assert_complete();
+}
+
+#[tokio::test]
+async fn provision_ignores_catalog_entries_with_null_or_missing_gateway_id() {
+    let state = UnownedCatalogState::default();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unowned catalog API");
+    let address = listener.local_addr().expect("unowned catalog API address");
+    let app = Router::new()
+        .fallback(any(unowned_catalog_handler))
+        .with_state(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve unowned catalog API");
+    });
+
+    test_client(&format!("http://{address}"))
+        .provision(OFFICIAL_CONFORMANCE_BACKEND_URL)
+        .await
+        .expect("unowned catalog rows must not block provisioning");
+
+    let body = state
+        .server_body
+        .lock()
+        .expect("server body lock")
+        .clone()
+        .expect("server request");
+    assert_eq!(body["server"]["associated_tools"], json!(["official-tool"]));
 }
 
 #[tokio::test]

@@ -471,8 +471,8 @@ struct CatalogRecord {
     name: String,
     #[serde(default)]
     uri: String,
-    #[serde(alias = "gatewayId")]
-    gateway_id: String,
+    #[serde(default, alias = "gatewayId")]
+    gateway_id: Option<String>,
 }
 
 struct CatalogIds {
@@ -493,15 +493,15 @@ impl CatalogIds {
     ) -> Self {
         let tools: Vec<_> = tools
             .into_iter()
-            .filter(|record| record.gateway_id == gateway_id)
+            .filter(|record| record.gateway_id.as_deref() == Some(gateway_id))
             .collect();
         let resources: Vec<_> = resources
             .into_iter()
-            .filter(|record| record.gateway_id == gateway_id)
+            .filter(|record| record.gateway_id.as_deref() == Some(gateway_id))
             .collect();
         let prompts: Vec<_> = prompts
             .into_iter()
-            .filter(|record| record.gateway_id == gateway_id)
+            .filter(|record| record.gateway_id.as_deref() == Some(gateway_id))
             .collect();
         Self {
             has_required_tool: tools.iter().any(|record| record.name == REQUIRED_TOOL),
