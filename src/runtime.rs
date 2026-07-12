@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -935,6 +936,38 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .unwrap_or("9779b6698cbd4b4995ee04a4fab38737")
     }
 
+    fn caller_managed_server_id<'a>(&'a self, explicit: Option<&'a str>) -> Option<&'a str> {
+        explicit
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                self.environment_text("MCP_SERVER_ID")
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                self.environment_text("MCP_VIRTUAL_SERVER_ID")
+                    .filter(|value| !value.is_empty())
+            })
+    }
+
+    fn require_loopback_fixture_base_url(&self) -> AppResult<()> {
+        let base_url = self.base_url()?;
+        let url = url::Url::parse(base_url)
+            .context("MCP_CLI_BASE_URL is not a valid URL")
+            .map_err(AppFailure::from)?;
+        let is_loopback = match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+        if !is_loopback {
+            return Err(AppFailure::from(anyhow!(
+                "automatic conformance fixture provisioning requires a loopback MCP_CLI_BASE_URL; pass --server-id for a remote or shared deployment"
+            )));
+        }
+        Ok(())
+    }
+
     fn base_url(&self) -> AppResult<&str> {
         required_text(&self.config.base_url.value, "MCP_CLI_BASE_URL")
     }
@@ -968,7 +1001,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .with_conformance_fixture(self.config.root())
     }
 
-    fn start_conformance_service(&self, mode: StackMode) -> AppResult<()> {
+    async fn start_conformance_service(&self, mode: StackMode) -> AppResult<()> {
         let command = self.conformance_compose_project(mode).command([
             "up",
             "-d",
@@ -976,19 +1009,19 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             "--wait",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
-        self.runner
-            .run(&self.compose_environment(command, mode, true)?)
+        let command = self.compose_environment(command, mode, true)?;
+        self.runner.run_async(&command).await
     }
 
-    fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
+    async fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
         let command = self.conformance_compose_project(mode).command([
             "rm",
             "--stop",
             "--force",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
-        self.runner
-            .run(&self.compose_environment(command, mode, true)?)
+        let command = self.compose_environment(command, mode, true)?;
+        self.runner.run_async(&command).await
     }
 
     async fn execute_test(&self, action: TestAction) -> AppResult<()> {
@@ -1391,6 +1424,31 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         run_gateway: bool,
         custom_baseline: Option<&Path>,
     ) -> AppResult<()> {
+        self.run_compliance_workflow_with_interrupt(
+            common,
+            conformance_suite,
+            run_gateway,
+            custom_baseline,
+            async {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            },
+        )
+        .await
+    }
+
+    async fn run_compliance_workflow_with_interrupt<I>(
+        &self,
+        common: &ResolvedComplianceCommon,
+        conformance_suite: Option<ConformanceSuite>,
+        run_gateway: bool,
+        custom_baseline: Option<&Path>,
+        interrupt: I,
+    ) -> AppResult<()>
+    where
+        I: Future<Output = ()>,
+    {
         if common.mode == ComplianceMode::All && !common.start {
             return Err(AppFailure::from(anyhow!(
                 "--mode all requires --start because the two stacks share host ports"
@@ -1405,114 +1463,175 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             self.config.root().join("reports"),
         );
         let suite_name = conformance_suite.map(conformance_suite_name);
-        let auto_fixture = uses_automatic_conformance_fixture(
-            conformance_suite.is_some(),
-            common.server_id.as_deref(),
-        );
+        let caller_server_id = self.caller_managed_server_id(common.server_id.as_deref());
+        let auto_fixture =
+            uses_automatic_conformance_fixture(conformance_suite.is_some(), caller_server_id);
+        if auto_fixture {
+            self.require_loopback_fixture_base_url()?;
+        }
         paths.clear_selected(common.mode, suite_name.is_some(), run_gateway)?;
         let mut last_failure = None;
+        let mut interrupted = false;
+        tokio::pin!(interrupt);
 
         for mode in selected_modes(common.mode) {
-            let base_server_id = common
-                .server_id
-                .as_deref()
+            let base_server_id = caller_server_id
                 .unwrap_or_else(|| self.default_server_id())
                 .to_owned();
-            let mut setup = if common.start {
+            let setup = if common.start {
                 self.stack_up(mode).await
             } else {
                 self.ensure_mode_sources(mode)
                     .and_then(|()| self.ensure_other_stack_for_tests(mode))
             };
-            setup = self
-                .complete_compliance_setup(mode, &base_server_id, setup)
-                .await;
-            let mut mode_failure = setup.err();
+            let mut mode_failure = if auto_fixture {
+                setup.err()
+            } else {
+                self.complete_compliance_setup(mode, &base_server_id, setup)
+                    .await
+                    .err()
+            };
             let mut fixture_state = None;
             let mut selected_server_id = base_server_id;
 
             if mode_failure.is_none() && auto_fixture {
-                match self.start_conformance_service(mode) {
+                let (start_result, start_interrupted) = finish_phase_after_interrupt(
+                    self.start_conformance_service(mode),
+                    interrupt.as_mut(),
+                )
+                .await;
+                interrupted |= start_interrupted;
+                match start_result {
                     Ok(()) => match self.admin_token().and_then(|token| {
                         ConformanceFixtureClient::builder(self.base_url()?, token)
                             .build()
                             .map_err(AppFailure::from)
                     }) {
                         Ok(client) => {
-                            match client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL).await {
-                                Ok(fixture) => {
-                                    selected_server_id = selected_compliance_server_id(
-                                        auto_fixture,
-                                        &selected_server_id,
-                                        Some(&fixture.server_id),
+                            if interrupted {
+                                mode_failure = Some(interrupted_conformance_failure());
+                                let cleanup = self.stop_conformance_service(mode).await;
+                                mode_failure = finish_with_cleanup(mode_failure, cleanup).err();
+                            } else {
+                                let (provision_result, provision_interrupted) =
+                                    finish_phase_after_interrupt(
+                                        client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL),
+                                        interrupt.as_mut(),
                                     )
-                                    .to_owned();
-                                    if mode == StackMode::Dataplane
-                                        && let Err(error) = self
-                                            .wait_for_publisher_snapshot(&selected_server_id)
-                                            .await
-                                    {
-                                        mode_failure = Some(error);
+                                    .await;
+                                interrupted |= provision_interrupted;
+                                match provision_result {
+                                    Ok(fixture) => {
+                                        selected_server_id = selected_compliance_server_id(
+                                            auto_fixture,
+                                            &selected_server_id,
+                                            Some(&fixture.server_id),
+                                        )
+                                        .to_owned();
+                                        if mode == StackMode::Dataplane {
+                                            tokio::select! {
+                                                result = self.wait_for_publisher_snapshot(
+                                                    &selected_server_id,
+                                                ) => {
+                                                    if let Err(error) = result {
+                                                        mode_failure = Some(error);
+                                                    }
+                                                }
+                                                () = interrupt.as_mut() => {
+                                                    interrupted = true;
+                                                    mode_failure = Some(
+                                                        interrupted_conformance_failure()
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        fixture_state = Some((client, fixture));
+                                        if interrupted {
+                                            mode_failure = Some(interrupted_conformance_failure());
+                                        }
                                     }
-                                    fixture_state = Some((client, fixture));
-                                }
-                                Err(error) => {
-                                    mode_failure = Some(AppFailure::from(error));
-                                    let cleanup = self.stop_conformance_service(mode);
-                                    mode_failure = finish_with_cleanup(mode_failure, cleanup).err();
+                                    Err(error) => {
+                                        mode_failure = Some(if interrupted {
+                                            interrupted_conformance_failure()
+                                        } else {
+                                            AppFailure::from(error)
+                                        });
+                                        let cleanup = self.stop_conformance_service(mode).await;
+                                        mode_failure =
+                                            finish_with_cleanup(mode_failure, cleanup).err();
+                                    }
                                 }
                             }
                         }
                         Err(error) => {
                             mode_failure = Some(error);
-                            let cleanup = self.stop_conformance_service(mode);
+                            let cleanup = self.stop_conformance_service(mode).await;
                             mode_failure = finish_with_cleanup(mode_failure, cleanup).err();
                         }
                     },
                     Err(error) => {
-                        mode_failure = Some(error);
-                        let cleanup = self.stop_conformance_service(mode);
+                        mode_failure = Some(if interrupted {
+                            interrupted_conformance_failure()
+                        } else {
+                            error
+                        });
+                        let cleanup = self.stop_conformance_service(mode).await;
                         mode_failure = finish_with_cleanup(mode_failure, cleanup).err();
                     }
                 }
             }
 
             if mode_failure.is_none() {
-                match self.bearer_token(mode, &selected_server_id) {
-                    Ok(token) => {
-                        if let Some(suite_name) = suite_name
-                            && let Err(error) = self
-                                .run_official_conformance_mode(
-                                    &OfficialConformanceRun {
-                                        mode,
-                                        server_id: &selected_server_id,
-                                        token: &token,
-                                        spec_version: &common.spec_version,
-                                        suite: suite_name,
-                                        custom_baseline,
-                                    },
-                                    &paths,
-                                )
-                                .await
-                        {
-                            mode_failure = Some(error);
-                        }
-                        if run_gateway
-                            && let Err(error) = self
-                                .run_gateway_compliance_mode(
+                let tests = async {
+                    let token = match self.bearer_token(mode, &selected_server_id) {
+                        Ok(token) => token,
+                        Err(error) => return Some(error),
+                    };
+                    let mut failure = None;
+                    if let Some(suite_name) = suite_name
+                        && let Err(error) = self
+                            .run_official_conformance_mode(
+                                &OfficialConformanceRun {
                                     mode,
-                                    &selected_server_id,
-                                    &token,
-                                    &common.spec_version,
-                                    &paths,
-                                )
-                                .await
-                            && mode_failure.is_none()
-                        {
-                            mode_failure = Some(error);
+                                    server_id: &selected_server_id,
+                                    token: &token,
+                                    spec_version: &common.spec_version,
+                                    suite: suite_name,
+                                    custom_baseline,
+                                },
+                                &paths,
+                            )
+                            .await
+                    {
+                        failure = Some(error);
+                    }
+                    if run_gateway
+                        && let Err(error) = self
+                            .run_gateway_compliance_mode(
+                                mode,
+                                &selected_server_id,
+                                &token,
+                                &common.spec_version,
+                                &paths,
+                            )
+                            .await
+                        && failure.is_none()
+                    {
+                        failure = Some(error);
+                    }
+                    failure
+                };
+                if auto_fixture {
+                    tokio::pin!(tests);
+                    tokio::select! {
+                        failure = &mut tests => mode_failure = failure,
+                        () = interrupt.as_mut() => {
+                            interrupted = true;
+                            mode_failure = Some(interrupted_conformance_failure());
                         }
                     }
-                    Err(error) => mode_failure = Some(error),
+                } else {
+                    mode_failure = tests.await;
                 }
             }
 
@@ -1521,7 +1640,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     .cleanup(Some(&fixture))
                     .await
                     .map_err(AppFailure::from);
-                let service_cleanup = self.stop_conformance_service(mode);
+                let service_cleanup = self.stop_conformance_service(mode).await;
                 let cleanup = combine_cleanup_results(api_cleanup, service_cleanup);
                 mode_failure = finish_with_cleanup(mode_failure, cleanup).err();
             }
@@ -1535,9 +1654,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             {
                 last_failure = finish_with_cleanup(last_failure, Err(error)).err();
             }
+            if interrupted {
+                break;
+            }
         }
 
-        if common.mode == ComplianceMode::All
+        if !interrupted
+            && common.mode == ComplianceMode::All
             && let Some(suite_name) = suite_name
         {
             match self
@@ -1547,7 +1670,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 Err(error) => last_failure = Some(error),
             }
         }
-        if run_gateway && suite_name.is_some() {
+        if !interrupted && run_gateway && suite_name.is_some() {
             match self.write_spec_coverage_report(&paths.report_output, &paths) {
                 Ok(path) => println!("Specification coverage: {}", path.display()),
                 Err(error) => last_failure = Some(error),
@@ -2499,6 +2622,25 @@ fn combine_cleanup_results(first: AppResult<()>, second: AppResult<()>) -> AppRe
     }
 }
 
+async fn finish_phase_after_interrupt<F, I, T>(
+    operation: F,
+    interrupt: std::pin::Pin<&mut I>,
+) -> (T, bool)
+where
+    F: Future<Output = T>,
+    I: Future<Output = ()>,
+{
+    tokio::pin!(operation);
+    tokio::select! {
+        output = &mut operation => (output, false),
+        () = interrupt => (operation.await, true),
+    }
+}
+
+fn interrupted_conformance_failure() -> AppFailure {
+    AppFailure::from(anyhow!("conformance workflow interrupted by Ctrl-C"))
+}
+
 fn finish_with_cleanup(primary: Option<AppFailure>, cleanup: AppResult<()>) -> AppResult<()> {
     match (primary, cleanup) {
         (None, Ok(())) => Ok(()),
@@ -2589,18 +2731,9 @@ mod tests {
                 .iter()
                 .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
             {
-                let event = if arguments.iter().any(|value| value == "up") {
-                    "compose fixture up"
-                } else {
-                    "compose fixture rm"
-                };
-                self.events.lock().expect("event lock").push(event.into());
-                if self.fail_service_start && event.ends_with("up") {
-                    return Err(AppFailure::from(anyhow!("fixture start failed")));
-                }
-                if self.fail_service_stop && event.ends_with("rm") {
-                    return Err(AppFailure::from(anyhow!("fixture stop failed")));
-                }
+                return Err(AppFailure::from(anyhow!(
+                    "conformance Compose commands must use async runner"
+                )));
             }
             if spec.program() == "docker" && arguments.iter().any(|value| value == "down") {
                 let project = arguments
@@ -2635,6 +2768,29 @@ mod tests {
             spec: &'a CommandSpec,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
             if spec.program() != "npx" {
+                if spec
+                    .arguments()
+                    .iter()
+                    .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
+                {
+                    let event = if spec.arguments().iter().any(|value| value == "up") {
+                        "compose fixture up"
+                    } else {
+                        "compose fixture rm"
+                    };
+                    self.events.lock().expect("event lock").push(event.into());
+                    if self.fail_service_start && event.ends_with("up") {
+                        return Box::pin(async {
+                            Err(AppFailure::from(anyhow!("fixture start failed")))
+                        });
+                    }
+                    if self.fail_service_stop && event.ends_with("rm") {
+                        return Box::pin(async {
+                            Err(AppFailure::from(anyhow!("fixture stop failed")))
+                        });
+                    }
+                    return Box::pin(async { Ok(()) });
+                }
                 return Box::pin(async move { self.run(spec) });
             }
             Box::pin(async move {
@@ -2645,7 +2801,10 @@ mod tests {
                     .find(|values| values[0] == "--url")
                     .map(|values| values[1].to_string_lossy().into_owned())
                     .expect("official runner URL should be present");
-                reqwest::Client::new()
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .expect("bounded proxy test client should build")
                     .get(endpoint)
                     .send()
                     .await
@@ -2692,6 +2851,20 @@ mod tests {
                         .first()
                         .is_some_and(|value| value == "exec") =>
                 {
+                    let server_id = spec
+                        .arguments()
+                        .last()
+                        .and_then(|value| value.to_str())
+                        .expect("publisher server ID should be UTF-8");
+                    self.events
+                        .lock()
+                        .expect("event lock")
+                        .push(format!("publisher {server_id}"));
+                    if server_id == "9779b6698cbd4b4995ee04a4fab38737" {
+                        return Err(AppFailure::from(anyhow!(
+                            "automatic fixture workflow probed Fast Time publisher snapshot"
+                        )));
+                    }
                     Ok(b"1\n".to_vec())
                 }
                 Some("docker") => Ok(Vec::new()),
@@ -2935,6 +3108,15 @@ mod tests {
         integration_dir: &Path,
         controlplane_dir: &Path,
     ) -> AppConfig {
+        fixture_test_config_with_server(base_url, integration_dir, controlplane_dir, None)
+    }
+
+    fn fixture_test_config_with_server(
+        base_url: &str,
+        integration_dir: &Path,
+        controlplane_dir: &Path,
+        caller_server: Option<(&str, &str)>,
+    ) -> AppConfig {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut environment = Environment::new();
         for (key, value) in [
@@ -2947,6 +3129,9 @@ mod tests {
             ("CF_COMPOSE_BUILD", OsStr::new("false")),
         ] {
             environment.insert(OsString::from(key), value.to_owned());
+        }
+        if let Some((key, value)) = caller_server {
+            environment.insert(OsString::from(key), OsString::from(value));
         }
         AppConfig::load(&environment, &root.join("cf-integration"), root)
             .expect("fixture test configuration should load")
@@ -3011,24 +3196,46 @@ mod tests {
                 axum::Json(serde_json::json!({})),
             );
         }
-        let body = match (method, uri.path()) {
-            (Method::GET, "/gateways") => serde_json::json!([]),
-            (Method::POST, "/gateways") => serde_json::json!({
-                "id": "fixture-gateway",
-                "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
-            }),
-            (Method::GET, "/tools") => serde_json::json!([{
-                "id": "tool-id", "name": "test_simple_text", "gateway_id": "fixture-gateway"
-            }]),
-            (Method::GET, "/resources") => serde_json::json!([{
-                "id": "resource-id", "uri": "test://static-text", "gateway_id": "fixture-gateway"
-            }]),
-            (Method::GET, "/prompts") => serde_json::json!([{
-                "id": "prompt-id", "name": "test_simple_prompt", "gateway_id": "fixture-gateway"
-            }]),
-            _ => serde_json::json!({}),
+        let (status, body) = match (method, uri.path()) {
+            (Method::GET, "/gateways") => (StatusCode::OK, serde_json::json!([])),
+            (Method::POST, "/gateways") => (
+                StatusCode::OK,
+                serde_json::json!({
+                    "id": "fixture-gateway",
+                    "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                }),
+            ),
+            (Method::GET, "/tools") => (
+                StatusCode::OK,
+                serde_json::json!([{
+                    "id": "tool-id", "name": "test_simple_text", "gateway_id": "fixture-gateway"
+                }]),
+            ),
+            (Method::GET, "/resources") => (
+                StatusCode::OK,
+                serde_json::json!([{
+                    "id": "resource-id", "uri": "test://static-text", "gateway_id": "fixture-gateway"
+                }]),
+            ),
+            (Method::GET, "/prompts") => (
+                StatusCode::OK,
+                serde_json::json!([{
+                    "id": "prompt-id", "name": "test_simple_prompt", "gateway_id": "fixture-gateway"
+                }]),
+            ),
+            (_, path) if path.ends_with("/mcp") => (StatusCode::OK, serde_json::json!({})),
+            (Method::DELETE, path)
+                if path.starts_with("/servers/") || path.starts_with("/gateways/") =>
+            {
+                (StatusCode::OK, serde_json::json!({}))
+            }
+            (Method::POST, "/servers") => (StatusCode::OK, serde_json::json!({})),
+            (Method::POST, path) if path.ends_with("/tools/refresh") => {
+                (StatusCode::OK, serde_json::json!({}))
+            }
+            _ => (StatusCode::NOT_FOUND, serde_json::json!({})),
         };
-        (StatusCode::OK, axum::Json(body))
+        (status, axum::Json(body))
     }
 
     #[test]
@@ -3047,6 +3254,149 @@ mod tests {
             selected_compliance_server_id(false, "caller-server", Some("official")),
             "caller-server"
         );
+
+        let runtime = RuntimeExecutor::new(
+            test_config([
+                ("MCP_SERVER_ID", "primary-env-server"),
+                ("MCP_VIRTUAL_SERVER_ID", "legacy-env-server"),
+            ]),
+            DefaultsRunner::default(),
+        );
+        assert_eq!(
+            runtime.caller_managed_server_id(Some("explicit-server")),
+            Some("explicit-server")
+        );
+        assert_eq!(
+            runtime.caller_managed_server_id(None),
+            Some("primary-env-server")
+        );
+        assert!(!uses_automatic_conformance_fixture(
+            true,
+            runtime.caller_managed_server_id(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn environment_server_ids_bypass_fixture_and_target_caller_server() {
+        for (key, server_id) in [
+            ("MCP_SERVER_ID", "primary-env-server"),
+            ("MCP_VIRTUAL_SERVER_ID", "legacy-env-server"),
+        ] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("fixture API listener should bind");
+            let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+            let app = Router::new()
+                .fallback(any(fixture_api))
+                .with_state(Arc::new(FixtureApiState {
+                    events: Arc::clone(&events),
+                    fail_cleanup: false,
+                    expected_scoped_server_id: None,
+                }));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("fixture API should run");
+            });
+            let state = tempfile::tempdir().expect("temporary integration state");
+            let controlplane = state.path().join("mcp-context-forge");
+            fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+            let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+            let runtime = RuntimeExecutor::new(
+                fixture_test_config_with_server(
+                    &base_url,
+                    state.path(),
+                    &controlplane,
+                    Some((key, server_id)),
+                ),
+                FixtureLifecycleRunner {
+                    events: Arc::clone(&events),
+                    fail_service_start: false,
+                    fail_service_stop: false,
+                },
+            );
+            let common = ResolvedComplianceCommon {
+                mode: ComplianceMode::Dataplane,
+                start: false,
+                server_id: None,
+                spec_version: "2025-11-25".to_owned(),
+                results_dir: Some(reports.path().to_owned()),
+            };
+
+            runtime
+                .run_compliance_workflow(&common, Some(ConformanceSuite::Active), false, None)
+                .await
+                .expect_err("intentional official runner failure should remain");
+
+            let events = events.lock().expect("event lock");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| { event.ends_with(&format!("/servers/{server_id}/mcp")) })
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event == &format!("publisher {server_id}"))
+            );
+            assert!(events.iter().all(|event| {
+                !event.starts_with("compose fixture")
+                    && event != "POST /gateways"
+                    && event != "POST /servers"
+            }));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_base_url_rejects_automatic_fixture_before_service_or_api_calls() {
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config("https://shared.example.test", state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::All,
+            start: true,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+
+        let error = runtime
+            .run_compliance_workflow(&common, Some(ConformanceSuite::Active), false, None)
+            .await
+            .expect_err("remote deployment must require caller ownership");
+
+        assert!(error.to_string().contains("loopback MCP_CLI_BASE_URL"));
+        assert!(error.to_string().contains("--server-id"));
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    #[test]
+    fn automatic_fixture_accepts_localhost_and_ip_loopback_urls() {
+        for base_url in [
+            "http://localhost:4444",
+            "http://127.0.0.1:4444",
+            "https://[::1]:4444",
+        ] {
+            let runtime = RuntimeExecutor::new(
+                test_config([("MCP_CLI_BASE_URL", base_url)]),
+                DefaultsRunner::default(),
+            );
+            runtime
+                .require_loopback_fixture_base_url()
+                .unwrap_or_else(|error| panic!("{base_url} should be loopback: {error}"));
+        }
     }
 
     #[tokio::test]
@@ -3129,6 +3479,37 @@ mod tests {
                     crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
                 )
         }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fixture_fake_api_returns_not_found_for_unknown_routes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let endpoint = format!(
+            "http://{}/unknown",
+            listener.local_addr().expect("fixture API address")
+        );
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events,
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+
+        let response = reqwest::get(endpoint)
+            .await
+            .expect("unknown fixture API request should complete");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         server.abort();
     }
 
@@ -3217,6 +3598,113 @@ mod tests {
         assert!(events.iter().all(|event| {
             !event.contains(&format!("/servers/{}/mcp", runtime.default_server_id()))
         }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("publisher "))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [format!(
+                "publisher {}",
+                crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+            )]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn interruption_after_provision_cleans_api_before_async_service_removal() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture API listener should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("API address"));
+        let app = Router::new()
+            .fallback(any(fixture_api))
+            .with_state(Arc::new(FixtureApiState {
+                events: Arc::clone(&events),
+                fail_cleanup: false,
+                expected_scoped_server_id: None,
+            }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fixture API should run");
+        });
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        fs::write(controlplane.join("docker-compose.yml"), "services: {}\n")
+            .expect("fake Compose file should exist for stack cleanup");
+        let reports = tempfile::tempdir().expect("temporary compliance artifacts");
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config(&base_url, state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+        let common = ResolvedComplianceCommon {
+            mode: ComplianceMode::All,
+            start: true,
+            server_id: None,
+            spec_version: "2025-11-25".to_owned(),
+            results_dir: Some(reports.path().to_owned()),
+        };
+        let interrupt_events = Arc::clone(&events);
+        let interrupt = async move {
+            loop {
+                if interrupt_events
+                    .lock()
+                    .expect("event lock")
+                    .iter()
+                    .any(|event| event == "POST /servers")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let error = runtime
+            .run_compliance_workflow_with_interrupt(
+                &common,
+                Some(ConformanceSuite::Active),
+                false,
+                None,
+                interrupt,
+            )
+            .await
+            .expect_err("injected interruption should remain primary");
+
+        assert!(error.to_string().contains("interrupted by Ctrl-C"));
+        let events = events.lock().expect("event lock");
+        let create = events
+            .iter()
+            .position(|event| event == "POST /servers")
+            .expect("fixture should finish provisioning");
+        let delete = events[create + 1..]
+            .iter()
+            .position(|event| event.starts_with("DELETE /servers/"))
+            .map(|index| create + 1 + index)
+            .expect("post-create server cleanup should run");
+        let rm = events
+            .iter()
+            .position(|event| event == "compose fixture rm")
+            .expect("async service cleanup should run");
+        assert!(create < delete && delete < rm);
+        assert!(events.iter().all(|event| event != "npx"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "stack down cf-controlplane-only")
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event != "stack up cf-integration")
+        );
         server.abort();
     }
 
@@ -3482,6 +3970,36 @@ mod tests {
             assert!(!debug.contains(&token));
             assert!(!error.contains(&token));
         }
+    }
+
+    #[tokio::test]
+    async fn conformance_compose_helpers_use_async_process_execution() {
+        let state = tempfile::tempdir().expect("temporary integration state");
+        let controlplane = state.path().join("mcp-context-forge");
+        fs::create_dir_all(controlplane.join(".git")).expect("fake checkout should exist");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runtime = RuntimeExecutor::new(
+            fixture_test_config("http://127.0.0.1:4444", state.path(), &controlplane),
+            FixtureLifecycleRunner {
+                events: Arc::clone(&events),
+                fail_service_start: false,
+                fail_service_stop: false,
+            },
+        );
+
+        runtime
+            .start_conformance_service(StackMode::Controlplane)
+            .await
+            .expect("async fixture start should pass");
+        runtime
+            .stop_conformance_service(StackMode::Controlplane)
+            .await
+            .expect("async fixture removal should pass");
+
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["compose fixture up", "compose fixture rm"]
+        );
     }
 
     #[tokio::test]
