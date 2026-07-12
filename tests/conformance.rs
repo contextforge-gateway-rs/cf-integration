@@ -553,6 +553,31 @@ fn scenario_outcome_mixed_status_precedence_matches_official_summary() {
 }
 
 #[test]
+fn info_status_precedence_matches_not_applicable_official_scenarios() {
+    assert_eq!(
+        result("info", [CheckStatus::Info]).outcome(),
+        ScenarioOutcome::NotApplicable
+    );
+    assert_eq!(
+        result("skipped-info", [CheckStatus::Skipped, CheckStatus::Info]).outcome(),
+        ScenarioOutcome::NotApplicable
+    );
+    assert_eq!(
+        result("success-info", [CheckStatus::Success, CheckStatus::Info]).outcome(),
+        ScenarioOutcome::Compliant
+    );
+    assert_eq!(
+        result(
+            "unknown-info",
+            [CheckStatus::Other("FUTURE".to_owned()), CheckStatus::Info],
+        )
+        .outcome(),
+        ScenarioOutcome::Ambiguous
+    );
+    assert_eq!(result("empty", []).outcome(), ScenarioOutcome::Ambiguous);
+}
+
+#[test]
 fn scenario_outcomes_follow_official_failure_and_skip_semantics() {
     assert_eq!(
         result("success", [CheckStatus::Success, CheckStatus::Info]).outcome(),
@@ -572,7 +597,7 @@ fn scenario_outcomes_follow_official_failure_and_skip_semantics() {
     );
     assert_eq!(
         result("info", [CheckStatus::Info]).outcome(),
-        ScenarioOutcome::Ambiguous
+        ScenarioOutcome::NotApplicable
     );
     assert_eq!(result("empty", []).outcome(), ScenarioOutcome::Ambiguous);
 }

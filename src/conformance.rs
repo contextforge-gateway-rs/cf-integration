@@ -260,7 +260,7 @@ pub enum CheckStatus {
     Warning,
     /// Scenario or check was explicitly skipped.
     Skipped,
-    /// Informational event which does not establish conformance.
+    /// Informational event; not applicable without a stronger status.
     Info,
     /// Status introduced by a newer official package.
     Other(String),
@@ -375,6 +375,7 @@ impl ConformanceScenarioResult {
         let mut has_success = false;
         let mut has_warning = false;
         let mut has_skipped = false;
+        let mut has_info = false;
         let mut has_unknown = false;
         let mut failures = Vec::new();
 
@@ -385,7 +386,7 @@ impl ConformanceScenarioResult {
                 CheckStatus::Success => has_success = true,
                 CheckStatus::Skipped => has_skipped = true,
                 CheckStatus::Other(_) => has_unknown = true,
-                CheckStatus::Info => {}
+                CheckStatus::Info => has_info = true,
             }
         }
 
@@ -404,7 +405,7 @@ impl ConformanceScenarioResult {
             ScenarioOutcome::Ambiguous
         } else if has_success || has_warning {
             ScenarioOutcome::Compliant
-        } else if has_skipped {
+        } else if has_skipped || has_info {
             ScenarioOutcome::NotApplicable
         } else {
             ScenarioOutcome::Ambiguous
@@ -800,9 +801,9 @@ pub enum ScenarioOutcome {
     NonCompliant,
     /// Fixture setup failed; implementation compliance is not established.
     FixtureFailure,
-    /// Official checks only skipped the scenario, possibly with informational checks.
+    /// Checks only skipped or described a not-applicable scenario.
     NotApplicable,
-    /// Results contain an unknown status or no applicable, failed, or skipped check.
+    /// Results contain an unknown status or no checks.
     Ambiguous,
     /// No result was produced for this side.
     Missing,
