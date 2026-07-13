@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{LoadArgs, LoadEngine, StackMode};
-use crate::compose::ComposeProject;
-use crate::config::{AppConfig, SourcedValue, ValueOrigin};
+use cf_integration_platform::StackMode;
+use cf_integration_platform::compose::ComposeProject;
+use cf_integration_platform::config::{AppConfig, SourcedValue, ValueOrigin};
+use cf_integration_platform::process::CommandSpec;
+
+use crate::cli::{LoadArgs, LoadEngine};
 use crate::mcp::PROTOCOL_VERSION;
-use crate::process::CommandSpec;
 
 const SMOKE_USERS: &str = "1";
 const SMOKE_SPAWN_RATE: &str = "1";
@@ -48,7 +50,7 @@ impl LoadSettings {
         let users = match arguments.users {
             Some(users) => users,
             None => parse_users(selected_value(
-                &config.locust_users,
+                config.locust_users(),
                 arguments.smoke,
                 SMOKE_USERS,
             ))?,
@@ -60,7 +62,7 @@ impl LoadSettings {
             Some(spawn_rate) if spawn_rate.is_finite() && spawn_rate > 0.0 => spawn_rate,
             Some(_) => bail!("LOCUST_SPAWN_RATE must be a finite number greater than zero"),
             None => parse_spawn_rate(selected_value(
-                &config.locust_spawn_rate,
+                config.locust_spawn_rate(),
                 arguments.smoke,
                 SMOKE_SPAWN_RATE,
             ))?,
@@ -68,7 +70,7 @@ impl LoadSettings {
 
         let run_time = arguments.run_time.as_deref().map_or_else(
             || {
-                selected_value(&config.locust_run_time, arguments.smoke, SMOKE_RUN_TIME)
+                selected_value(config.locust_run_time(), arguments.smoke, SMOKE_RUN_TIME)
                     .to_str()
                     .map(str::to_owned)
                     .context("LOCUST_RUN_TIME must be valid UTF-8")
@@ -156,13 +158,13 @@ impl LocustCommand {
             StackMode::Dataplane => ComposeProject::dataplane(
                 config.root(),
                 config.controlplane_dir(),
-                config.integration_project.value.clone(),
-                !config.dataplane_ref.value.is_empty(),
+                config.integration_project().value.clone(),
+                !config.dataplane_ref().value.is_empty(),
             ),
             StackMode::Controlplane => ComposeProject::controlplane(
                 config.root(),
                 config.controlplane_dir(),
-                config.controlplane_project.value.clone(),
+                config.controlplane_project().value.clone(),
                 controlplane_sso_enabled(config),
             ),
         };

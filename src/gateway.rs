@@ -9,8 +9,9 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use url::Url;
 
+use cf_integration_platform::StackMode;
+
 use crate::backend_identity::{BACKEND_HEADER, BackendIdentity, sanitized_backend_value};
-use crate::cli::StackMode;
 use crate::mcp::{
     ACCEPT as MCP_ACCEPT, PROTOCOL_VERSION, initialize_with_id_and_version, jsonrpc_with_id,
     parse_mcp_body,

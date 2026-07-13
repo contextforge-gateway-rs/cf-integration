@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use cf_integration::cli::StackMode;
-use cf_integration::compose::ComposeProject;
-use cf_integration::stack::{
+use cf_integration_platform::StackMode;
+use cf_integration_platform::compose::ComposeProject;
+use cf_integration_platform::stack::{
     BuildInputs, BuildMode, CleanupKind, FreshnessSnapshot, ServiceSnapshot, StackCommandPlan,
     StackFreshness, resolve_build,
 };

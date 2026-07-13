@@ -9,13 +9,13 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::cli::StackMode;
 use cf_integration::gateway::{MCP_PROTOCOL_VERSION, MCP_SESSION_ID};
 use cf_integration::gateway_compliance::{
     GATEWAY_SPEC_VERSION, GatewayCaseResult, GatewayCaseStatus, GatewayComplianceConfig,
     GatewayComplianceReport, GatewayFailureEvidence, GatewayRequestEvidence,
     GatewayResponseEvidence, render_gateway_report, run_gateway_compliance, write_gateway_reports,
 };
+use cf_integration_platform::StackMode;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

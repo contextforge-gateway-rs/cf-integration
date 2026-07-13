@@ -8,11 +8,11 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::cli::StackMode;
 use cf_integration::gateway::{
     DEFAULT_PROTOCOL_VERSION, GatewayClient, GatewayRequest, HeaderOverride, MCP_PROTOCOL_VERSION,
     MCP_SESSION_ID,
 };
+use cf_integration_platform::StackMode;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

@@ -2,8 +2,10 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cf_integration::error::AppFailure;
-use cf_integration::process::{CapturedOutput, CommandSpec, ProcessRunner, SystemProcessRunner};
+use cf_integration_platform::PlatformError;
+use cf_integration_platform::process::{
+    CapturedOutput, CommandSpec, ProcessRunner, SystemProcessRunner,
+};
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -23,22 +25,22 @@ fn assert_runner_interface(_runner: &dyn ProcessRunner) {}
 struct FakeProcessRunner;
 
 impl ProcessRunner for FakeProcessRunner {
-    fn run(&self, _spec: &CommandSpec) -> Result<(), AppFailure> {
+    fn run(&self, _spec: &CommandSpec) -> Result<(), PlatformError> {
         Ok(())
     }
 
-    fn capture_stdout(&self, _spec: &CommandSpec) -> Result<Vec<u8>, AppFailure> {
+    fn capture_stdout(&self, _spec: &CommandSpec) -> Result<Vec<u8>, PlatformError> {
         Ok(b"synthetic stdout".to_vec())
     }
 
-    fn capture_output(&self, _spec: &CommandSpec) -> Result<CapturedOutput, AppFailure> {
+    fn capture_output(&self, _spec: &CommandSpec) -> Result<CapturedOutput, PlatformError> {
         Ok(CapturedOutput::new(
             b"synthetic stdout".to_vec(),
             b"synthetic stderr".to_vec(),
         ))
     }
 
-    fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> Result<(), AppFailure> {
+    fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> Result<(), PlatformError> {
         Ok(())
     }
 }
@@ -371,7 +373,7 @@ fn missing_program_has_safe_context_and_native_exit_code() {
         .run(&spec)
         .expect_err("missing program should fail to spawn");
 
-    assert!(matches!(failure, AppFailure::Native(_)));
+    assert!(matches!(failure, PlatformError::Native(_)));
     assert_eq!(failure.exit_code(), 1);
     let message = failure.to_string();
     assert!(message.contains("spawn"), "{message}");
@@ -410,7 +412,7 @@ fn child_exit_code_is_preserved_without_process_output() {
         .run(&CommandSpec::new(script))
         .expect_err("exit seven should be represented as a child failure");
 
-    assert!(matches!(failure, AppFailure::ChildExit { .. }));
+    assert!(matches!(failure, PlatformError::ChildExit { .. }));
     assert_eq!(failure.exit_code(), 7);
 }
 
@@ -424,7 +426,7 @@ fn signaled_child_maps_to_shell_exit_code() {
         .run(&CommandSpec::new(script))
         .expect_err("SIGTERM should be represented as a child failure");
 
-    assert!(matches!(failure, AppFailure::ChildExit { .. }));
+    assert!(matches!(failure, PlatformError::ChildExit { .. }));
     assert_eq!(failure.exit_code(), 143);
 }
 
@@ -439,7 +441,7 @@ fn windows_inherited_mode_preserves_success_and_nonzero_exit_codes() {
         .run(&CommandSpec::new("cmd.exe").args(["/D", "/S", "/C", "exit /b 7"]))
         .expect_err("nonzero exit should be represented as a child failure");
 
-    assert!(matches!(failure, AppFailure::ChildExit { .. }));
+    assert!(matches!(failure, PlatformError::ChildExit { .. }));
     assert_eq!(failure.exit_code(), 7);
 }
 

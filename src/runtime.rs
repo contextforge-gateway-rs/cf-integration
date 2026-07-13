@@ -10,6 +10,15 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use cf_integration_platform::checkout::{CheckoutManager, CheckoutRequest};
+use cf_integration_platform::compose::{ComposeProject, validate_integration_contract};
+use cf_integration_platform::config::AppConfig;
+use cf_integration_platform::process::{CommandSpec, ProcessRunner};
+use cf_integration_platform::stack::{
+    BuildInputs, BuildMode, CleanupKind, FreshnessSnapshot, ServiceSnapshot, StackCommandPlan,
+    StackFreshness, resolve_build,
+};
+use cf_integration_platform::{PlatformError, StackMode};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{
@@ -17,13 +26,9 @@ use crate::app::{
     StackAction, TestAction,
 };
 use crate::auth_proxy::AuthProxy;
-use crate::checkout::{CheckoutManager, CheckoutRequest};
 use crate::cli::{
-    ComplianceMode, ConformanceSuite, LiveGroup, LoadArgs, LoadEngine, StackMode,
-    TokenKind as CliTokenKind,
+    ComplianceMode, ConformanceSuite, LiveGroup, LoadArgs, LoadEngine, TokenKind as CliTokenKind,
 };
-use crate::compose::{ComposeProject, validate_integration_contract};
-use crate::config::AppConfig;
 use crate::conformance::{
     Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceResults, ScenarioOutcome,
     audit_baseline, compare_result_sets_with_fixture_trust, expected_server_scenarios,
@@ -49,11 +54,6 @@ use crate::http_transport::ReqwestProbeTransport;
 use crate::load::{GooseLoadConfig, LoadSettings, LocustCommand, audit_locust_reports};
 use crate::mcp::{ACCEPT as MCP_ACCEPT, PROTOCOL_VERSION};
 use crate::probe::{ProbeConfig, run_probe};
-use crate::process::{CommandSpec, ProcessRunner};
-use crate::stack::{
-    BuildInputs, BuildMode, CleanupKind, FreshnessSnapshot, ServiceSnapshot, StackCommandPlan,
-    StackFreshness, resolve_build,
-};
 use crate::token::{TokenKind, make_token};
 
 type AppResult<T> = std::result::Result<T, AppFailure>;
@@ -171,8 +171,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     fn ensure_controlplane(&self) -> AppResult<()> {
         let request = CheckoutRequest::controlplane(
             self.config.controlplane_dir(),
-            self.config.controlplane_repo.value.clone(),
-            self.config.controlplane_ref.value.clone(),
+            self.config.controlplane_repo().value.clone(),
+            self.config.controlplane_ref().value.clone(),
         );
         self.ensure_checkout(&request)
     }
@@ -180,8 +180,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     fn ensure_dataplane(&self) -> AppResult<()> {
         let request = CheckoutRequest::dataplane(
             self.config.dataplane_dir(),
-            self.config.dataplane_repo.value.clone(),
-            self.config.dataplane_ref.value.clone(),
+            self.config.dataplane_repo().value.clone(),
+            self.config.dataplane_ref().value.clone(),
         );
         self.ensure_checkout(&request)
     }
@@ -193,12 +193,12 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         for warning in warnings {
             eprintln!("{warning}");
         }
-        result.map(|_| ())
+        Ok(result.map(|_| ())?)
     }
 
     fn print_token(&self, kind: CliTokenKind, server_id: Option<String>) -> AppResult<()> {
-        let secret = required_text(&self.config.jwt_secret_key.value, "JWT_SECRET_KEY")?;
-        let subject = required_text(&self.config.jwt_subject.value, "MCP_JWT_SUBJECT")?;
+        let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
+        let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         let token_kind = match kind {
             CliTokenKind::Scoped => TokenKind::Scoped {
                 server_id: Some(server_id.unwrap_or_else(|| self.default_server_id().to_owned())),
@@ -218,14 +218,20 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             StackAction::Status(mode) => {
                 self.ensure_mode_sources(mode)?;
                 let command = StackCommandPlan::status(self.compose_project(mode));
-                self.runner
-                    .run(&self.compose_environment(command.command().clone(), mode, true)?)
+                Ok(self.runner.run(&self.compose_environment(
+                    command.command().clone(),
+                    mode,
+                    true,
+                )?)?)
             }
             StackAction::Logs { mode, services } => {
                 self.ensure_mode_sources(mode)?;
                 let command = StackCommandPlan::logs(self.compose_project(mode), services);
-                self.runner
-                    .run(&self.compose_environment(command.command().clone(), mode, true)?)
+                Ok(self.runner.run(&self.compose_environment(
+                    command.command().clone(),
+                    mode,
+                    true,
+                )?)?)
             }
             StackAction::Config(mode) => {
                 self.ensure_mode_sources(mode)?;
@@ -233,8 +239,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     self.validate_compose_contract()?;
                 }
                 let command = StackCommandPlan::config(self.compose_project(mode), mode);
-                self.runner
-                    .run(&self.compose_environment(command.command().clone(), mode, true)?)
+                Ok(self.runner.run(&self.compose_environment(
+                    command.command().clone(),
+                    mode,
+                    true,
+                )?)?)
             }
         }
     }
@@ -320,13 +329,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             StackMode::Dataplane => ComposeProject::dataplane(
                 self.config.root(),
                 self.config.controlplane_dir(),
-                self.config.integration_project.value.clone(),
-                !self.config.dataplane_ref.value.is_empty(),
+                self.config.integration_project().value.clone(),
+                !self.config.dataplane_ref().value.is_empty(),
             ),
             StackMode::Controlplane => ComposeProject::controlplane(
                 self.config.root(),
                 self.config.controlplane_dir(),
-                self.config.controlplane_project.value.clone(),
+                self.config.controlplane_project().value.clone(),
                 self.environment_flag("CONTROLPLANE_ENABLE_SSO", false),
             ),
         }
@@ -373,15 +382,15 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 self.config.dataplane_image().resolved().to_owned(),
             )
             .env("CF_DATAPLANE_PLATFORM", self.dataplane_platform()?)
-            .env("JWT_SECRET_KEY", self.config.jwt_secret_key.value.clone())
-            .env("MCP_CLI_BASE_URL", self.config.base_url.value.clone())
+            .env("JWT_SECRET_KEY", self.config.jwt_secret_key().value.clone())
+            .env("MCP_CLI_BASE_URL", self.config.base_url().value.clone())
             .env(
                 "PLATFORM_ADMIN_EMAIL",
-                self.config.platform_admin_email.value.clone(),
+                self.config.platform_admin_email().value.clone(),
             )
             .env(
                 "KEY_FILE_PASSWORD",
-                self.config.key_file_password.value.clone(),
+                self.config.key_file_password().value.clone(),
             );
 
         for (key, default) in [
@@ -439,7 +448,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         if mode == StackMode::Controlplane {
             command = command.env(
                 "COMPOSE_PROJECT_NAME",
-                self.config.controlplane_project.value.clone(),
+                self.config.controlplane_project().value.clone(),
             );
         }
         if checkout_labels {
@@ -463,7 +472,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| {
                 self.config
-                    .controlplane_ref
+                    .controlplane_ref()
                     .value
                     .to_string_lossy()
                     .into_owned()
@@ -471,7 +480,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         command = command
             .env("CF_CONTROLPLANE_CHECKOUT_REVISION", controlplane_revision)
             .env("CF_CONTROLPLANE_CHECKOUT_REF", controlplane_ref);
-        if mode == StackMode::Dataplane && !self.config.dataplane_ref.value.is_empty() {
+        if mode == StackMode::Dataplane && !self.config.dataplane_ref().value.is_empty() {
             let revision = self.git_required(self.config.dataplane_dir(), ["rev-parse", "HEAD"])?;
             let reference = self
                 .git_optional(
@@ -481,7 +490,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| {
                     self.config
-                        .dataplane_ref
+                        .dataplane_ref()
                         .value
                         .to_string_lossy()
                         .into_owned()
@@ -503,7 +512,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .context("failed to parse rendered integration Compose JSON")
             .map_err(AppFailure::from)?;
         let expected = required_text(
-            &self.config.fast_time_expected_image.value,
+            &self.config.fast_time_expected_image().value,
             "CF_FAST_TIME_EXPECTED_IMAGE",
         )?;
         let violations = validate_integration_contract(&rendered, expected);
@@ -521,16 +530,16 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     fn resolve_build(&self, mode: StackMode) -> AppResult<bool> {
-        let setting = required_text(&self.config.compose_build.value, "CF_COMPOSE_BUILD")?;
+        let setting = required_text(&self.config.compose_build().value, "CF_COMPOSE_BUILD")?;
         let mode_setting =
             BuildMode::from_str(setting).map_err(|error| AppFailure::from(anyhow!(error)))?;
         let controlplane_checkout_revision =
             Some(self.git_required(self.config.controlplane_dir(), ["rev-parse", "HEAD"])?);
         let (controlplane_image_present, controlplane_image_revision) =
             self.image_state(self.config.controlplane_image().resolved());
-        let dataplane_source = (!self.config.dataplane_ref.value.is_empty()).then(|| {
+        let dataplane_source = (!self.config.dataplane_ref().value.is_empty()).then(|| {
             self.config
-                .dataplane_ref
+                .dataplane_ref()
                 .value
                 .to_string_lossy()
                 .into_owned()
@@ -584,7 +593,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 None,
             )?;
         }
-        if mode == StackMode::Dataplane && self.config.dataplane_ref.value.is_empty() {
+        if mode == StackMode::Dataplane && self.config.dataplane_ref().value.is_empty() {
             let platform = self.dataplane_platform()?;
             self.pull_if_changed(
                 "cf-dataplane",
@@ -648,12 +657,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             arguments.push(platform.to_owned());
         }
         arguments.push(image.to_owned());
-        self.runner.run(&CommandSpec::new("docker").args(arguments))
+        Ok(self
+            .runner
+            .run(&CommandSpec::new("docker").args(arguments))?)
     }
 
     fn integration_freshness(&self) -> AppResult<StackFreshness> {
         let project = required_text(
-            &self.config.integration_project.value,
+            &self.config.integration_project().value,
             "CF_INTEGRATION_PROJECT",
         )?;
         let mut services = std::collections::BTreeMap::new();
@@ -682,7 +693,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             dataplane_checkout_revision: self
                 .git_optional(self.config.dataplane_dir(), ["rev-parse", "HEAD"]),
             controlplane_image_explicit: self.config.controlplane_image().is_explicitly_set(),
-            dataplane_source_enabled: !self.config.dataplane_ref.value.is_empty(),
+            dataplane_source_enabled: !self.config.dataplane_ref().value.is_empty(),
             expected_controlplane_image: required_text(
                 self.config.controlplane_image().resolved(),
                 "CF_CONTROLPLANE_IMAGE",
@@ -694,7 +705,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             )?
             .to_owned(),
             expected_fast_time_image: required_text(
-                &self.config.fast_time_expected_image.value,
+                &self.config.fast_time_expected_image().value,
                 "CF_FAST_TIME_EXPECTED_IMAGE",
             )?
             .to_owned(),
@@ -760,14 +771,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let (other, label) = match mode {
             StackMode::Dataplane => (
                 required_text(
-                    &self.config.controlplane_project.value,
+                    &self.config.controlplane_project().value,
                     "CF_CONTROLPLANE_PROJECT",
                 )?,
                 "control-plane",
             ),
             StackMode::Controlplane => (
                 required_text(
-                    &self.config.integration_project.value,
+                    &self.config.integration_project().value,
                     "CF_INTEGRATION_PROJECT",
                 )?,
                 "dataplane integration",
@@ -807,15 +818,15 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 match self.compose_environment(command.command().clone(), mode, false) {
                     Ok(command) => {
                         if let Err(error) = self.runner.run(&command) {
-                            last_failure = Some(error);
+                            last_failure = Some(error.into());
                         }
                     }
                     Err(error) => last_failure = Some(error),
                 }
             }
             let project = match mode {
-                StackMode::Controlplane => &self.config.controlplane_project.value,
-                StackMode::Dataplane => &self.config.integration_project.value,
+                StackMode::Controlplane => &self.config.controlplane_project().value,
+                StackMode::Dataplane => &self.config.integration_project().value,
             };
             match required_text(project, "Compose project name")
                 .and_then(|project| self.remove_project_by_label(project, kind))
@@ -866,10 +877,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     fn dataplane_platform(&self) -> AppResult<OsString> {
-        if self.config.dataplane_platform.value != "auto" {
-            return Ok(self.config.dataplane_platform.value.clone());
+        if self.config.dataplane_platform().value != "auto" {
+            return Ok(self.config.dataplane_platform().value.clone());
         }
-        if self.config.dataplane_ref.value.is_empty() {
+        if self.config.dataplane_ref().value.is_empty() {
             return Ok(OsString::from("linux/amd64"));
         }
         Ok(self
@@ -933,7 +944,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 self.environment_text("MCP_VIRTUAL_SERVER_ID")
                     .filter(|value| !value.is_empty())
             })
-            .or_else(|| self.config.fast_time_server_id.value.to_str())
+            .or_else(|| self.config.fast_time_server_id().value.to_str())
             .unwrap_or("9779b6698cbd4b4995ee04a4fab38737")
     }
 
@@ -970,7 +981,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     fn base_url(&self) -> AppResult<&str> {
-        required_text(&self.config.base_url.value, "MCP_CLI_BASE_URL")
+        required_text(&self.config.base_url().value, "MCP_CLI_BASE_URL")
     }
 
     fn bearer_token(&self, mode: StackMode, server_id: &str) -> AppResult<String> {
@@ -980,8 +991,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         {
             return Ok(token.to_owned());
         }
-        let secret = required_text(&self.config.jwt_secret_key.value, "JWT_SECRET_KEY")?;
-        let subject = required_text(&self.config.jwt_subject.value, "MCP_JWT_SUBJECT")?;
+        let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
+        let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         let kind = match mode {
             StackMode::Dataplane => TokenKind::Scoped {
                 server_id: Some(server_id.to_owned()),
@@ -992,8 +1003,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     fn admin_token(&self) -> AppResult<String> {
-        let secret = required_text(&self.config.jwt_secret_key.value, "JWT_SECRET_KEY")?;
-        let subject = required_text(&self.config.jwt_subject.value, "MCP_JWT_SUBJECT")?;
+        let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
+        let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         make_token(secret, subject, TokenKind::Admin).map_err(AppFailure::from)
     }
 
@@ -1016,7 +1027,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
         let up = self.compose_environment(up, mode, true)?;
-        self.runner.run_async(&up).await
+        Ok(self.runner.run_async(&up).await?)
     }
 
     async fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
@@ -1027,7 +1038,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
         let remove = match self.compose_environment(remove, mode, true) {
-            Ok(command) => self.runner.run_async(&command).await,
+            Ok(command) => self
+                .runner
+                .run_async(&command)
+                .await
+                .map_err(AppFailure::from),
             Err(error) => Err(error),
         };
 
@@ -1035,7 +1050,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .compose_project(mode)
             .command(["up", "-d", "--wait", "gateway"]);
         let restore = match self.compose_environment(restore, mode, true) {
-            Ok(command) => self.runner.run_async(&command).await,
+            Ok(command) => self
+                .runner
+                .run_async(&command)
+                .await
+                .map_err(AppFailure::from),
             Err(error) => Err(error),
         };
 
@@ -1091,7 +1110,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         self.prepare_test_target(args.mode, &server_id).await?;
         let token = self.bearer_token(args.mode, &server_id)?;
         let cli_args = LoadArgs {
-            mode: Some(args.mode),
+            mode: None,
             engine: args.engine,
             smoke: args.smoke,
             users: args.users,
@@ -1109,11 +1128,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     (args.mode == StackMode::Dataplane).then_some(server_id.as_str()),
                 )
                 .map_err(AppFailure::from)?;
-                let process_result = self.runner.run(&self.compose_environment(
-                    command.command().clone(),
-                    args.mode,
-                    true,
-                )?);
+                let process_result = self
+                    .runner
+                    .run(&self.compose_environment(command.command().clone(), args.mode, true)?)
+                    .map_err(AppFailure::from);
                 finalize_locust_run(process_result, command.report_dir(), &token)
             }
             LoadEngine::Goose => {
@@ -1168,8 +1186,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .arg("-C")
             .arg(self.config.controlplane_dir().as_os_str())
             .arg(target);
-        self.runner
-            .run(&self.compose_environment(command, mode, false)?)
+        Ok(self
+            .runner
+            .run(&self.compose_environment(command, mode, false)?)?)
     }
 
     fn run_live_all(&self, mode: StackMode, exclude_plugins: bool) -> AppResult<()> {
@@ -1207,12 +1226,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let mut failure = self
             .runner
             .run(&self.compose_environment(pass_one, mode, false)?)
-            .err();
+            .err()
+            .map(AppFailure::from);
         if let Err(error) = self
             .runner
             .run(&self.compose_environment(pass_two, mode, false)?)
         {
-            failure = Some(error);
+            failure = Some(error.into());
         }
         failure.map_or(Ok(()), Err)
     }
@@ -1330,7 +1350,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     async fn wait_for_publisher_snapshot(&self, server_id: &str) -> AppResult<()> {
         let timeout_seconds = self.environment_u64("CF_PUBLISHER_WAIT_SECONDS", 90)?;
         let project = required_text(
-            &self.config.integration_project.value,
+            &self.config.integration_project().value,
             "CF_INTEGRATION_PROJECT",
         )?;
         let redis = self.container_id(project, "redis", false).ok_or_else(|| {
@@ -1782,7 +1802,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let process_result = self
             .runner
             .run_async_cancellable(&command, run.cancellation.clone())
-            .await;
+            .await
+            .map_err(AppFailure::from);
         let shutdown_result = proxy
             .shutdown()
             .await
@@ -1885,8 +1906,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         {
             return Ok(None);
         }
-        let secret = required_text(&self.config.jwt_secret_key.value, "JWT_SECRET_KEY")?;
-        let subject = required_text(&self.config.jwt_subject.value, "MCP_JWT_SUBJECT")?;
+        let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
+        let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         make_token(
             secret,
             subject,
@@ -2462,8 +2483,10 @@ fn write_completion_marker(path: &Path) -> AppResult<()> {
 fn conformance_process_completed(process_result: &AppResult<()>) -> bool {
     match process_result {
         Ok(()) => true,
-        Err(AppFailure::ChildExit { status, .. }) => status.code().is_some(),
-        Err(AppFailure::Native(_)) => false,
+        Err(AppFailure::Platform(PlatformError::ChildExit { status, .. })) => {
+            status.code().is_some()
+        }
+        Err(AppFailure::Platform(PlatformError::Native(_))) | Err(AppFailure::Native(_)) => false,
     }
 }
 
@@ -2770,17 +2793,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::config::Environment;
-    use crate::process::CapturedOutput;
+
+    type PlatformResult<T> = std::result::Result<T, PlatformError>;
     use axum::Router;
     use axum::extract::State;
     use axum::http::{Method, StatusCode, Uri};
     use axum::routing::{any, get};
+    use cf_integration_platform::config::Environment;
+    use cf_integration_platform::process::CapturedOutput;
 
     struct CompletedFixtureFailureRunner;
 
     impl ProcessRunner for CompletedFixtureFailureRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             let output = spec
                 .arguments()
                 .windows(2)
@@ -2807,16 +2832,16 @@ mod tests {
             Ok(())
         }
 
-        fn capture_stdout(&self, _spec: &CommandSpec) -> AppResult<Vec<u8>> {
-            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        fn capture_stdout(&self, _spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
+            Err(PlatformError::from(anyhow!("unexpected capture command")))
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
-            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
+            Err(PlatformError::from(anyhow!("unexpected capture command")))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
-            Err(AppFailure::from(anyhow!("unexpected log command")))
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
+            Err(PlatformError::from(anyhow!("unexpected log command")))
         }
     }
 
@@ -2868,14 +2893,14 @@ mod tests {
     }
 
     impl ProcessRunner for CancellingFixtureRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             self.inner.run(spec)
         }
 
         fn run_async<'a>(
             &'a self,
             spec: &'a CommandSpec,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PlatformResult<()>> + 'a>> {
             self.inner.run_async(spec)
         }
 
@@ -2883,7 +2908,7 @@ mod tests {
             &'a self,
             spec: &'a CommandSpec,
             mut cancellation: tokio::sync::watch::Receiver<bool>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PlatformResult<()>> + 'a>> {
             if spec.program() != "npx" {
                 return self.inner.run_async_cancellable(spec, cancellation);
             }
@@ -2904,25 +2929,25 @@ mod tests {
                     .lock()
                     .expect("event lock")
                     .push("child terminated".into());
-                Err(AppFailure::from(anyhow!("child cancelled and reaped")))
+                Err(PlatformError::from(anyhow!("child cancelled and reaped")))
             })
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             self.inner.capture_stdout(spec)
         }
 
-        fn capture_output(&self, spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             self.inner.capture_output(spec)
         }
 
-        fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> PlatformResult<()> {
             self.inner.run_to_log(spec, log_path)
         }
     }
 
     impl ProcessRunner for FixtureLifecycleRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             let arguments = spec
                 .arguments()
                 .iter()
@@ -2930,13 +2955,13 @@ mod tests {
                 .collect::<Vec<_>>();
             if spec.program() == "npx" {
                 self.events.lock().expect("event lock").push("npx".into());
-                return Err(AppFailure::from(anyhow!("intentional npx failure")));
+                return Err(PlatformError::from(anyhow!("intentional npx failure")));
             }
             if arguments
                 .iter()
                 .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE)
             {
-                return Err(AppFailure::from(anyhow!(
+                return Err(PlatformError::from(anyhow!(
                     "conformance Compose commands must use async runner"
                 )));
             }
@@ -2971,7 +2996,7 @@ mod tests {
         fn run_async<'a>(
             &'a self,
             spec: &'a CommandSpec,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PlatformResult<()>> + 'a>> {
             if spec.program() != "npx" {
                 let arguments = spec
                     .arguments()
@@ -2994,7 +3019,7 @@ mod tests {
                         drop(events);
                         if fail {
                             return Box::pin(async {
-                                Err(AppFailure::from(anyhow!("fixture build failed")))
+                                Err(PlatformError::from(anyhow!("fixture build failed")))
                             });
                         }
                         return Box::pin(async { Ok(()) });
@@ -3022,12 +3047,12 @@ mod tests {
                     self.events.lock().expect("event lock").push(event.into());
                     if self.fail_service_start && event.ends_with("up") {
                         return Box::pin(async {
-                            Err(AppFailure::from(anyhow!("fixture start failed")))
+                            Err(PlatformError::from(anyhow!("fixture start failed")))
                         });
                     }
                     if self.fail_service_stop && event.ends_with("rm") {
                         return Box::pin(async {
-                            Err(AppFailure::from(anyhow!("fixture stop failed")))
+                            Err(PlatformError::from(anyhow!("fixture stop failed")))
                         });
                     }
                     return Box::pin(async { Ok(()) });
@@ -3047,7 +3072,7 @@ mod tests {
                         .push("compose gateway restore".into());
                     if self.fail_gateway_restore {
                         return Box::pin(async {
-                            Err(AppFailure::from(anyhow!("gateway restore failed")))
+                            Err(PlatformError::from(anyhow!("gateway restore failed")))
                         });
                     }
                     return Box::pin(async { Ok(()) });
@@ -3074,11 +3099,11 @@ mod tests {
                     .lock()
                     .expect("event lock")
                     .push("official proxy complete".into());
-                Err(AppFailure::from(anyhow!("intentional npx failure")))
+                Err(PlatformError::from(anyhow!("intentional npx failure")))
             })
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             match spec.program().to_str() {
                 Some("docker") if spec.arguments().iter().any(|value| value == "config") => {
                     Ok(serde_json::to_vec(&serde_json::json!({
@@ -3122,7 +3147,7 @@ mod tests {
                         .expect("event lock")
                         .push(format!("publisher {server_id}"));
                     if server_id == "9779b6698cbd4b4995ee04a4fab38737" {
-                        return Err(AppFailure::from(anyhow!(
+                        return Err(PlatformError::from(anyhow!(
                             "automatic fixture workflow probed Fast Time publisher snapshot"
                         )));
                     }
@@ -3138,22 +3163,22 @@ mod tests {
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
 
     impl ProcessRunner for DefaultsRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             self.runs.borrow_mut().push(spec.clone());
             Ok(())
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             self.captures.borrow_mut().push(spec.clone());
             match (
                 spec.program().to_string_lossy().as_ref(),
@@ -3164,45 +3189,45 @@ mod tests {
                 ("docker", Some(argument)) if argument == "info" => Ok(b"6\n".to_vec()),
                 ("id", Some(argument)) if argument == "-u" => Ok(b"501\n".to_vec()),
                 ("id", Some(argument)) if argument == "-g" => Ok(b"20\n".to_vec()),
-                _ => Err(AppFailure::from(anyhow!("unexpected capture command"))),
+                _ => Err(PlatformError::from(anyhow!("unexpected capture command"))),
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
 
     impl ProcessRunner for FailingNpxRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             self.command.replace(Some(spec.clone()));
-            Err(AppFailure::from(anyhow!("deliberate npx failure")))
+            Err(PlatformError::from(anyhow!("deliberate npx failure")))
         }
 
-        fn capture_stdout(&self, _spec: &CommandSpec) -> AppResult<Vec<u8>> {
-            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        fn capture_stdout(&self, _spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
+            Err(PlatformError::from(anyhow!("unexpected capture command")))
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
-            Err(AppFailure::from(anyhow!("unexpected capture command")))
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
+            Err(PlatformError::from(anyhow!("unexpected capture command")))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
-            Err(AppFailure::from(anyhow!("unexpected log command")))
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
+            Err(PlatformError::from(anyhow!("unexpected log command")))
         }
     }
 
     impl ProcessRunner for PublisherRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             self.commands.borrow_mut().push(spec.clone());
             Ok(())
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             self.commands.borrow_mut().push(spec.clone());
             let first = spec
                 .arguments()
@@ -3221,28 +3246,28 @@ mod tests {
                 (Some("git"), _) if spec.arguments().iter().any(|arg| arg == "symbolic-ref") => {
                     Ok(b"main\n".to_vec())
                 }
-                _ => Err(AppFailure::from(anyhow!("unexpected publisher command"))),
+                _ => Err(PlatformError::from(anyhow!("unexpected publisher command"))),
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
 
     impl ProcessRunner for CleanupFailingRunner {
-        fn run(&self, spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, spec: &CommandSpec) -> PlatformResult<()> {
             if spec.arguments().iter().any(|argument| argument == "down") {
-                return Err(AppFailure::from(anyhow!("deliberate cleanup failure")));
+                return Err(PlatformError::from(anyhow!("deliberate cleanup failure")));
             }
             Ok(())
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             match (
                 spec.program().to_str(),
                 spec.arguments().first().and_then(|arg| arg.to_str()),
@@ -3251,25 +3276,25 @@ mod tests {
                 (Some("docker"), Some("ps" | "network" | "volume")) => Ok(Vec::new()),
                 (Some("id"), Some("-u")) => Ok(b"501\n".to_vec()),
                 (Some("id"), Some("-g")) => Ok(b"20\n".to_vec()),
-                _ => Err(AppFailure::from(anyhow!("unexpected cleanup capture"))),
+                _ => Err(PlatformError::from(anyhow!("unexpected cleanup capture"))),
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
 
     impl ProcessRunner for TargetGuardRunner {
-        fn run(&self, _spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, _spec: &CommandSpec) -> PlatformResult<()> {
             Ok(())
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             self.commands.borrow_mut().push(spec.clone());
             let first = spec
                 .arguments()
@@ -3290,25 +3315,27 @@ mod tests {
                 }
                 (Some("docker"), Some("ps")) => Ok(Vec::new()),
                 (Some("docker"), Some("exec")) => Ok(b"1\n".to_vec()),
-                _ => Err(AppFailure::from(anyhow!("unexpected target guard capture"))),
+                _ => Err(PlatformError::from(anyhow!(
+                    "unexpected target guard capture"
+                ))),
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
 
     impl ProcessRunner for ExactPublisherRunner {
-        fn run(&self, _spec: &CommandSpec) -> AppResult<()> {
+        fn run(&self, _spec: &CommandSpec) -> PlatformResult<()> {
             Ok(())
         }
 
-        fn capture_stdout(&self, spec: &CommandSpec) -> AppResult<Vec<u8>> {
+        fn capture_stdout(&self, spec: &CommandSpec) -> PlatformResult<Vec<u8>> {
             self.commands.borrow_mut().push(spec.clone());
             match spec
                 .arguments()
@@ -3332,17 +3359,17 @@ mod tests {
                         b"0\n".to_vec()
                     })
                 }
-                _ => Err(AppFailure::from(anyhow!(
+                _ => Err(PlatformError::from(anyhow!(
                     "unexpected exact publisher command"
                 ))),
             }
         }
 
-        fn capture_output(&self, _spec: &CommandSpec) -> AppResult<CapturedOutput> {
+        fn capture_output(&self, _spec: &CommandSpec) -> PlatformResult<CapturedOutput> {
             Ok(CapturedOutput::new(Vec::new(), Vec::new()))
         }
 
-        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> AppResult<()> {
+        fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> PlatformResult<()> {
             Ok(())
         }
     }
@@ -5312,7 +5339,11 @@ mod tests {
             .args(["-c", "exit 7"])
             .status()
             .expect("test child should exit normally");
-        let process_result: AppResult<()> = Err(AppFailure::child_exit("npx".into(), status));
+        let process_result: AppResult<()> = Err(PlatformError::ChildExit {
+            program: "npx".into(),
+            status,
+        }
+        .into());
 
         assert!(
             mark_conformance_complete(
@@ -5363,7 +5394,11 @@ mod tests {
             .args(["-c", "exit 1"])
             .status()
             .expect("test child should exit normally");
-        let process_result: AppResult<()> = Err(AppFailure::child_exit("npx".into(), status));
+        let process_result: AppResult<()> = Err(PlatformError::ChildExit {
+            program: "npx".into(),
+            status,
+        }
+        .into());
         let completion_error = mark_conformance_complete(
             &process_result,
             &results,
@@ -5394,10 +5429,11 @@ mod tests {
     fn signal_terminated_conformance_process_is_not_complete() {
         use std::os::unix::process::ExitStatusExt;
 
-        let process_result: AppResult<()> = Err(AppFailure::child_exit(
-            "npx".into(),
-            std::process::ExitStatus::from_raw(9),
-        ));
+        let process_result: AppResult<()> = Err(PlatformError::ChildExit {
+            program: "npx".into(),
+            status: std::process::ExitStatus::from_raw(9),
+        }
+        .into());
         assert!(!conformance_process_completed(&process_result));
     }
 

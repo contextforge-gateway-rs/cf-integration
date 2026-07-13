@@ -6,9 +6,10 @@ use cf_integration::app::{
     resolve_action,
 };
 use cf_integration::cli::{
-    Cli, ComplianceMode, ConformanceSuite, LiveGroup, LoadEngine, StackMode, TokenKind,
+    Cli, ComplianceMode, ConformanceSuite, LiveGroup, LoadEngine, TokenKind,
 };
-use cf_integration::config::Environment;
+use cf_integration_platform::StackMode;
+use cf_integration_platform::config::Environment;
 use clap::Parser;
 
 fn action(arguments: &[&str], environment: &[(&str, &str)]) -> Action {

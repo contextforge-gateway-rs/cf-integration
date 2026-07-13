@@ -2,10 +2,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use cf_integration::cli::{
-    Cli, Command, ComplianceAllArgs, ComplianceArgs, ComplianceCommand, ComplianceMode,
-    ComplianceReportArgs, ConformanceSuite, InspectArgs, LiveGroup, LoadArgs, LoadEngine, ModeArgs,
-    ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs, StackMode, TestArgs, TestCommand,
-    TokenArgs, TokenKind,
+    Cli, CliStackMode, Command, ComplianceAllArgs, ComplianceArgs, ComplianceCommand,
+    ComplianceMode, ComplianceReportArgs, ConformanceSuite, InspectArgs, LiveGroup, LoadArgs,
+    LoadEngine, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs, TestArgs,
+    TestCommand, TokenArgs, TokenKind,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -134,19 +134,19 @@ fn stack_operations_use_controlplane_and_dataplane_names() {
         (
             "up",
             StackCommand::Up(ModeArgs {
-                mode: Some(StackMode::Dataplane),
+                mode: Some(CliStackMode::Dataplane),
             }),
         ),
         (
             "status",
             StackCommand::Status(ModeArgs {
-                mode: Some(StackMode::Dataplane),
+                mode: Some(CliStackMode::Dataplane),
             }),
         ),
         (
             "config",
             StackCommand::Config(ModeArgs {
-                mode: Some(StackMode::Dataplane),
+                mode: Some(CliStackMode::Dataplane),
             }),
         ),
     ] {
@@ -205,7 +205,7 @@ fn stack_logs_preserve_service_arguments() {
         Cli {
             command: Command::Stack(StackArgs {
                 command: StackCommand::Logs(StackLogsArgs {
-                    mode: Some(StackMode::Controlplane),
+                    mode: Some(CliStackMode::Controlplane),
                     services: vec![OsString::from("gateway"), OsString::from("worker")],
                 }),
             }),
@@ -241,7 +241,7 @@ fn probe_live_and_suite_share_stack_modes() {
         parse(&["cf-integration", "test", "probe", "--mode", "controlplane",]).command,
         Command::Test(TestArgs {
             command: TestCommand::Probe(ModeArgs {
-                mode: Some(StackMode::Controlplane),
+                mode: Some(CliStackMode::Controlplane),
             }),
         })
     );
@@ -261,7 +261,7 @@ fn probe_live_and_suite_share_stack_modes() {
     else {
         panic!("expected live test")
     };
-    assert_eq!(args.mode, Some(StackMode::Dataplane));
+    assert_eq!(args.mode, Some(CliStackMode::Dataplane));
     assert_eq!(args.group, LiveGroup::Rbac);
 
     let Command::Test(TestArgs {
@@ -317,7 +317,7 @@ fn load_defaults_and_overrides_are_typed_and_validated() {
             "1m30s",
         ]),
         LoadArgs {
-            mode: Some(StackMode::Dataplane),
+            mode: Some(CliStackMode::Dataplane),
             engine: LoadEngine::Goose,
             smoke: true,
             users: Some(25),
@@ -430,7 +430,7 @@ fn inspector_is_explicitly_a_debug_command() {
         ]),
         Cli {
             command: Command::Inspect(InspectArgs {
-                mode: Some(StackMode::Dataplane),
+                mode: Some(CliStackMode::Dataplane),
                 method: "tools/list".to_owned(),
                 server_id: Some("server-1".to_owned()),
             }),

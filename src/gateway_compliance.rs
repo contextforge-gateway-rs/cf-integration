@@ -12,8 +12,9 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use cf_integration_platform::StackMode;
+
 use crate::backend_identity::{BACKEND_HEADER, BackendIdentity, sanitized_backend_value};
-use crate::cli::StackMode;
 use crate::gateway::{
     Exchange, GatewayClient, GatewayError, GatewayRequest, HeaderOverride, MCP_PROTOCOL_VERSION,
     MCP_SESSION_ID, RequestCapture,

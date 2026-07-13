@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use url::Url;
 
+use cf_integration_platform::StackMode;
+
 use crate::backend_identity::BackendIdentity;
-use crate::cli::StackMode;
 use crate::mcp::{initialize_with_id_and_version, jsonrpc_with_id, tool_call_args};
 
 const REDACTED: &str = "<redacted>";

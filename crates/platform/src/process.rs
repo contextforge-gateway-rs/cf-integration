@@ -11,7 +11,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::Context;
 
-use crate::error::AppFailure;
+use crate::error::PlatformError;
 
 /// An owned child-process command description.
 #[must_use = "a command specification does nothing until a process runner executes it"]
@@ -153,13 +153,13 @@ impl CapturedOutput {
 /// Injectable child-process execution boundary.
 pub trait ProcessRunner {
     /// Runs with inherited standard output and error.
-    fn run(&self, spec: &CommandSpec) -> Result<(), AppFailure>;
+    fn run(&self, spec: &CommandSpec) -> Result<(), PlatformError>;
 
     /// Runs without blocking the calling async executor thread.
     fn run_async<'a>(
         &'a self,
         spec: &'a CommandSpec,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
         Box::pin(async move { self.run(spec) })
     }
 
@@ -170,7 +170,7 @@ pub trait ProcessRunner {
         &'a self,
         spec: &'a CommandSpec,
         mut cancellation: tokio::sync::watch::Receiver<bool>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
         Box::pin(async move {
             let process = self.run_async(spec);
             tokio::pin!(process);
@@ -184,13 +184,13 @@ pub trait ProcessRunner {
     }
 
     /// Captures standard output while inheriting standard error.
-    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, AppFailure>;
+    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, PlatformError>;
 
     /// Captures standard output and error separately.
-    fn capture_output(&self, spec: &CommandSpec) -> Result<CapturedOutput, AppFailure>;
+    fn capture_output(&self, spec: &CommandSpec) -> Result<CapturedOutput, PlatformError>;
 
     /// Appends standard output and error to one log file.
-    fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> Result<(), AppFailure>;
+    fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> Result<(), PlatformError>;
 }
 
 /// Operating-system-backed process runner.
@@ -198,7 +198,7 @@ pub trait ProcessRunner {
 pub struct SystemProcessRunner;
 
 impl ProcessRunner for SystemProcessRunner {
-    fn run(&self, spec: &CommandSpec) -> Result<(), AppFailure> {
+    fn run(&self, spec: &CommandSpec) -> Result<(), PlatformError> {
         let mut command = command(spec);
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         let mut child = command
@@ -213,7 +213,7 @@ impl ProcessRunner for SystemProcessRunner {
     fn run_async<'a>(
         &'a self,
         spec: &'a CommandSpec,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
         Box::pin(async move {
             let mut command = tokio::process::Command::from(command(spec));
             command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -232,7 +232,7 @@ impl ProcessRunner for SystemProcessRunner {
         &'a self,
         spec: &'a CommandSpec,
         mut cancellation: tokio::sync::watch::Receiver<bool>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AppFailure>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
         Box::pin(async move {
             let mut command = tokio::process::Command::from(command(spec));
             command
@@ -259,7 +259,7 @@ impl ProcessRunner for SystemProcessRunner {
         })
     }
 
-    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, AppFailure> {
+    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, PlatformError> {
         let mut command = command(spec);
         command.stdout(Stdio::piped()).stderr(Stdio::inherit());
         let child = command
@@ -272,7 +272,7 @@ impl ProcessRunner for SystemProcessRunner {
         Ok(output.stdout)
     }
 
-    fn capture_output(&self, spec: &CommandSpec) -> Result<CapturedOutput, AppFailure> {
+    fn capture_output(&self, spec: &CommandSpec) -> Result<CapturedOutput, PlatformError> {
         let mut command = command(spec);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = command
@@ -285,7 +285,7 @@ impl ProcessRunner for SystemProcessRunner {
         Ok(CapturedOutput::new(output.stdout, output.stderr))
     }
 
-    fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> Result<(), AppFailure> {
+    fn run_to_log(&self, spec: &CommandSpec, log_path: &Path) -> Result<(), PlatformError> {
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -321,11 +321,11 @@ fn command(spec: &CommandSpec) -> Command {
     command
 }
 
-fn require_success(spec: &CommandSpec, status: ExitStatus) -> Result<(), AppFailure> {
+fn require_success(spec: &CommandSpec, status: ExitStatus) -> Result<(), PlatformError> {
     if status.success() {
         Ok(())
     } else {
-        Err(AppFailure::child_exit(spec.program.to_owned(), status))
+        Err(PlatformError::child_exit(spec.program.to_owned(), status))
     }
 }
 
@@ -337,8 +337,8 @@ async fn wait_for_cancellation(cancellation: &mut tokio::sync::watch::Receiver<b
     }
 }
 
-fn cancelled_failure(spec: &CommandSpec) -> AppFailure {
-    AppFailure::from(anyhow::anyhow!(
+fn cancelled_failure(spec: &CommandSpec) -> PlatformError {
+    PlatformError::from(anyhow::anyhow!(
         "program {:?} cancelled and reaped",
         spec.program()
     ))

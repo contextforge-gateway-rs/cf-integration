@@ -5,12 +5,13 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
+use cf_integration_platform::StackMode;
+use cf_integration_platform::config::Environment;
 
 use crate::cli::{
-    Cli, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode, ConformanceSuite,
-    LiveGroup, LoadEngine, StackCommand, StackMode, TestCommand, TokenKind,
+    Cli, CliStackMode, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode,
+    ConformanceSuite, LiveGroup, LoadEngine, StackCommand, TestCommand, TokenKind,
 };
-use crate::config::Environment;
 use crate::error::AppFailure;
 
 const STACK_MODE_ENV: &str = "CF_MCP_STACK_MODE";
@@ -261,11 +262,11 @@ fn resolve_compliance_common(
 }
 
 fn resolve_single_mode(
-    explicit: Option<StackMode>,
+    explicit: Option<CliStackMode>,
     environment: &Environment,
 ) -> Result<StackMode> {
     if let Some(mode) = explicit {
-        return Ok(mode);
+        return Ok(mode.into());
     }
     Ok(environment_mode(environment)?.unwrap_or(StackMode::Dataplane))
 }

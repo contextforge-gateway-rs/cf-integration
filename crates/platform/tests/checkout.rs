@@ -9,9 +9,13 @@ use std::process::Command;
 use std::os::unix::fs::symlink;
 
 use anyhow::anyhow;
-use cf_integration::checkout::{CheckoutManager, CheckoutPlan, CheckoutRequest, CheckoutStatus};
-use cf_integration::error::AppFailure;
-use cf_integration::process::{CapturedOutput, CommandSpec, ProcessRunner, SystemProcessRunner};
+use cf_integration_platform::PlatformError;
+use cf_integration_platform::checkout::{
+    CheckoutManager, CheckoutPlan, CheckoutRequest, CheckoutStatus,
+};
+use cf_integration_platform::process::{
+    CapturedOutput, CommandSpec, ProcessRunner, SystemProcessRunner,
+};
 
 #[derive(Default)]
 struct RecordingRunner {
@@ -31,30 +35,30 @@ impl RecordingRunner {
         self.commands.borrow().clone()
     }
 
-    fn record(&self, spec: &CommandSpec) -> Result<(), AppFailure> {
+    fn record(&self, spec: &CommandSpec) -> Result<(), PlatformError> {
         self.commands.borrow_mut().push(spec.clone());
         match self.results.borrow_mut().pop_front().unwrap_or(Ok(())) {
             Ok(()) => Ok(()),
-            Err(message) => Err(AppFailure::Native(anyhow!(message))),
+            Err(message) => Err(PlatformError::Native(anyhow!(message))),
         }
     }
 }
 
 impl ProcessRunner for RecordingRunner {
-    fn run(&self, spec: &CommandSpec) -> Result<(), AppFailure> {
+    fn run(&self, spec: &CommandSpec) -> Result<(), PlatformError> {
         self.record(spec)
     }
 
-    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, AppFailure> {
+    fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, PlatformError> {
         self.record(spec)?;
         Ok(Vec::new())
     }
 
-    fn capture_output(&self, _spec: &CommandSpec) -> Result<CapturedOutput, AppFailure> {
+    fn capture_output(&self, _spec: &CommandSpec) -> Result<CapturedOutput, PlatformError> {
         unreachable!("checkout does not capture output")
     }
 
-    fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> Result<(), AppFailure> {
+    fn run_to_log(&self, _spec: &CommandSpec, _log_path: &Path) -> Result<(), PlatformError> {
         unreachable!("checkout does not redirect output")
     }
 }

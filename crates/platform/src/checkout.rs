@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 
-use crate::error::AppFailure;
+use crate::error::PlatformError;
 use crate::process::{CommandSpec, ProcessRunner};
 
 static GENERATED_REPLACEMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -240,7 +240,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         integration_directory: &Path,
         request: &CheckoutRequest,
         warnings: &mut Vec<String>,
-    ) -> Result<CheckoutStatus, AppFailure> {
+    ) -> Result<CheckoutStatus, PlatformError> {
         if request.is_disabled() {
             return Ok(CheckoutStatus::Skipped);
         }
@@ -250,7 +250,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         })?;
 
         if normalized_paths_equal(&request.directory, integration_directory) {
-            return Err(AppFailure::from(anyhow::anyhow!(
+            return Err(PlatformError::from(anyhow::anyhow!(
                 "checkout path {:?} must be a child of integration state {:?}, not the integration root itself",
                 request.directory,
                 integration_directory
@@ -280,7 +280,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
             .capture_stdout(&origin_match_probe(request))
             .is_err()
         {
-            return Err(AppFailure::from(anyhow::anyhow!(
+            return Err(PlatformError::from(anyhow::anyhow!(
                 "external checkout {:?} origin does not match configured repository {:?}; refusing to mutate the external worktree",
                 request.directory,
                 request.repository
@@ -296,7 +296,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         let remote_branch_exists = (plan.is_generated() || fetch_succeeded)
             && self.runner.run(&remote_branch_probe).is_ok();
         if fetch_succeeded && !remote_branch_exists && !self.verified_nonbranch_ref(request)? {
-            return Err(AppFailure::from(anyhow::anyhow!(
+            return Err(PlatformError::from(anyhow::anyhow!(
                 "configured ref {:?} is not a fetched origin branch, tag, or commit for checkout {:?}",
                 request.reference,
                 request.directory
@@ -316,7 +316,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         Ok(CheckoutStatus::Updated)
     }
 
-    fn verified_nonbranch_ref(&self, request: &CheckoutRequest) -> Result<bool, AppFailure> {
+    fn verified_nonbranch_ref(&self, request: &CheckoutRequest) -> Result<bool, PlatformError> {
         if self.runner.run(&tag_probe(request)).is_ok() {
             return Ok(true);
         }
@@ -330,7 +330,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         &self,
         integration_directory: &Path,
         request: &CheckoutRequest,
-    ) -> Result<(), AppFailure> {
+    ) -> Result<(), PlatformError> {
         let staging = unique_generated_sibling(&request.directory, "replacement")?;
         let backup = unique_generated_sibling(&request.directory, "previous")?;
         validate_generated_checkout_boundary(integration_directory, &staging)?;
@@ -346,7 +346,7 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         if let Err(error) = fs::rename(&request.directory, &backup) {
             remove_path_if_present(&staging)
                 .with_context(|| format!("failed to clean fresh generated clone {staging:?}"))?;
-            return Err(AppFailure::from(anyhow::Error::from(error).context(
+            return Err(PlatformError::from(anyhow::Error::from(error).context(
                 format!(
                     "failed to preserve generated checkout {:?} before replacing its repository",
                     request.directory
@@ -355,14 +355,14 @@ impl<'runner, Runner: ProcessRunner + ?Sized> CheckoutManager<'runner, Runner> {
         }
         if let Err(replace_error) = fs::rename(&staging, &request.directory) {
             if let Err(restore_error) = fs::rename(&backup, &request.directory) {
-                return Err(AppFailure::from(anyhow::anyhow!(
+                return Err(PlatformError::from(anyhow::anyhow!(
                     "failed to install fresh generated checkout {:?}: {replace_error}; failed to restore the previous checkout from {backup:?}: {restore_error}",
                     request.directory
                 )));
             }
             remove_path_if_present(&staging)
                 .with_context(|| format!("failed to clean fresh generated clone {staging:?}"))?;
-            return Err(AppFailure::from(
+            return Err(PlatformError::from(
                 anyhow::Error::from(replace_error).context(format!(
                     "failed to install fresh generated checkout {:?}",
                     request.directory
@@ -479,7 +479,7 @@ fn normalized_paths_equal(first: &Path, second: &Path) -> bool {
     normalize_path(first) == normalize_path(second)
 }
 
-fn unique_generated_sibling(directory: &Path, role: &str) -> Result<PathBuf, AppFailure> {
+fn unique_generated_sibling(directory: &Path, role: &str) -> Result<PathBuf, PlatformError> {
     let parent = directory.parent().ok_or_else(|| {
         anyhow::anyhow!("generated checkout {directory:?} has no parent directory")
     })?;
@@ -500,7 +500,7 @@ fn unique_generated_sibling(directory: &Path, role: &str) -> Result<PathBuf, App
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
             Err(error) => {
-                return Err(AppFailure::from(anyhow::Error::from(error).context(
+                return Err(PlatformError::from(anyhow::Error::from(error).context(
                     format!("failed to inspect generated replacement path {candidate:?}"),
                 )));
             }
@@ -546,7 +546,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 fn validate_generated_checkout_boundary(
     integration_directory: &Path,
     checkout_directory: &Path,
-) -> Result<(), AppFailure> {
+) -> Result<(), PlatformError> {
     let canonical_integration = fs::canonicalize(integration_directory).with_context(|| {
         format!("failed to resolve generated integration directory {integration_directory:?}")
     })?;
@@ -562,7 +562,7 @@ fn validate_generated_checkout_boundary(
         format!("failed to resolve generated checkout path {checkout_directory:?}")
     })?;
     if !canonical_ancestor.starts_with(&canonical_integration) {
-        return Err(AppFailure::from(anyhow::anyhow!(
+        return Err(PlatformError::from(anyhow::anyhow!(
             "generated checkout path {checkout_directory:?} resolves outside integration state {integration_directory:?}; configure the external checkout path explicitly to preserve its worktree"
         )));
     }

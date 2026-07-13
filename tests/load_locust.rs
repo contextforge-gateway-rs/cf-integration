@@ -3,9 +3,10 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 
-use cf_integration::cli::{LoadArgs, LoadEngine, StackMode};
-use cf_integration::config::{AppConfig, Environment};
+use cf_integration::cli::{LoadArgs, LoadEngine};
 use cf_integration::load::{LoadSettings, LocustCommand};
+use cf_integration_platform::StackMode;
+use cf_integration_platform::config::{AppConfig, Environment};
 use tempfile::TempDir;
 
 fn environment(values: &[(&str, &str)]) -> Environment {

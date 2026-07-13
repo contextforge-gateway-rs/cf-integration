@@ -128,7 +128,7 @@ pub enum StackCommand {
 pub struct ModeArgs {
     /// Stack mode; defaults to CF_MCP_STACK_MODE, then dataplane.
     #[arg(long, value_enum)]
-    pub mode: Option<StackMode>,
+    pub mode: Option<CliStackMode>,
 }
 
 /// A command targeting one or both stack modes.
@@ -144,7 +144,7 @@ pub struct ModeSelectionArgs {
 pub struct StackLogsArgs {
     /// Stack mode; defaults to CF_MCP_STACK_MODE, then dataplane.
     #[arg(long, value_enum)]
-    pub mode: Option<StackMode>,
+    pub mode: Option<CliStackMode>,
 
     /// Services whose logs to follow; all services when omitted.
     #[arg(value_name = "SERVICE")]
@@ -153,11 +153,20 @@ pub struct StackLogsArgs {
 
 /// A live stack topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum StackMode {
+pub enum CliStackMode {
     /// Python control plane only.
     Controlplane,
     /// Python control plane routed through the Rust dataplane.
     Dataplane,
+}
+
+impl From<CliStackMode> for cf_integration_platform::StackMode {
+    fn from(mode: CliStackMode) -> Self {
+        match mode {
+            CliStackMode::Controlplane => Self::Controlplane,
+            CliStackMode::Dataplane => Self::Dataplane,
+        }
+    }
 }
 
 /// One or both stack topologies.
@@ -218,7 +227,7 @@ pub enum TestCommand {
 pub struct LoadArgs {
     /// Stack mode; defaults to CF_MCP_STACK_MODE, then dataplane.
     #[arg(long, value_enum)]
-    pub mode: Option<StackMode>,
+    pub mode: Option<CliStackMode>,
 
     /// Load-test engine.
     #[arg(long, value_enum, default_value = "locust")]
@@ -255,7 +264,7 @@ pub enum LoadEngine {
 pub struct LiveArgs {
     /// Stack mode; defaults to CF_MCP_STACK_MODE, then dataplane.
     #[arg(long, value_enum)]
-    pub mode: Option<StackMode>,
+    pub mode: Option<CliStackMode>,
 
     /// Upstream live-test group.
     #[arg(long, value_enum, default_value = "all")]
@@ -399,7 +408,7 @@ pub struct ComplianceReportArgs {
 pub struct InspectArgs {
     /// Stack mode; defaults to CF_MCP_STACK_MODE, then dataplane.
     #[arg(long, value_enum)]
-    pub mode: Option<StackMode>,
+    pub mode: Option<CliStackMode>,
 
     /// Inspector method such as tools/list.
     #[arg(long, default_value = "tools/list")]

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::process::CommandSpec;
+use cf_integration_platform::process::CommandSpec;
 
 /// Pinned official MCP conformance package used as the protocol oracle.
 pub const OFFICIAL_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.1.16";

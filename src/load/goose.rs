@@ -22,9 +22,10 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
 
+use cf_integration_platform::StackMode;
+use cf_integration_platform::config::AppConfig;
+
 use crate::backend_identity::BackendIdentity;
-use crate::cli::StackMode;
-use crate::config::AppConfig;
 use crate::mcp::{
     ACCEPT, PROTOCOL_VERSION, initialize_with_id, jsonrpc_with_id, parse_mcp_body, tool_call_args,
 };
@@ -119,7 +120,7 @@ impl GooseLoadConfig {
 
         let host = normalized_host(
             config
-                .base_url
+                .base_url()
                 .value
                 .to_str()
                 .context("MCP_CLI_BASE_URL must be valid UTF-8")?,

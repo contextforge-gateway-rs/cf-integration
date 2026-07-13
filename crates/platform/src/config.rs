@@ -322,6 +322,54 @@ impl AppConfig {
         Path::new(&self.dataplane_dir.value)
     }
 
+    /// Returns the configured control-plane repository.
+    #[must_use]
+    pub fn controlplane_repo(&self) -> &SourcedValue {
+        &self.controlplane_repo
+    }
+
+    /// Returns the configured control-plane revision.
+    #[must_use]
+    pub fn controlplane_ref(&self) -> &SourcedValue {
+        &self.controlplane_ref
+    }
+
+    /// Returns the configured dataplane repository.
+    #[must_use]
+    pub fn dataplane_repo(&self) -> &SourcedValue {
+        &self.dataplane_repo
+    }
+
+    /// Returns the configured dataplane revision.
+    #[must_use]
+    pub fn dataplane_ref(&self) -> &SourcedValue {
+        &self.dataplane_ref
+    }
+
+    /// Returns the integration Compose project name.
+    #[must_use]
+    pub fn integration_project(&self) -> &SourcedValue {
+        &self.integration_project
+    }
+
+    /// Returns the control-plane Compose project name.
+    #[must_use]
+    pub fn controlplane_project(&self) -> &SourcedValue {
+        &self.controlplane_project
+    }
+
+    /// Returns the JWT signing secret setting.
+    #[must_use]
+    pub fn jwt_secret_key(&self) -> &SourcedValue {
+        &self.jwt_secret_key
+    }
+
+    /// Returns the JWT subject setting.
+    #[must_use]
+    pub fn jwt_subject(&self) -> &SourcedValue {
+        &self.jwt_subject
+    }
+
     /// Returns the resolved control-plane image setting.
     #[must_use]
     pub fn controlplane_image(&self) -> &ImageSetting {
@@ -332,6 +380,66 @@ impl AppConfig {
     #[must_use]
     pub fn dataplane_image(&self) -> &ImageSetting {
         &self.dataplane_image
+    }
+
+    /// Returns the configured dataplane container platform.
+    #[must_use]
+    pub fn dataplane_platform(&self) -> &SourcedValue {
+        &self.dataplane_platform
+    }
+
+    /// Returns the Compose build-mode setting.
+    #[must_use]
+    pub fn compose_build(&self) -> &SourcedValue {
+        &self.compose_build
+    }
+
+    /// Returns the Fast Time server identifier setting.
+    #[must_use]
+    pub fn fast_time_server_id(&self) -> &SourcedValue {
+        &self.fast_time_server_id
+    }
+
+    /// Returns the expected Fast Time image setting.
+    #[must_use]
+    pub fn fast_time_expected_image(&self) -> &SourcedValue {
+        &self.fast_time_expected_image
+    }
+
+    /// Returns the public integration base URL setting.
+    #[must_use]
+    pub fn base_url(&self) -> &SourcedValue {
+        &self.base_url
+    }
+
+    /// Returns the platform administrator email setting.
+    #[must_use]
+    pub fn platform_admin_email(&self) -> &SourcedValue {
+        &self.platform_admin_email
+    }
+
+    /// Returns the private-key password setting.
+    #[must_use]
+    pub fn key_file_password(&self) -> &SourcedValue {
+        &self.key_file_password
+    }
+
+    /// Returns the Locust user-count setting.
+    #[must_use]
+    pub fn locust_users(&self) -> &SourcedValue {
+        &self.locust_users
+    }
+
+    /// Returns the Locust spawn-rate setting.
+    #[must_use]
+    pub fn locust_spawn_rate(&self) -> &SourcedValue {
+        &self.locust_spawn_rate
+    }
+
+    /// Returns the Locust run-time setting.
+    #[must_use]
+    pub fn locust_run_time(&self) -> &SourcedValue {
+        &self.locust_run_time
     }
 
     /// Returns the environment loaded before deriving fallback values.
@@ -553,8 +661,11 @@ fn resolve_repository_root_with_manifest(
         return Ok(candidate.to_path_buf());
     }
 
-    if is_repository_root(manifest_root) {
-        return Ok(manifest_root.to_path_buf());
+    if let Some(candidate) = manifest_root
+        .ancestors()
+        .find(|path| is_repository_root(path))
+    {
+        return Ok(candidate.to_path_buf());
     }
 
     bail!(

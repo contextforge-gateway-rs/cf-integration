@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use cf_integration::backend_identity::BackendIdentity;
-use cf_integration::cli::StackMode;
 use cf_integration::probe::{ProbeConfig, ProbeRequest, ProbeResponse, ProbeTransport, run_probe};
+use cf_integration_platform::StackMode;
 use serde_json::{Value, json};
 
 const INITIALIZE_ID: u64 = 1;

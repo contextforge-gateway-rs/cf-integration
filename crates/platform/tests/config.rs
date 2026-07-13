@@ -2,10 +2,17 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cf_integration::config::{
+use cf_integration_platform::config::{
     AppConfig, ConfigLoad, Environment, ValueOrigin, absolute_path, load_environment,
     resolve_repository_root,
 };
+
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("platform crate should be nested under crates")
+}
 use tempfile::TempDir;
 
 const ROOT_OVERRIDE: &str = "CF_INTEGRATION_ROOT";
@@ -269,7 +276,7 @@ fn repository_root_uses_validated_compile_time_manifest_fallback() {
     let resolved = resolve_repository_root(&Environment::new(), &executable, &cwd)
         .expect("compile-time manifest root should resolve");
 
-    assert_eq!(resolved, Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(resolved, workspace_root());
 }
 
 #[test]

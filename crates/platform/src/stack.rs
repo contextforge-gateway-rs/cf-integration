@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::cli::StackMode;
+use crate::StackMode;
 use crate::compose::ComposeProject;
 use crate::process::CommandSpec;
 

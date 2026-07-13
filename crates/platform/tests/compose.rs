@@ -3,7 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cf_integration::compose::{ComposeProject, validate_integration_contract};
+use cf_integration_platform::compose::{ComposeProject, validate_integration_contract};
+
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("platform crate should be nested under crates")
+}
 use serde_json::json;
 
 const EXPECTED_IMAGE: &str = "ghcr.io/ibm/cfex-mcp-fast-time-server:latest";
@@ -38,8 +45,7 @@ fn run_host_patch(source: &str) -> (std::process::ExitStatus, String) {
     let directory = tempfile::tempdir().expect("create patch test directory");
     let target = directory.path().join("everything-server.ts");
     fs::write(&target, source).expect("write patch test input");
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("docker/patch-mcp-conformance-hosts.mjs");
+    let script = workspace_root().join("docker/patch-mcp-conformance-hosts.mjs");
 
     let output = Command::new("node")
         .arg(script)
@@ -52,8 +58,7 @@ fn run_host_patch(source: &str) -> (std::process::ExitStatus, String) {
 
 #[test]
 fn readme_documents_the_official_conformance_fixture_contract() {
-    let readme = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
-        .expect("read README");
+    let readme = fs::read_to_string(workspace_root().join("README.md")).expect("read README");
     let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
 
     for fact in [
@@ -172,7 +177,7 @@ fn conformance_fixture_is_an_explicit_overlay_and_profile() {
 
 #[test]
 fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root();
     let dockerfile = fs::read_to_string(root.join("docker/mcp-conformance-server.Dockerfile"))
         .expect("read conformance Dockerfile");
     let patch = fs::read_to_string(root.join("docker/patch-mcp-conformance-hosts.mjs"))
