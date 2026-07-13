@@ -1,4 +1,4 @@
-//! Official MCP conformance result and baseline support.
+//! Official MCP conformance result and comparison support.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -70,16 +70,6 @@ impl ConformanceTarget {
             Self::Fixture => "fixture direct",
             Self::Controlplane => "control-plane",
             Self::Dataplane => "dataplane",
-        }
-    }
-
-    /// Expected-failure baseline owner, when the target is a gateway path.
-    #[must_use]
-    pub const fn baseline_target(self) -> Option<BaselineTarget> {
-        match self {
-            Self::Fixture => None,
-            Self::Controlplane => Some(BaselineTarget::Controlplane),
-            Self::Dataplane => Some(BaselineTarget::Dataplane),
         }
     }
 }
@@ -212,177 +202,6 @@ pub fn official_server_command(
         .arg("--verbose")
 }
 
-/// Stack whose independent expected-failure baseline is being validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BaselineTarget {
-    /// Python control-plane gateway.
-    Controlplane,
-    /// Rust dataplane routed through the control plane.
-    Dataplane,
-}
-
-impl BaselineTarget {
-    /// Stable report label.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Controlplane => "control-plane",
-            Self::Dataplane => "dataplane",
-        }
-    }
-}
-
-impl fmt::Display for BaselineTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.label())
-    }
-}
-
-impl From<BaselineTarget> for ConformanceTarget {
-    fn from(target: BaselineTarget) -> Self {
-        match target {
-            BaselineTarget::Controlplane => Self::Controlplane,
-            BaselineTarget::Dataplane => Self::Dataplane,
-        }
-    }
-}
-
-/// Implementation ownership for an expected conformance gap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BaselineClassification {
-    /// Gap exists only in the Python control plane.
-    Controlplane,
-    /// Gap exists only in the Rust dataplane path.
-    Dataplane,
-    /// Gap is shared by both paths.
-    Shared,
-}
-
-/// One fully documented expected failure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BaselineEntry {
-    /// Exact official conformance scenario name.
-    pub scenario: String,
-    /// MCP specification URL, including the relevant page or section.
-    pub spec_reference: String,
-    /// Concrete implementation behavior that differs from the specification.
-    pub implementation_gap: String,
-    /// Tracking issue URL for removing this expected failure.
-    pub linked_issue: String,
-    /// Component that owns the gap.
-    pub classification: BaselineClassification,
-}
-
-/// Rich repository baseline. It is projected before passing it to the official CLI.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Baseline {
-    /// Server scenarios with documented expected failures.
-    #[serde(default)]
-    pub server: Vec<BaselineEntry>,
-}
-
-/// Parses and validates a rich expected-failure baseline.
-pub fn parse_baseline(source: &str, target: BaselineTarget) -> Result<Baseline> {
-    let baseline: Baseline =
-        serde_yaml::from_str(source).context("failed to parse rich conformance baseline YAML")?;
-    validate_baseline(&baseline, target)?;
-    Ok(baseline)
-}
-
-/// Loads and validates a rich expected-failure baseline.
-pub fn load_baseline(path: &Path, target: BaselineTarget) -> Result<Baseline> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read conformance baseline {path:?}"))?;
-    parse_baseline(&source, target)
-        .with_context(|| format!("invalid conformance baseline {path:?}"))
-}
-
-/// Validates metadata, exact scenario names, uniqueness, and component ownership.
-pub fn validate_baseline(baseline: &Baseline, target: BaselineTarget) -> Result<()> {
-    let mut scenarios = BTreeSet::new();
-
-    for entry in &baseline.server {
-        if contains_wildcard(&entry.scenario) {
-            bail!(
-                "baseline scenario {:?} contains a wildcard; expected failures must name one exact scenario",
-                entry.scenario
-            );
-        }
-        validate_scenario_name(&entry.scenario)
-            .with_context(|| format!("invalid baseline scenario {:?}", entry.scenario))?;
-        if !scenarios.insert(entry.scenario.as_str()) {
-            bail!("duplicate baseline scenario {:?}", entry.scenario);
-        }
-        if !is_specification_reference(&entry.spec_reference) {
-            bail!(
-                "baseline scenario {:?} has invalid spec_reference {:?}; expected an MCP specification HTTPS URL",
-                entry.scenario,
-                entry.spec_reference
-            );
-        }
-        if entry.implementation_gap.trim().is_empty() {
-            bail!(
-                "baseline scenario {:?} has an empty implementation_gap",
-                entry.scenario
-            );
-        }
-        if !is_issue_reference(&entry.linked_issue) {
-            bail!(
-                "baseline scenario {:?} has invalid linked_issue {:?}; expected a specific HTTPS issue URL",
-                entry.scenario,
-                entry.linked_issue
-            );
-        }
-        match (target, entry.classification) {
-            (BaselineTarget::Controlplane, BaselineClassification::Dataplane) => bail!(
-                "dataplane-only scenario {:?} cannot appear in the control-plane baseline",
-                entry.scenario
-            ),
-            (BaselineTarget::Dataplane, BaselineClassification::Controlplane) => bail!(
-                "control-plane-only scenario {:?} cannot appear in the dataplane baseline",
-                entry.scenario
-            ),
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct OfficialBaseline<'a> {
-    server: Vec<&'a str>,
-}
-
-/// Renders the rich baseline as the official CLI's `server: [scenario...]` schema.
-pub fn project_official_baseline(baseline: &Baseline, target: BaselineTarget) -> Result<String> {
-    validate_baseline(baseline, target)?;
-    let mut server: Vec<_> = baseline
-        .server
-        .iter()
-        .map(|entry| entry.scenario.as_str())
-        .collect();
-    server.sort_unstable();
-
-    serde_yaml::to_string(&OfficialBaseline { server })
-        .context("failed to serialize official expected-failure projection")
-}
-
-/// Writes an official-compatible expected-failure projection.
-pub fn write_official_baseline_projection(
-    baseline: &Baseline,
-    target: BaselineTarget,
-    path: &Path,
-) -> Result<()> {
-    let projection = project_official_baseline(baseline, target)?;
-    create_parent_directory(path)?;
-    fs::write(path, projection)
-        .with_context(|| format!("failed to write expected-failure projection {path:?}"))
-}
-
 /// Typed official check status with forward-compatible preservation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CheckStatus {
@@ -390,7 +209,7 @@ pub enum CheckStatus {
     Success,
     /// Required check failed.
     Failure,
-    /// Warning; compliant in summaries but failure-like in baseline evaluation.
+    /// Warning emitted by the official framework; compliant in summaries.
     Warning,
     /// Scenario or check was explicitly skipped.
     Skipped,
@@ -557,12 +376,6 @@ impl ConformanceScenarioResult {
             (ScenarioOutcome::FixtureFailure, true) => ScenarioOutcome::NonCompliant,
             (outcome, _) => outcome,
         }
-    }
-
-    fn has_official_failure(&self) -> bool {
-        self.checks
-            .iter()
-            .any(|check| matches!(check.status, CheckStatus::Failure | CheckStatus::Warning))
     }
 }
 
@@ -836,105 +649,6 @@ fn validate_scenario_name(scenario: &str) -> Result<()> {
     Ok(())
 }
 
-fn contains_wildcard(scenario: &str) -> bool {
-    scenario.contains(['*', '?', '[', ']'])
-}
-
-fn is_https_url(value: &str) -> bool {
-    if value.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let Some(authority_and_path) = value.strip_prefix("https://") else {
-        return false;
-    };
-    let Some((authority, path)) = authority_and_path.split_once('/') else {
-        return false;
-    };
-    !authority.is_empty()
-        && authority.contains('.')
-        && !authority.starts_with('.')
-        && !authority.ends_with('.')
-        && !path.is_empty()
-        && !value.contains(['*', '[', ']'])
-}
-
-fn is_specification_reference(value: &str) -> bool {
-    is_https_url(value)
-        && value.starts_with("https://modelcontextprotocol.io/specification/")
-        && value
-            .trim_start_matches("https://modelcontextprotocol.io/specification/")
-            .contains('/')
-}
-
-fn is_issue_reference(value: &str) -> bool {
-    if !is_https_url(value) {
-        return false;
-    }
-    let path = value
-        .strip_prefix("https://")
-        .and_then(|rest| rest.split_once('/').map(|(_, path)| path))
-        .unwrap_or_default()
-        .trim_end_matches('/');
-    let final_segment = path.rsplit('/').next().unwrap_or_default();
-    !final_segment.is_empty()
-        && !matches!(
-            final_segment,
-            "issues" | "issue" | "browse" | "tickets" | "ticket"
-        )
-}
-
-/// Difference between one rich baseline and parsed official results.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BaselineAudit {
-    /// Failures or warnings that are documented in the baseline.
-    pub expected_failures: Vec<String>,
-    /// Failures or warnings absent from the baseline.
-    pub unexpected_failures: Vec<String>,
-    /// Baseline entries whose observed scenario now has no failure or warning.
-    pub stale_entries: Vec<String>,
-    /// Baseline entries not present in the parsed result set.
-    pub unobserved_entries: Vec<String>,
-}
-
-impl BaselineAudit {
-    /// True when the baseline has neither regressions nor maintenance errors.
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        self.unexpected_failures.is_empty()
-            && self.stale_entries.is_empty()
-            && self.unobserved_entries.is_empty()
-    }
-}
-
-/// Compares parsed scenario results using official expected-failure baseline semantics.
-#[must_use]
-pub fn audit_baseline(results: &ConformanceResults, baseline: &Baseline) -> BaselineAudit {
-    let expected: BTreeSet<_> = baseline
-        .server
-        .iter()
-        .map(|entry| entry.scenario.as_str())
-        .collect();
-    let mut audit = BaselineAudit::default();
-
-    for (scenario, result) in &results.scenarios {
-        match (
-            result.has_official_failure(),
-            expected.contains(scenario.as_str()),
-        ) {
-            (true, true) => audit.expected_failures.push(scenario.clone()),
-            (true, false) => audit.unexpected_failures.push(scenario.clone()),
-            (false, true) => audit.stale_entries.push(scenario.clone()),
-            (false, false) => {}
-        }
-    }
-    for scenario in expected {
-        if !results.scenarios.contains_key(scenario) {
-            audit.unobserved_entries.push(scenario.to_owned());
-        }
-    }
-    audit
-}
-
 /// Scenario-level outcome used for direct and routed comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScenarioOutcome {
@@ -986,8 +700,6 @@ pub enum ComparisonClassification {
     GatewaysOnlyFailure,
     /// Direct and both routed paths fail.
     SharedFailure,
-    /// Every observed implementation failure is documented in its independent baseline.
-    ExpectedFailure,
     /// Fixture setup prevented a compliance result.
     FixtureFailure,
     /// Neither path applies.
@@ -997,7 +709,7 @@ pub enum ComparisonClassification {
 }
 
 impl ComparisonClassification {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 11] = [
         Self::AllCompliant,
         Self::FixtureOnlyFailure,
         Self::ControlplaneOnlyFailure,
@@ -1006,7 +718,6 @@ impl ComparisonClassification {
         Self::FixtureAndDataplaneFailure,
         Self::GatewaysOnlyFailure,
         Self::SharedFailure,
-        Self::ExpectedFailure,
         Self::FixtureFailure,
         Self::NotApplicable,
         Self::Ambiguous,
@@ -1024,7 +735,6 @@ impl ComparisonClassification {
             Self::FixtureAndDataplaneFailure => "fixture + dataplane failure",
             Self::GatewaysOnlyFailure => "both gateways only failure",
             Self::SharedFailure => "shared failure",
-            Self::ExpectedFailure => "expected failure",
             Self::FixtureFailure => "fixture failure",
             Self::NotApplicable => "not applicable",
             Self::Ambiguous => "ambiguous",
@@ -1038,7 +748,6 @@ pub fn classify_outcomes(
     fixture: ScenarioOutcome,
     controlplane: ScenarioOutcome,
     dataplane: ScenarioOutcome,
-    expected_failure: bool,
 ) -> ComparisonClassification {
     use ScenarioOutcome::{Ambiguous, FixtureFailure, Missing, NonCompliant, NotApplicable};
 
@@ -1047,11 +756,6 @@ pub fn classify_outcomes(
         || matches!(dataplane, FixtureFailure)
     {
         return ComparisonClassification::FixtureFailure;
-    }
-    if expected_failure
-        && (matches!(controlplane, NonCompliant) || matches!(dataplane, NonCompliant))
-    {
-        return ComparisonClassification::ExpectedFailure;
     }
     if matches!(fixture, Ambiguous | Missing)
         || matches!(controlplane, Ambiguous | Missing)
@@ -1098,8 +802,6 @@ pub struct ScenarioComparison {
     pub dataplane_failed_checks: usize,
     /// Reduced report classification.
     pub classification: ComparisonClassification,
-    /// Baselines that expected an observed failure.
-    pub expected_by: BTreeSet<BaselineTarget>,
     /// Raw official references from both result sets.
     pub spec_references: Vec<SpecReference>,
 }
@@ -1115,21 +817,17 @@ pub struct ComparisonFixtureTrust {
     pub dataplane: bool,
 }
 
-/// Compares direct and routed official results using gateway-specific baselines.
+/// Compares direct and routed official results.
 #[must_use]
 pub fn compare_result_sets(
     fixture: &ConformanceResults,
     controlplane: &ConformanceResults,
     dataplane: &ConformanceResults,
-    controlplane_baseline: &Baseline,
-    dataplane_baseline: &Baseline,
 ) -> Vec<ScenarioComparison> {
     compare_result_sets_with_fixture_trust(
         fixture,
         controlplane,
         dataplane,
-        controlplane_baseline,
-        dataplane_baseline,
         ComparisonFixtureTrust::default(),
     )
 }
@@ -1143,33 +841,11 @@ pub fn compare_result_sets_with_fixture_trust(
     fixture: &ConformanceResults,
     controlplane: &ConformanceResults,
     dataplane: &ConformanceResults,
-    controlplane_baseline: &Baseline,
-    dataplane_baseline: &Baseline,
     trust: ComparisonFixtureTrust,
 ) -> Vec<ScenarioComparison> {
-    let controlplane_expected: BTreeSet<_> = controlplane_baseline
-        .server
-        .iter()
-        .map(|entry| entry.scenario.as_str())
-        .collect();
-    let dataplane_expected: BTreeSet<_> = dataplane_baseline
-        .server
-        .iter()
-        .map(|entry| entry.scenario.as_str())
-        .collect();
     let mut scenarios: BTreeSet<_> = fixture.scenarios.keys().cloned().collect();
     scenarios.extend(controlplane.scenarios.keys().cloned());
     scenarios.extend(dataplane.scenarios.keys().cloned());
-    scenarios.extend(
-        controlplane_expected
-            .iter()
-            .map(|scenario| (*scenario).to_owned()),
-    );
-    scenarios.extend(
-        dataplane_expected
-            .iter()
-            .map(|scenario| (*scenario).to_owned()),
-    );
 
     scenarios
         .into_iter()
@@ -1186,41 +862,6 @@ pub fn compare_result_sets_with_fixture_trust(
             let dataplane_outcome = dataplane_result
                 .map(|result| result.outcome_with_trusted_fixture(trust.dataplane))
                 .unwrap_or(ScenarioOutcome::Missing);
-
-            let mut expected_by = BTreeSet::new();
-            if controlplane_outcome == ScenarioOutcome::NonCompliant
-                && controlplane_expected.contains(scenario.as_str())
-            {
-                expected_by.insert(BaselineTarget::Controlplane);
-            }
-            if dataplane_outcome == ScenarioOutcome::NonCompliant
-                && dataplane_expected.contains(scenario.as_str())
-            {
-                expected_by.insert(BaselineTarget::Dataplane);
-            }
-            let failed_sides = usize::from(fixture_outcome == ScenarioOutcome::NonCompliant)
-                + usize::from(controlplane_outcome == ScenarioOutcome::NonCompliant)
-                + usize::from(dataplane_outcome == ScenarioOutcome::NonCompliant);
-            let evidence_is_complete = !matches!(
-                fixture_outcome,
-                ScenarioOutcome::Missing
-                    | ScenarioOutcome::Ambiguous
-                    | ScenarioOutcome::FixtureFailure
-            ) && !matches!(
-                controlplane_outcome,
-                ScenarioOutcome::Missing
-                    | ScenarioOutcome::Ambiguous
-                    | ScenarioOutcome::FixtureFailure
-            ) && !matches!(
-                dataplane_outcome,
-                ScenarioOutcome::Missing
-                    | ScenarioOutcome::Ambiguous
-                    | ScenarioOutcome::FixtureFailure
-            );
-            let expected = evidence_is_complete
-                && fixture_outcome != ScenarioOutcome::NonCompliant
-                && failed_sides > 0
-                && expected_by.len() == failed_sides;
 
             let mut spec_references = Vec::new();
             if let Some(result) = fixture_result {
@@ -1246,9 +887,7 @@ pub fn compare_result_sets_with_fixture_trust(
                     fixture_outcome,
                     controlplane_outcome,
                     dataplane_outcome,
-                    expected,
                 ),
-                expected_by,
                 spec_references,
             }
         })
@@ -1392,22 +1031,12 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
 
     output.push_str("\n## Scenarios\n\n");
     output.push_str(
-        "| Scenario | Fixture direct | Control plane | Dataplane | Classification | Expected by | Specification references |\n",
+        "| Scenario | Fixture direct | Control plane | Dataplane | Classification | Specification references |\n",
     );
-    output.push_str("|---|---|---|---|---|---|---|\n");
+    output.push_str("|---|---|---|---|---|---|\n");
     let mut scenarios: Vec<_> = report.scenarios.iter().collect();
     scenarios.sort_by(|left, right| left.scenario.cmp(&right.scenario));
     for scenario in scenarios {
-        let expected_by = if scenario.expected_by.is_empty() {
-            "—".to_owned()
-        } else {
-            scenario
-                .expected_by
-                .iter()
-                .map(|target| target.label())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         let references = if scenario.spec_references.is_empty() {
             "—".to_owned()
         } else {
@@ -1419,13 +1048,12 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
                 .join("<br>")
         };
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&scenario.scenario),
             scenario.fixture.label(),
             scenario.controlplane.label(),
             scenario.dataplane.label(),
             scenario.classification.label(),
-            markdown_cell(&expected_by),
             references
         ));
     }

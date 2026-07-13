@@ -3,9 +3,24 @@
 use super::*;
 
 impl<R: ProcessRunner> RuntimeExecutor<R> {
-    pub(super) fn sync_sources(&self) -> AppResult<()> {
-        self.ensure_controlplane()?;
-        self.ensure_dataplane()?;
+    pub(super) fn require_mode_sources(&self, mode: StackMode) -> AppResult<()> {
+        let controlplane_compose = self.config.controlplane_dir().join("docker-compose.yml");
+        if !controlplane_compose.is_file() {
+            return Err(AppFailure::from(anyhow!(
+                "control-plane checkout is unavailable at {}; run `cf-integration stack up --topology {}` first",
+                self.config.controlplane_dir().display(),
+                stack_mode_label(mode)
+            )));
+        }
+        if mode == StackMode::Dataplane
+            && !self.config.dataplane_ref().value.is_empty()
+            && !self.config.dataplane_dir().is_dir()
+        {
+            return Err(AppFailure::from(anyhow!(
+                "dataplane source checkout is unavailable at {}; run `cf-integration stack up --topology dataplane` first",
+                self.config.dataplane_dir().display()
+            )));
+        }
         Ok(())
     }
 

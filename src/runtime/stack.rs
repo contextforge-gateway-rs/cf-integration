@@ -5,11 +5,17 @@ use super::*;
 impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) async fn execute_stack(&self, action: StackAction) -> AppResult<()> {
         match action {
-            StackAction::Up(mode) => self.stack_up(mode).await,
-            StackAction::Down(mode) => self.cleanup(mode, CleanupKind::Down),
-            StackAction::Reset(mode) => self.cleanup(mode, CleanupKind::Reset),
+            StackAction::Up { topology, fresh } => self.stack_up(topology, fresh).await,
+            StackAction::Down { topology, volumes } => self.cleanup(
+                topology,
+                if volumes {
+                    CleanupKind::Reset
+                } else {
+                    CleanupKind::Down
+                },
+            ),
             StackAction::Status(mode) => {
-                self.ensure_mode_sources(mode)?;
+                self.require_mode_sources(mode)?;
                 let command = StackCommandPlan::status(self.compose_project(mode));
                 Ok(self.runner.run(&self.compose_environment(
                     command.command().clone(),
@@ -17,8 +23,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     true,
                 )?)?)
             }
-            StackAction::Logs { mode, services } => {
-                self.ensure_mode_sources(mode)?;
+            StackAction::Logs {
+                topology: mode,
+                services,
+            } => {
+                self.require_mode_sources(mode)?;
                 let command = StackCommandPlan::logs(self.compose_project(mode), services);
                 Ok(self.runner.run(&self.compose_environment(
                     command.command().clone(),
@@ -27,7 +36,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 )?)?)
             }
             StackAction::Config(mode) => {
-                self.ensure_mode_sources(mode)?;
+                self.require_mode_sources(mode)?;
                 if mode == StackMode::Dataplane {
                     self.validate_compose_contract()?;
                 }
@@ -41,7 +50,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         }
     }
 
-    pub(super) async fn stack_up(&self, mode: StackMode) -> AppResult<()> {
+    pub(super) async fn stack_up(&self, mode: StackMode, fresh: bool) -> AppResult<()> {
         self.ensure_mode_sources(mode)?;
         if mode == StackMode::Dataplane {
             self.validate_compose_contract()?;
@@ -50,7 +59,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let build = self.resolve_build(mode)?;
         self.pull_images(mode)?;
         if mode == StackMode::Dataplane
-            && !self.environment_flag("CF_FORCE_FRESH_STACK", false)
+            && !fresh
+            && !self.environment_flag("CF_FORCE_STACK_RESTART", false)
             && !build
             && self.integration_freshness()? == StackFreshness::Current
         {
@@ -58,8 +68,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             return self.wait_for_public_endpoint(mode).await;
         }
 
-        if self.environment_flag("CF_FRESH_STACK", true) {
-            self.cleanup(ComplianceMode::All, CleanupKind::Reset)?;
+        if fresh {
+            self.cleanup(topology_selection(mode), CleanupKind::Reset)?;
         }
         self.ensure_other_stack_stopped(mode)?;
         if mode == StackMode::Controlplane {
@@ -579,7 +589,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         };
         if self.project_has_running_containers(other) {
             return Err(AppFailure::from(anyhow!(
-                "the {label} stack is running on the same host ports; run `cf-integration stack down --mode all` first"
+                "the {label} stack is running on the same host ports; run `cf-integration stack down --topology all` first"
             )));
         }
         Ok(())
@@ -595,9 +605,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         .is_some_and(|value| !value.is_empty())
     }
 
-    pub(super) fn cleanup(&self, selection: ComplianceMode, kind: CleanupKind) -> AppResult<()> {
+    pub(super) fn cleanup(&self, selection: TopologySelection, kind: CleanupKind) -> AppResult<()> {
         let mut last_failure = None;
-        for mode in selected_modes(selection) {
+        for mode in selected_topologies(selection) {
             if self
                 .config
                 .controlplane_dir()

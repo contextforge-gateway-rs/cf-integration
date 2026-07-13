@@ -62,15 +62,15 @@ fn readme_documents_the_official_conformance_fixture_contract() {
     let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
 
     for fact in [
-        "official TypeScript conformance server",
+        "official TypeScript fixture",
         "Fast Time remains",
-        "`--server-id` bypasses automatic provisioning",
+        "runs fixture-direct, controlplane, and dataplane lanes",
         "794dcab99ed1ef2b89607be9999574140ea5c96e",
-        "`2026-07-28` MCP revision",
+        "defaults to MCP `2026-07-28`",
         "loopback `MCP_CLI_BASE_URL`",
-        "`MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` bypass automatic provisioning",
-        "fresh conformance-run completion",
-        "fixture provenance mismatch prevents comparison",
+        "passes an empty expected-failure file",
+        "records raw failures without suppression",
+        "same official fixture",
     ] {
         assert!(normalized.contains(fact), "README must document: {fact}");
     }

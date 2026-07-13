@@ -8,12 +8,10 @@ publish.workspace = true
 
 [dependencies]
 cf-integration-platform.workspace = true
-cf-integration-mcp.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 tokio.workspace = true
 url.workspace = true
 

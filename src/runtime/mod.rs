@@ -8,31 +8,18 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use async_trait::async_trait;
-use cf_integration_compliance::ConformanceSuite;
 use cf_integration_compliance::conformance::{
-    Baseline, BaselineAudit, BaselineTarget, ComparisonFixtureTrust, ComparisonReport,
-    ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata, ConformanceTarget,
-    audit_baseline, compare_result_sets_with_fixture_trust, expected_server_scenarios,
-    is_trusted_official_fixture, load_baseline, load_server_results, official_server_command,
-    validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
-    write_official_baseline_projection,
+    ComparisonFixtureTrust, ComparisonReport, ConformanceFixtureMetadata, ConformanceResults,
+    ConformanceRunMetadata, ConformanceTarget, compare_result_sets_with_fixture_trust,
+    expected_server_scenarios, is_trusted_official_fixture, load_server_results,
+    official_server_command, validate_server_scenario_set, write_comparison_report,
 };
 use cf_integration_compliance::conformance_fixture::{
     ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
     OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVICE,
 };
-use cf_integration_compliance::coverage::{
-    CoverageOverlay, ModeCoverageEvidence, PINNED_SOURCE_COMMIT, PINNED_SOURCE_REPOSITORY,
-    SPEC_VERSION as COVERAGE_SPEC_VERSION, enrich_overlay_results, extract_catalog_from_checkout,
-    parse_coverage_overlay, write_coverage_report,
-};
-use cf_integration_compliance::gateway_compliance::{
-    GATEWAY_SPEC_VERSION, GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance,
-    write_gateway_reports,
-};
 use cf_integration_load::{
-    GooseLoadConfig, LoadEngine, LoadRequest, LoadSettings, LocustCommand, audit_locust_reports,
+    GooseLoadConfig, LoadEngine, LoadSettings, LocustCommand, audit_locust_reports,
 };
 use cf_integration_mcp::GatewayTopology;
 use cf_integration_mcp::auth_proxy::AuthProxy;
@@ -51,10 +38,10 @@ use cf_integration_platform::stack::{
 use cf_integration_platform::{PlatformError, StackMode};
 
 use crate::app::{
-    Action, ActionExecutor, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs,
-    StackAction, TestAction,
+    Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, selected_topologies,
+    topology_selection,
 };
-use crate::cli::{ComplianceMode, LiveGroup, TokenKind as CliTokenKind};
+use crate::cli::{TokenKind as CliTokenKind, TopologySelection};
 use crate::error::AppFailure;
 use crate::token::{TokenKind, make_token};
 
@@ -69,9 +56,8 @@ mod inspect;
 mod reports;
 mod sources;
 mod stack;
+mod workloads;
 
-#[cfg(test)]
-use compliance::*;
 use inspect::*;
 use reports::*;
 
@@ -95,23 +81,22 @@ impl<R> RuntimeExecutor<R> {
     }
 }
 
-#[async_trait(?Send)]
-impl<R> ActionExecutor for RuntimeExecutor<R>
-where
-    R: ProcessRunner,
-{
-    async fn execute(&mut self, action: Action) -> AppResult<()> {
+impl<R: ProcessRunner> RuntimeExecutor<R> {
+    /// Executes one fully resolved operation.
+    pub async fn execute(&mut self, action: Action) -> AppResult<()> {
         match action {
-            Action::Sync => self.sync_sources(),
             Action::Stack(action) => self.execute_stack(action).await,
-            Action::Token { kind, server_id } => self.print_token(kind, server_id),
-            Action::Test(action) => self.execute_test(action).await,
-            Action::Compliance(action) => self.execute_compliance(action).await,
-            Action::Inspect {
-                mode,
+            Action::Probe(topology) => self.run_probe(topology).await,
+            Action::Load(args) => self.run_load(args).await,
+            Action::Conformance(action) => self.execute_conformance(action).await,
+            Action::Debug(DebugAction::Token { kind, server_id }) => {
+                self.print_token(kind, server_id)
+            }
+            Action::Debug(DebugAction::Inspect {
+                topology,
                 method,
                 server_id,
-            } => self.inspect(mode, &method, server_id.as_deref()).await,
+            }) => self.inspect(topology, &method, server_id.as_deref()).await,
         }
     }
 }
@@ -153,6 +138,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         {
             return Ok(token.to_owned());
         }
+        self.generated_bearer_token(mode, server_id)
+    }
+
+    fn generated_bearer_token(&self, mode: StackMode, server_id: &str) -> AppResult<String> {
         let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
         let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         let kind = match mode {
@@ -168,21 +157,6 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let secret = required_text(&self.config.jwt_secret_key().value, "JWT_SECRET_KEY")?;
         let subject = required_text(&self.config.jwt_subject().value, "MCP_JWT_SUBJECT")?;
         make_token(secret, subject, TokenKind::Admin).map_err(AppFailure::from)
-    }
-}
-
-const fn mode_selection(mode: StackMode) -> ComplianceMode {
-    match mode {
-        StackMode::Controlplane => ComplianceMode::Controlplane,
-        StackMode::Dataplane => ComplianceMode::Dataplane,
-    }
-}
-
-fn selected_modes(selection: ComplianceMode) -> Vec<StackMode> {
-    match selection {
-        ComplianceMode::Controlplane => vec![StackMode::Controlplane],
-        ComplianceMode::Dataplane => vec![StackMode::Dataplane],
-        ComplianceMode::All => vec![StackMode::Controlplane, StackMode::Dataplane],
     }
 }
 
@@ -265,5 +239,3 @@ const fn gateway_topology(mode: StackMode) -> GatewayTopology {
         StackMode::Dataplane => GatewayTopology::Dataplane,
     }
 }
-
-mod tests;

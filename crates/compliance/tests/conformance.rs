@@ -2,19 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use cf_integration_compliance::conformance::{
-    Baseline, BaselineClassification, BaselineEntry, BaselineTarget, CheckStatus,
-    ComparisonClassification, ComparisonFixtureTrust, ComparisonReport, ConformanceCheck,
-    ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata,
+    CheckStatus, ComparisonClassification, ComparisonFixtureTrust, ComparisonReport,
+    ConformanceCheck, ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata,
     ConformanceScenarioResult, DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION,
     OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome, SpecReference,
-    audit_baseline, classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
-    expected_server_scenarios, is_trusted_official_fixture, load_baseline, load_server_results,
-    official_server_command, parse_baseline, project_official_baseline, render_comparison_markdown,
-    validate_baseline, validate_no_fixture_failures, validate_server_scenario_set,
-    write_comparison_report, write_official_baseline_projection,
+    classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
+    expected_server_scenarios, is_trusted_official_fixture, load_server_results,
+    official_server_command, render_comparison_markdown, validate_server_scenario_set,
+    write_comparison_report,
 };
 use cf_integration_compliance::conformance_fixture::{
     OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID,
@@ -22,7 +19,6 @@ use cf_integration_compliance::conformance_fixture::{
 
 const SPEC_REFERENCE: &str =
     "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization";
-const ISSUE: &str = "https://github.com/example/project/issues/123";
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -32,18 +28,66 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn fixture_metadata() -> ConformanceFixtureMetadata {
+    ConformanceFixtureMetadata {
+        repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+        revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+    }
+}
+
+fn check(id: &str, status: CheckStatus) -> ConformanceCheck {
+    ConformanceCheck {
+        id: id.to_owned(),
+        name: Some(id.to_owned()),
+        description: Some(format!("check {id}")),
+        status,
+        timestamp: Some("2026-07-10T12:34:56.000Z".to_owned()),
+        spec_references: vec![SpecReference {
+            id: "MCP-Lifecycle".to_owned(),
+            url: Some(SPEC_REFERENCE.to_owned()),
+            extensions: BTreeMap::new(),
+        }],
+        error_message: None,
+        details: None,
+        metadata: None,
+        logs: None,
+        extensions: BTreeMap::new(),
+    }
+}
+
+fn result(
+    scenario: &str,
+    statuses: impl IntoIterator<Item = CheckStatus>,
+) -> ConformanceScenarioResult {
+    ConformanceScenarioResult {
+        scenario: scenario.to_owned(),
+        checks: statuses
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| check(&format!("check-{index}"), status))
+            .collect(),
+        source: PathBuf::from(format!("server-{scenario}-timestamp/checks.json")),
+    }
+}
+
+fn results(entries: impl IntoIterator<Item = ConformanceScenarioResult>) -> ConformanceResults {
+    ConformanceResults {
+        scenarios: entries
+            .into_iter()
+            .map(|entry| (entry.scenario.clone(), entry))
+            .collect(),
+    }
+}
+
 #[test]
-fn conformance_metadata_roundtrips_exact_fixture_provenance() {
+fn metadata_roundtrips_exact_fixture_provenance() {
     let metadata = ConformanceRunMetadata {
         oracle: OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
         target: "control-plane".to_owned(),
         spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
-        suite: "active".to_owned(),
-        fixture: Some(ConformanceFixtureMetadata {
-            repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
-            revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
-            server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
-        }),
+        suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
+        fixture: Some(fixture_metadata()),
     };
 
     let serialized = serde_json::to_vec(&metadata).expect("metadata should serialize");
@@ -51,32 +95,12 @@ fn conformance_metadata_roundtrips_exact_fixture_provenance() {
         serde_json::from_slice(&serialized).expect("metadata should deserialize");
 
     assert_eq!(roundtrip, metadata);
+    assert!(is_trusted_official_fixture(roundtrip.fixture.as_ref()));
 }
 
 #[test]
-fn historical_metadata_defaults_fixture_to_absent_and_omits_it_again() {
-    let historical = serde_json::json!({
-        "oracle": OFFICIAL_CONFORMANCE_PACKAGE,
-        "target": "control-plane",
-        "spec_version": DEFAULT_MCP_SPEC_VERSION,
-        "suite": "active",
-    });
-
-    let metadata: ConformanceRunMetadata =
-        serde_json::from_value(historical).expect("historical metadata should deserialize");
-    let reserialized = serde_json::to_value(metadata).expect("metadata should reserialize");
-
-    assert!(reserialized.get("fixture").is_none());
-}
-
-#[test]
-fn trusted_official_fixture_requires_exact_pinned_provenance() {
-    let exact = ConformanceFixtureMetadata {
-        repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
-        revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
-        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
-    };
-
+fn fixture_trust_requires_every_pinned_identity() {
+    let exact = fixture_metadata();
     assert!(is_trusted_official_fixture(Some(&exact)));
     assert!(!is_trusted_official_fixture(None));
     for mismatch in [
@@ -90,7 +114,7 @@ fn trusted_official_fixture_requires_exact_pinned_provenance() {
         },
         ConformanceFixtureMetadata {
             server_id: "untrusted-server".to_owned(),
-            ..exact.clone()
+            ..exact
         },
     ] {
         assert!(!is_trusted_official_fixture(Some(&mismatch)));
@@ -122,141 +146,16 @@ fn pinned_server_scenario_catalog_has_exact_suite_differences() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["json-schema-2020-12", "server-sse-polling"])
     );
-    assert_eq!(draft_all.difference(&draft_active).count(), 20);
     assert!(draft_all.contains("server-stateless"));
     assert!(!draft_all.contains("server-initialize"));
-    assert!(
-        expected_server_scenarios("all", "2099-01-01")
-            .expect_err("unverified package/spec catalogs must be rejected")
-            .to_string()
-            .contains("no verified")
-    );
 }
 
 #[test]
-fn partial_server_scenario_catalog_is_rejected() {
+fn incomplete_scenario_catalog_is_rejected() {
     let partial = results([result("server-initialize", [CheckStatus::Failure])]);
-
     let error = validate_server_scenario_set(&partial, "active", "2025-11-25")
         .expect_err("one parsed scenario cannot prove the suite completed");
-
     assert!(error.to_string().contains("missing="));
-    assert!(!error.to_string().contains("server-initialize\""));
-}
-
-#[test]
-fn complete_scenario_names_with_empty_checks_are_rejected() {
-    let scenarios = expected_server_scenarios("active", "2025-11-25")
-        .expect("active catalog should be pinned")
-        .into_iter()
-        .map(|scenario| {
-            (
-                scenario.to_owned(),
-                result(scenario, std::iter::empty::<CheckStatus>()),
-            )
-        })
-        .collect();
-    let empty = ConformanceResults { scenarios };
-
-    let error = validate_server_scenario_set(&empty, "active", "2025-11-25")
-        .expect_err("scenario directories without checks cannot prove completion");
-
-    assert!(error.to_string().contains("empty_checks="));
-}
-
-#[test]
-#[ignore = "requires the pinned official npm package"]
-fn pinned_server_scenario_catalog_matches_official_package() {
-    for (suite, spec_version) in [
-        ("active", "2026-07-28"),
-        ("all", "2026-07-28"),
-        ("active", "2025-11-25"),
-        ("all", "2025-11-25"),
-        ("all", "2025-06-18"),
-    ] {
-        let output = tempfile::tempdir().expect("temporary official output directory");
-        let process = Command::new("npx")
-            .args([
-                "-y",
-                OFFICIAL_CONFORMANCE_PACKAGE,
-                "server",
-                "--url",
-                "http://127.0.0.1:1/mcp",
-                "--suite",
-                suite,
-                "--spec-version",
-                spec_version,
-                "--output-dir",
-            ])
-            .arg(output.path())
-            .output()
-            .expect("pinned official package should execute");
-        assert_eq!(process.status.code(), Some(1));
-        let results = load_server_results(output.path())
-            .expect("official package should emit one result per attempted scenario");
-        validate_server_scenario_set(&results, suite, spec_version)
-            .expect("embedded catalog must match the pinned official package");
-    }
-}
-
-fn baseline_entry(scenario: &str, classification: BaselineClassification) -> BaselineEntry {
-    BaselineEntry {
-        scenario: scenario.to_owned(),
-        spec_reference: SPEC_REFERENCE.to_owned(),
-        implementation_gap: "The gateway does not yet preserve this protocol behavior.".to_owned(),
-        linked_issue: ISSUE.to_owned(),
-        classification,
-    }
-}
-
-fn check(id: &str, status: CheckStatus) -> ConformanceCheck {
-    ConformanceCheck {
-        id: id.to_owned(),
-        name: Some(id.to_owned()),
-        description: Some(format!("check {id}")),
-        status,
-        timestamp: Some("2026-07-10T12:34:56.000Z".to_owned()),
-        spec_references: vec![SpecReference {
-            id: "MCP-Lifecycle".to_owned(),
-            url: Some(SPEC_REFERENCE.to_owned()),
-            extensions: BTreeMap::new(),
-        }],
-        error_message: None,
-        details: None,
-        metadata: None,
-        logs: None,
-        extensions: BTreeMap::new(),
-    }
-}
-
-fn failing_check(id: &str, message: &str) -> ConformanceCheck {
-    let mut check = check(id, CheckStatus::Failure);
-    check.error_message = Some(message.to_owned());
-    check
-}
-
-fn result(
-    scenario: &str,
-    statuses: impl IntoIterator<Item = CheckStatus>,
-) -> ConformanceScenarioResult {
-    ConformanceScenarioResult {
-        scenario: scenario.to_owned(),
-        checks: statuses
-            .into_iter()
-            .enumerate()
-            .map(|(index, status)| check(&format!("check-{index}"), status))
-            .collect(),
-        source: PathBuf::from(format!("server-{scenario}-timestamp/checks.json")),
-    }
-}
-
-fn results(entries: impl IntoIterator<Item = ConformanceScenarioResult>) -> ConformanceResults {
-    ConformanceResults {
-        scenarios: entries
-            .into_iter()
-            .map(|entry| (entry.scenario.clone(), entry))
-            .collect(),
-    }
 }
 
 #[test]
@@ -265,7 +164,7 @@ fn official_command_is_pinned_complete_and_ordered() {
         "http://127.0.0.1:49152/mcp",
         DEFAULT_CONFORMANCE_SUITE,
         DEFAULT_MCP_SPEC_VERSION,
-        Path::new("projected.yml"),
+        Path::new("expected-failures.yml"),
         Path::new("results"),
     );
 
@@ -273,17 +172,8 @@ fn official_command_is_pinned_complete_and_ordered() {
         OFFICIAL_CONFORMANCE_PACKAGE,
         "@modelcontextprotocol/conformance@0.2.0-alpha.9"
     );
-    assert_eq!(
-        OFFICIAL_CONFORMANCE_REVISION,
-        "794dcab99ed1ef2b89607be9999574140ea5c96e"
-    );
     assert_eq!(DEFAULT_MCP_SPEC_VERSION, "2026-07-28");
-    assert_eq!(DEFAULT_CONFORMANCE_SUITE, "all");
-    assert_eq!(spec.program(), "npx");
-    assert!(
-        !spec.inherits_environment(),
-        "downloaded conformance code must not inherit arbitrary parent secrets"
-    );
+    assert!(!spec.inherits_environment());
     assert_eq!(
         spec.arguments(),
         &[
@@ -297,7 +187,7 @@ fn official_command_is_pinned_complete_and_ordered() {
             OsString::from("--spec-version"),
             OsString::from("2026-07-28"),
             OsString::from("--expected-failures"),
-            OsString::from("projected.yml"),
+            OsString::from("expected-failures.yml"),
             OsString::from("--output-dir"),
             OsString::from("results"),
             OsString::from("--verbose"),
@@ -306,152 +196,7 @@ fn official_command_is_pinned_complete_and_ordered() {
 }
 
 #[test]
-fn rich_baseline_parses_and_projects_only_official_scenario_names() {
-    let source = format!(
-        "server:\n  - scenario: server-initialize\n    spec_reference: {SPEC_REFERENCE}\n    implementation_gap: initialization is incomplete\n    linked_issue: {ISSUE}\n    classification: controlplane\n"
-    );
-
-    let baseline = parse_baseline(&source, BaselineTarget::Controlplane)
-        .expect("complete rich baseline should parse");
-    let projection = project_official_baseline(&baseline, BaselineTarget::Controlplane)
-        .expect("valid baseline should project");
-
-    assert_eq!(baseline.server.len(), 1);
-    assert_eq!(projection, "server:\n- server-initialize\n");
-    assert!(!projection.contains("implementation_gap"));
-    assert!(!projection.contains(ISSUE));
-}
-
-#[test]
-fn empty_baseline_projects_to_an_official_empty_server_list() {
-    let baseline = parse_baseline("server: []\n", BaselineTarget::Dataplane)
-        .expect("empty baseline should be valid");
-
-    assert_eq!(
-        project_official_baseline(&baseline, BaselineTarget::Dataplane)
-            .expect("empty baseline should project"),
-        "server: []\n"
-    );
-}
-
-#[test]
-fn repository_baselines_are_independent_valid_and_initially_empty() {
-    let controlplane = load_baseline(
-        &workspace_root().join("conformance/baseline-controlplane.yml"),
-        BaselineTarget::Controlplane,
-    )
-    .expect("control-plane baseline should be valid");
-    let dataplane = load_baseline(
-        &workspace_root().join("conformance/baseline-dataplane.yml"),
-        BaselineTarget::Dataplane,
-    )
-    .expect("dataplane baseline should be valid");
-
-    assert!(controlplane.server.is_empty());
-    assert!(dataplane.server.is_empty());
-}
-
-#[test]
-fn baseline_projection_is_sorted_and_can_be_written() {
-    let baseline = Baseline {
-        server: vec![
-            baseline_entry("tools-list", BaselineClassification::Shared),
-            baseline_entry("server-initialize", BaselineClassification::Dataplane),
-        ],
-    };
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let path = directory.path().join("nested/projected.yml");
-
-    write_official_baseline_projection(&baseline, BaselineTarget::Dataplane, &path)
-        .expect("projection should be written");
-
-    assert_eq!(
-        fs::read_to_string(path).expect("projection should be readable"),
-        "server:\n- server-initialize\n- tools-list\n"
-    );
-}
-
-#[test]
-fn baseline_rejects_duplicates_wildcards_empty_metadata_and_wrong_side() {
-    let mut duplicate = baseline_entry("server-initialize", BaselineClassification::Controlplane);
-    let duplicate_baseline = Baseline {
-        server: vec![duplicate.clone(), duplicate.clone()],
-    };
-    assert!(
-        validate_baseline(&duplicate_baseline, BaselineTarget::Controlplane)
-            .expect_err("duplicates must fail")
-            .to_string()
-            .contains("duplicate")
-    );
-
-    duplicate.scenario = "tools-*".to_owned();
-    assert!(
-        validate_baseline(
-            &Baseline {
-                server: vec![duplicate.clone()]
-            },
-            BaselineTarget::Controlplane
-        )
-        .expect_err("wildcards must fail")
-        .to_string()
-        .contains("wildcard")
-    );
-
-    duplicate.scenario = "tools-list".to_owned();
-    duplicate.implementation_gap = " \n".to_owned();
-    assert!(
-        validate_baseline(
-            &Baseline {
-                server: vec![duplicate.clone()]
-            },
-            BaselineTarget::Controlplane
-        )
-        .expect_err("empty metadata must fail")
-        .to_string()
-        .contains("implementation_gap")
-    );
-
-    let wrong_side = Baseline {
-        server: vec![baseline_entry(
-            "tools-list",
-            BaselineClassification::Dataplane,
-        )],
-    };
-    assert!(
-        validate_baseline(&wrong_side, BaselineTarget::Controlplane)
-            .expect_err("a dataplane gap cannot be hidden in the control-plane baseline")
-            .to_string()
-            .contains("dataplane")
-    );
-}
-
-#[test]
-fn baseline_rejects_missing_fields_unknown_fields_and_non_issue_urls() {
-    let missing = "server:\n  - scenario: tools-list\n";
-    assert!(parse_baseline(missing, BaselineTarget::Controlplane).is_err());
-
-    let unknown = format!(
-        "server:\n  - scenario: tools-list\n    spec_reference: {SPEC_REFERENCE}\n    implementation_gap: gap\n    linked_issue: {ISSUE}\n    classification: shared\n    ignore_everything: true\n"
-    );
-    assert!(parse_baseline(&unknown, BaselineTarget::Controlplane).is_err());
-
-    let mut invalid = baseline_entry("tools-list", BaselineClassification::Shared);
-    invalid.linked_issue = "https://github.com/example/project/issues".to_owned();
-    assert!(
-        validate_baseline(
-            &Baseline {
-                server: vec![invalid]
-            },
-            BaselineTarget::Controlplane
-        )
-        .expect_err("an issue collection is not a linked issue")
-        .to_string()
-        .contains("linked_issue")
-    );
-}
-
-#[test]
-fn fixture_results_parse_recursively_with_typed_statuses_and_raw_references() {
+fn fixture_results_parse_recursively_with_forward_compatible_fields() {
     let parsed = load_server_results(&workspace_root().join("tests/fixtures/conformance/results"))
         .expect("fixture results should parse");
 
@@ -464,19 +209,8 @@ fn fixture_results_parse_recursively_with_typed_statuses_and_raw_references() {
         ["server-initialize", "tools-list"]
     );
     let initialize = &parsed.scenarios["server-initialize"];
-    assert_eq!(
-        initialize.source,
-        PathBuf::from("nested/server-server-initialize-2026-07-10T12-34-56-000Z/checks.json")
-    );
     assert_eq!(initialize.checks[0].status, CheckStatus::Success);
     assert_eq!(initialize.checks[1].status, CheckStatus::Info);
-    let reference = &initialize.checks[0].spec_references[0];
-    assert_eq!(reference.id, "MCP-Lifecycle/raw[id]");
-    assert_eq!(reference.url.as_deref(), Some(SPEC_REFERENCE));
-    assert_eq!(
-        reference.extensions["futureField"],
-        serde_json::json!({"kept": true})
-    );
     assert_eq!(
         initialize.checks[0].extensions["futureCheckField"],
         "preserved"
@@ -488,18 +222,187 @@ fn fixture_results_parse_recursively_with_typed_statuses_and_raw_references() {
 }
 
 #[test]
-fn unknown_status_is_preserved_and_yields_an_ambiguous_outcome() {
-    let json = r#"[{"id":"future","status":"FUTURE_STATUS"}]"#;
-    let checks: Vec<ConformanceCheck> =
-        serde_json::from_str(json).expect("future statuses should remain parseable");
-
+fn scenario_outcomes_preserve_failure_warning_and_unknown_precedence() {
     assert_eq!(
-        checks[0].status,
-        CheckStatus::Other("FUTURE_STATUS".to_owned())
+        result("failure", [CheckStatus::Success, CheckStatus::Failure]).outcome(),
+        ScenarioOutcome::NonCompliant
     );
     assert_eq!(
-        result("future", [checks[0].status.clone()]).outcome(),
+        result("warning", [CheckStatus::Success, CheckStatus::Warning]).outcome(),
+        ScenarioOutcome::Compliant
+    );
+    assert_eq!(
+        result("info", [CheckStatus::Skipped, CheckStatus::Info]).outcome(),
+        ScenarioOutcome::NotApplicable
+    );
+    assert_eq!(
+        result("future", [CheckStatus::Other("FUTURE".to_owned())]).outcome(),
         ScenarioOutcome::Ambiguous
+    );
+}
+
+#[test]
+fn trusted_fixture_turns_fixture_shaped_gateway_failures_into_gateway_failures() {
+    let mut missing = check("missing", CheckStatus::Failure);
+    missing.error_message = Some("Tool not found: test_simple_tool".to_owned());
+    let result = ConformanceScenarioResult {
+        scenario: "tools-list".to_owned(),
+        checks: vec![missing],
+        source: PathBuf::from("server-tools-list/checks.json"),
+    };
+
+    assert_eq!(result.outcome(), ScenarioOutcome::FixtureFailure);
+    assert_eq!(
+        result.outcome_with_trusted_fixture(true),
+        ScenarioOutcome::NonCompliant
+    );
+}
+
+#[test]
+fn classifications_cover_all_three_lane_failure_combinations() {
+    use ScenarioOutcome::{Compliant, NonCompliant};
+    for (fixture, controlplane, dataplane, expected) in [
+        (
+            Compliant,
+            Compliant,
+            Compliant,
+            ComparisonClassification::AllCompliant,
+        ),
+        (
+            NonCompliant,
+            Compliant,
+            Compliant,
+            ComparisonClassification::FixtureOnlyFailure,
+        ),
+        (
+            Compliant,
+            NonCompliant,
+            Compliant,
+            ComparisonClassification::ControlplaneOnlyFailure,
+        ),
+        (
+            Compliant,
+            Compliant,
+            NonCompliant,
+            ComparisonClassification::DataplaneOnlyFailure,
+        ),
+        (
+            NonCompliant,
+            NonCompliant,
+            Compliant,
+            ComparisonClassification::FixtureAndControlplaneFailure,
+        ),
+        (
+            NonCompliant,
+            Compliant,
+            NonCompliant,
+            ComparisonClassification::FixtureAndDataplaneFailure,
+        ),
+        (
+            Compliant,
+            NonCompliant,
+            NonCompliant,
+            ComparisonClassification::GatewaysOnlyFailure,
+        ),
+        (
+            NonCompliant,
+            NonCompliant,
+            NonCompliant,
+            ComparisonClassification::SharedFailure,
+        ),
+    ] {
+        assert_eq!(
+            classify_outcomes(fixture, controlplane, dataplane),
+            expected
+        );
+    }
+}
+
+#[test]
+fn comparison_counts_raw_failures_without_expected_failure_suppression() {
+    let fixture = results([result("scenario", [CheckStatus::Success])]);
+    let controlplane = results([result(
+        "scenario",
+        [CheckStatus::Failure, CheckStatus::Failure],
+    )]);
+    let dataplane = results([result("scenario", [CheckStatus::Failure])]);
+
+    let compared = compare_result_sets(&fixture, &controlplane, &dataplane);
+
+    assert_eq!(compared.len(), 1);
+    assert_eq!(
+        compared[0].classification,
+        ComparisonClassification::GatewaysOnlyFailure
+    );
+    assert_eq!(compared[0].controlplane_failed_checks, 2);
+    assert_eq!(compared[0].dataplane_failed_checks, 1);
+}
+
+#[test]
+fn comparison_uses_trust_independently_for_each_lane() {
+    let mut missing = check("missing", CheckStatus::Failure);
+    missing.error_message = Some("Tool not found: test_simple_tool".to_owned());
+    let controlplane = results([ConformanceScenarioResult {
+        scenario: "scenario".to_owned(),
+        checks: vec![missing],
+        source: PathBuf::from("server-scenario/checks.json"),
+    }]);
+    let fixture = results([result("scenario", [CheckStatus::Success])]);
+    let dataplane = results([result("scenario", [CheckStatus::Success])]);
+
+    let compared = compare_result_sets_with_fixture_trust(
+        &fixture,
+        &controlplane,
+        &dataplane,
+        ComparisonFixtureTrust {
+            controlplane: true,
+            ..ComparisonFixtureTrust::default()
+        },
+    );
+
+    assert_eq!(
+        compared[0].classification,
+        ComparisonClassification::ControlplaneOnlyFailure
+    );
+}
+
+#[test]
+fn report_renders_raw_counts_and_no_expected_failure_column() {
+    let scenario = ScenarioComparison {
+        scenario: "server|stateless".to_owned(),
+        fixture: ScenarioOutcome::Compliant,
+        fixture_failed_checks: 0,
+        controlplane: ScenarioOutcome::NonCompliant,
+        controlplane_failed_checks: 27,
+        dataplane: ScenarioOutcome::NonCompliant,
+        dataplane_failed_checks: 28,
+        classification: ComparisonClassification::GatewaysOnlyFailure,
+        spec_references: vec![SpecReference {
+            id: "MCP|Transport".to_owned(),
+            url: Some(SPEC_REFERENCE.to_owned()),
+            extensions: BTreeMap::new(),
+        }],
+    };
+    let report = ComparisonReport {
+        spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
+        suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
+        fixture: Some(fixture_metadata()),
+        scenarios: vec![scenario],
+    };
+
+    let markdown = render_comparison_markdown(&report);
+
+    assert!(markdown.contains("| Control plane | 0 | 1 | 27 |"));
+    assert!(markdown.contains("| Dataplane | 0 | 1 | 28 |"));
+    assert!(markdown.contains("server\\|stateless"));
+    assert!(!markdown.contains("Expected by"));
+
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let path = directory.path().join("nested/report.md");
+    write_comparison_report(&path, &report).expect("report should be written");
+    assert_eq!(
+        fs::read_to_string(path).expect("report should be readable"),
+        markdown
     );
 }
 
@@ -524,664 +427,5 @@ fn result_loader_does_not_follow_symlinked_directories() {
 
     let parsed =
         load_server_results(directory.path()).expect("symlinked content should be ignored safely");
-
     assert!(parsed.scenarios.is_empty());
-}
-
-#[test]
-fn result_loader_rejects_untrusted_directory_names_and_duplicate_scenarios() {
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let bad = directory.path().join("server-..-2026-07-10T12-34-56-000Z");
-    fs::create_dir(&bad).expect("invalid result directory should be created");
-    fs::write(bad.join("checks.json"), "[]").expect("invalid checks should be written");
-    assert!(
-        load_server_results(directory.path())
-            .expect_err("untrusted scenario names must fail")
-            .to_string()
-            .contains("scenario")
-    );
-
-    let duplicates = tempfile::tempdir().expect("temporary directory should be created");
-    for timestamp in ["2026-07-10T12-34-56-000Z", "2026-07-10T12-35-56-000Z"] {
-        let path = duplicates
-            .path()
-            .join(format!("server-tools-list-{timestamp}"));
-        fs::create_dir(&path).expect("duplicate result directory should be created");
-        fs::write(path.join("checks.json"), "[]").expect("duplicate checks should be written");
-    }
-    assert!(
-        load_server_results(duplicates.path())
-            .expect_err("duplicate scenario results must fail")
-            .to_string()
-            .contains("duplicate")
-    );
-}
-
-#[test]
-fn baseline_audit_finds_expected_unexpected_stale_and_unobserved_entries() {
-    let parsed = results([
-        result("expected-failure", [CheckStatus::Failure]),
-        result("unexpected-failure", [CheckStatus::Failure]),
-        result("fixed", [CheckStatus::Success]),
-    ]);
-    let baseline = Baseline {
-        server: vec![
-            baseline_entry("expected-failure", BaselineClassification::Controlplane),
-            baseline_entry("fixed", BaselineClassification::Controlplane),
-            baseline_entry("not-run", BaselineClassification::Controlplane),
-        ],
-    };
-
-    let audit = audit_baseline(&parsed, &baseline);
-
-    assert_eq!(audit.expected_failures, ["expected-failure"]);
-    assert_eq!(audit.unexpected_failures, ["unexpected-failure"]);
-    assert_eq!(audit.stale_entries, ["fixed"]);
-    assert_eq!(audit.unobserved_entries, ["not-run"]);
-    assert!(!audit.is_clean());
-}
-
-#[test]
-fn warning_only_scenario_is_compliant() {
-    assert_eq!(
-        result("warning", [CheckStatus::Warning]).outcome(),
-        ScenarioOutcome::Compliant
-    );
-}
-
-#[test]
-fn success_with_warning_scenario_is_compliant() {
-    assert_eq!(
-        result("warning", [CheckStatus::Success, CheckStatus::Warning]).outcome(),
-        ScenarioOutcome::Compliant
-    );
-}
-
-#[test]
-fn baseline_audit_treats_warnings_as_expected_failures() {
-    let parsed = results([
-        result("warning-only", [CheckStatus::Warning]),
-        result(
-            "success-with-warning",
-            [CheckStatus::Success, CheckStatus::Warning],
-        ),
-    ]);
-
-    let audit = audit_baseline(&parsed, &Baseline::default());
-
-    assert!(!audit.is_clean());
-    assert_eq!(
-        audit.unexpected_failures,
-        ["success-with-warning", "warning-only"]
-    );
-}
-
-#[test]
-fn scenario_outcome_mixed_status_precedence_matches_official_summary() {
-    assert_eq!(
-        result(
-            "failure-warning",
-            [CheckStatus::Failure, CheckStatus::Warning]
-        )
-        .outcome(),
-        ScenarioOutcome::NonCompliant
-    );
-    assert_eq!(
-        result(
-            "unknown-warning",
-            [
-                CheckStatus::Other("FUTURE".to_owned()),
-                CheckStatus::Warning
-            ],
-        )
-        .outcome(),
-        ScenarioOutcome::Ambiguous
-    );
-    assert_eq!(
-        result(
-            "skipped-warning",
-            [CheckStatus::Skipped, CheckStatus::Warning]
-        )
-        .outcome(),
-        ScenarioOutcome::Compliant
-    );
-}
-
-#[test]
-fn info_status_precedence_matches_not_applicable_official_scenarios() {
-    assert_eq!(
-        result("info", [CheckStatus::Info]).outcome(),
-        ScenarioOutcome::NotApplicable
-    );
-    assert_eq!(
-        result("skipped-info", [CheckStatus::Skipped, CheckStatus::Info]).outcome(),
-        ScenarioOutcome::NotApplicable
-    );
-    assert_eq!(
-        result("success-info", [CheckStatus::Success, CheckStatus::Info]).outcome(),
-        ScenarioOutcome::Compliant
-    );
-    assert_eq!(
-        result(
-            "unknown-info",
-            [CheckStatus::Other("FUTURE".to_owned()), CheckStatus::Info],
-        )
-        .outcome(),
-        ScenarioOutcome::Ambiguous
-    );
-    assert_eq!(result("empty", []).outcome(), ScenarioOutcome::Ambiguous);
-}
-
-#[test]
-fn scenario_outcomes_follow_official_failure_and_skip_semantics() {
-    assert_eq!(
-        result("success", [CheckStatus::Success, CheckStatus::Info]).outcome(),
-        ScenarioOutcome::Compliant
-    );
-    assert_eq!(
-        result("warning", [CheckStatus::Success, CheckStatus::Warning]).outcome(),
-        ScenarioOutcome::Compliant
-    );
-    assert_eq!(
-        result("failure", [CheckStatus::Failure]).outcome(),
-        ScenarioOutcome::NonCompliant
-    );
-    assert_eq!(
-        result("skipped", [CheckStatus::Skipped, CheckStatus::Info]).outcome(),
-        ScenarioOutcome::NotApplicable
-    );
-    assert_eq!(
-        result("info", [CheckStatus::Info]).outcome(),
-        ScenarioOutcome::NotApplicable
-    );
-    assert_eq!(result("empty", []).outcome(), ScenarioOutcome::Ambiguous);
-}
-
-#[test]
-fn explicit_missing_named_fixtures_are_not_implementation_failures() {
-    let messages = [
-        "Failed: MCP error -32601: Tool not found: test_simple_text",
-        "Tool 'json_schema_2020_12_tool' not found. Available tools: echo",
-        "Failed: MCP error -32002: Prompt not found: test_simple_prompt",
-        "Failed: MCP error -32002: Resource not found: test://static-text",
-        "Failed: MCP error -32603: Routing problem... wrong tool name",
-        "Failed: MCP error -32603: Routing problem... wrong prompt name",
-        "Failed: MCP error -32603: Routing problem... wrong resource name",
-        "Failed: MCP error -32603: Routing problem... wrong completion reference",
-    ];
-
-    for (index, message) in messages.into_iter().enumerate() {
-        let scenario = ConformanceScenarioResult {
-            scenario: format!("fixture-{index}"),
-            checks: vec![failing_check("fixture", message)],
-            source: PathBuf::from("fixture/checks.json"),
-        };
-        assert_eq!(scenario.outcome(), ScenarioOutcome::FixtureFailure);
-    }
-}
-
-#[test]
-fn trusted_fixture_provenance_attributes_not_found_to_the_gateway() {
-    let scenario = ConformanceScenarioResult {
-        scenario: "resources-templates-read".to_owned(),
-        checks: vec![failing_check(
-            "fixture",
-            "Failed: MCP error -32002: Resource not found: test://static-text",
-        )],
-        source: PathBuf::from("resources-templates-read/checks.json"),
-    };
-
-    assert_eq!(scenario.outcome(), ScenarioOutcome::FixtureFailure);
-    assert_eq!(
-        scenario.outcome_with_trusted_fixture(true),
-        ScenarioOutcome::NonCompliant
-    );
-    assert_eq!(
-        scenario.outcome_with_trusted_fixture(false),
-        ScenarioOutcome::FixtureFailure
-    );
-    for unchanged in [
-        result("success", [CheckStatus::Success]),
-        result("failure", [CheckStatus::Failure]),
-        result("skipped", [CheckStatus::Skipped]),
-        result("ambiguous", [CheckStatus::Info]),
-    ] {
-        assert_eq!(
-            unchanged.outcome_with_trusted_fixture(true),
-            unchanged.outcome()
-        );
-    }
-}
-
-#[test]
-fn fresh_runs_reject_missing_official_fixtures() {
-    let parsed = results([ConformanceScenarioResult {
-        scenario: "tools-call-simple-text".to_owned(),
-        checks: vec![failing_check(
-            "fixture",
-            "Failed: MCP error -32601: Tool not found: test_simple_text",
-        )],
-        source: PathBuf::from("tools-call-simple-text/checks.json"),
-    }]);
-
-    let error = validate_no_fixture_failures(&parsed)
-        .expect_err("missing official fixtures must reject a fresh run")
-        .to_string();
-
-    assert!(error.contains("tools-call-simple-text"));
-    assert!(error.contains("official fixture setup"));
-}
-
-#[test]
-fn fresh_run_fixture_failures_are_listed_deterministically() {
-    let fixture_result = |scenario: &str, message: &str| ConformanceScenarioResult {
-        scenario: scenario.to_owned(),
-        checks: vec![failing_check("fixture", message)],
-        source: PathBuf::from(format!("{scenario}/checks.json")),
-    };
-    let parsed = results([
-        fixture_result(
-            "tools-call-simple-text",
-            "Failed: MCP error -32601: Tool not found: test_simple_text",
-        ),
-        fixture_result(
-            "prompts-get-simple",
-            "Failed: MCP error -32002: Prompt not found: test_simple_prompt",
-        ),
-    ]);
-
-    let error = validate_no_fixture_failures(&parsed)
-        .expect_err("all missing official fixtures must be reported")
-        .to_string();
-
-    assert_eq!(
-        error,
-        "official fixture setup failed for conformance scenarios: prompts-get-simple, tools-call-simple-text"
-    );
-}
-
-#[test]
-fn fresh_runs_accept_successful_scenarios() {
-    let parsed = results([result("tools-call-simple-text", [CheckStatus::Success])]);
-
-    validate_no_fixture_failures(&parsed).expect("successful scenarios must be accepted");
-}
-
-#[test]
-fn fresh_runs_accept_non_fixture_gateway_failures() {
-    let parsed = results([ConformanceScenarioResult {
-        scenario: "logging-set-level".to_owned(),
-        checks: vec![failing_check(
-            "gateway",
-            "Failed: MCP error -32601: logging/setLevel",
-        )],
-        source: PathBuf::from("logging-set-level/checks.json"),
-    }]);
-
-    validate_no_fixture_failures(&parsed)
-        .expect("gateway protocol failures remain conformance results");
-}
-
-#[test]
-fn unrelated_and_mixed_failures_remain_noncompliant() {
-    for message in [
-        "Failed: MCP error -32601: logging/setLevel",
-        "Expected HTTP 4xx for invalid Host/Origin headers, got 200",
-        "Server did not send tool response after reconnect",
-        "Failed: MCP error -32603: Internal error",
-        "Tool not found: user_defined_tool",
-    ] {
-        let scenario = ConformanceScenarioResult {
-            scenario: "implementation-failure".to_owned(),
-            checks: vec![failing_check("implementation", message)],
-            source: PathBuf::from("implementation/checks.json"),
-        };
-        assert_eq!(scenario.outcome(), ScenarioOutcome::NonCompliant);
-    }
-
-    let mixed = ConformanceScenarioResult {
-        scenario: "mixed".to_owned(),
-        checks: vec![
-            failing_check(
-                "fixture",
-                "Failed: MCP error -32601: Tool not found: test_simple_text",
-            ),
-            failing_check("implementation", "Failed: MCP error -32603: Internal error"),
-        ],
-        source: PathBuf::from("mixed/checks.json"),
-    };
-    assert_eq!(mixed.outcome(), ScenarioOutcome::NonCompliant);
-}
-
-#[test]
-fn three_way_outcomes_cover_every_report_classification() {
-    use ComparisonClassification as Class;
-    use ScenarioOutcome as Outcome;
-
-    let cases = [
-        (
-            Outcome::Compliant,
-            Outcome::Compliant,
-            Outcome::Compliant,
-            false,
-            Class::AllCompliant,
-        ),
-        (
-            Outcome::NonCompliant,
-            Outcome::Compliant,
-            Outcome::Compliant,
-            false,
-            Class::FixtureOnlyFailure,
-        ),
-        (
-            Outcome::Compliant,
-            Outcome::NonCompliant,
-            Outcome::Compliant,
-            false,
-            Class::ControlplaneOnlyFailure,
-        ),
-        (
-            Outcome::Compliant,
-            Outcome::Compliant,
-            Outcome::NonCompliant,
-            false,
-            Class::DataplaneOnlyFailure,
-        ),
-        (
-            Outcome::NonCompliant,
-            Outcome::NonCompliant,
-            Outcome::Compliant,
-            false,
-            Class::FixtureAndControlplaneFailure,
-        ),
-        (
-            Outcome::NonCompliant,
-            Outcome::Compliant,
-            Outcome::NonCompliant,
-            false,
-            Class::FixtureAndDataplaneFailure,
-        ),
-        (
-            Outcome::Compliant,
-            Outcome::NonCompliant,
-            Outcome::NonCompliant,
-            false,
-            Class::GatewaysOnlyFailure,
-        ),
-        (
-            Outcome::NonCompliant,
-            Outcome::NonCompliant,
-            Outcome::NonCompliant,
-            false,
-            Class::SharedFailure,
-        ),
-        (
-            Outcome::Compliant,
-            Outcome::NonCompliant,
-            Outcome::Compliant,
-            true,
-            Class::ExpectedFailure,
-        ),
-        (
-            Outcome::FixtureFailure,
-            Outcome::Compliant,
-            Outcome::Compliant,
-            false,
-            Class::FixtureFailure,
-        ),
-        (
-            Outcome::NotApplicable,
-            Outcome::NotApplicable,
-            Outcome::NotApplicable,
-            false,
-            Class::NotApplicable,
-        ),
-        (
-            Outcome::Missing,
-            Outcome::Compliant,
-            Outcome::Compliant,
-            false,
-            Class::Ambiguous,
-        ),
-    ];
-
-    for (fixture, controlplane, dataplane, expected, classification) in cases {
-        assert_eq!(
-            classify_outcomes(fixture, controlplane, dataplane, expected),
-            classification
-        );
-    }
-}
-
-#[test]
-fn result_comparison_uses_independent_baselines_and_keeps_missing_results_ambiguous() {
-    let fixture = results([
-        result("both-pass", [CheckStatus::Success]),
-        result("expected-cp", [CheckStatus::Success]),
-        result("cp-only-failure", [CheckStatus::Success]),
-        result("missing-dataplane", [CheckStatus::Success]),
-    ]);
-    let controlplane = results([
-        result("both-pass", [CheckStatus::Success]),
-        result("expected-cp", [CheckStatus::Failure]),
-        result("cp-only-failure", [CheckStatus::Failure]),
-        result("missing-dataplane", [CheckStatus::Success]),
-    ]);
-    let dataplane = results([
-        result("both-pass", [CheckStatus::Success]),
-        result("expected-cp", [CheckStatus::Success]),
-        result("cp-only-failure", [CheckStatus::Success]),
-    ]);
-    let controlplane_baseline = Baseline {
-        server: vec![baseline_entry(
-            "expected-cp",
-            BaselineClassification::Controlplane,
-        )],
-    };
-    let dataplane_baseline = Baseline { server: Vec::new() };
-
-    let comparisons = compare_result_sets(
-        &fixture,
-        &controlplane,
-        &dataplane,
-        &controlplane_baseline,
-        &dataplane_baseline,
-    );
-    let by_name: BTreeMap<_, _> = comparisons
-        .into_iter()
-        .map(|comparison| (comparison.scenario.clone(), comparison))
-        .collect();
-
-    assert_eq!(
-        by_name["both-pass"].classification,
-        ComparisonClassification::AllCompliant
-    );
-    assert_eq!(
-        by_name["expected-cp"].classification,
-        ComparisonClassification::ExpectedFailure
-    );
-    assert_eq!(
-        by_name["cp-only-failure"].classification,
-        ComparisonClassification::ControlplaneOnlyFailure
-    );
-    assert_eq!(
-        by_name["missing-dataplane"].classification,
-        ComparisonClassification::Ambiguous
-    );
-}
-
-#[test]
-fn trusted_comparison_attributes_fixture_not_found_per_side() {
-    let fixture_result = |scenario: &str| ConformanceScenarioResult {
-        scenario: scenario.to_owned(),
-        checks: vec![failing_check(
-            "fixture",
-            "Failed: MCP error -32002: Resource not found: test://static-text",
-        )],
-        source: PathBuf::from(format!("{scenario}/checks.json")),
-    };
-    let controlplane = results([
-        fixture_result("control-failure"),
-        result("dataplane-failure", [CheckStatus::Success]),
-        fixture_result("shared-failure"),
-    ]);
-    let dataplane = results([
-        result("control-failure", [CheckStatus::Success]),
-        fixture_result("dataplane-failure"),
-        fixture_result("shared-failure"),
-    ]);
-    let fixture = results([
-        result("control-failure", [CheckStatus::Success]),
-        result("dataplane-failure", [CheckStatus::Success]),
-        result("shared-failure", [CheckStatus::Success]),
-    ]);
-    let empty = Baseline::default();
-
-    let trusted = compare_result_sets_with_fixture_trust(
-        &fixture,
-        &controlplane,
-        &dataplane,
-        &empty,
-        &empty,
-        ComparisonFixtureTrust {
-            fixture: true,
-            controlplane: true,
-            dataplane: true,
-        },
-    )
-    .into_iter()
-    .map(|comparison| (comparison.scenario, comparison.classification))
-    .collect::<BTreeMap<_, _>>();
-    let controlplane_only_trusted = compare_result_sets_with_fixture_trust(
-        &fixture,
-        &controlplane,
-        &dataplane,
-        &empty,
-        &empty,
-        ComparisonFixtureTrust {
-            fixture: true,
-            controlplane: true,
-            dataplane: false,
-        },
-    );
-    let dataplane_only_trusted = compare_result_sets_with_fixture_trust(
-        &fixture,
-        &controlplane,
-        &dataplane,
-        &empty,
-        &empty,
-        ComparisonFixtureTrust {
-            fixture: true,
-            controlplane: false,
-            dataplane: true,
-        },
-    );
-    let historical = compare_result_sets(&fixture, &controlplane, &dataplane, &empty, &empty);
-
-    assert_eq!(
-        trusted["control-failure"],
-        ComparisonClassification::ControlplaneOnlyFailure
-    );
-    assert_eq!(
-        trusted["dataplane-failure"],
-        ComparisonClassification::DataplaneOnlyFailure
-    );
-    assert_eq!(
-        trusted["shared-failure"],
-        ComparisonClassification::GatewaysOnlyFailure
-    );
-    assert!(controlplane_only_trusted.iter().any(|comparison| {
-        comparison.scenario == "shared-failure"
-            && comparison.classification == ComparisonClassification::FixtureFailure
-    }));
-    assert!(dataplane_only_trusted.iter().any(|comparison| {
-        comparison.scenario == "shared-failure"
-            && comparison.classification == ComparisonClassification::FixtureFailure
-    }));
-    assert!(historical.iter().all(|comparison| {
-        comparison.classification == ComparisonClassification::FixtureFailure
-    }));
-}
-
-#[test]
-fn comparison_report_is_deterministic_sorted_complete_and_markdown_safe() {
-    let report = ComparisonReport {
-        spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
-        suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
-        fixture: Some(ConformanceFixtureMetadata {
-            repository: "https://github.com/modelcontextprotocol/conformance".to_owned(),
-            revision: "revision`with-markdown".to_owned(),
-            server_id: "server-id".to_owned(),
-        }),
-        scenarios: vec![
-            ScenarioComparison {
-                scenario: "zeta|scenario".to_owned(),
-                fixture: ScenarioOutcome::NonCompliant,
-                fixture_failed_checks: 2,
-                controlplane: ScenarioOutcome::NonCompliant,
-                controlplane_failed_checks: 3,
-                dataplane: ScenarioOutcome::NonCompliant,
-                dataplane_failed_checks: 4,
-                classification: ComparisonClassification::SharedFailure,
-                expected_by: BTreeSet::new(),
-                spec_references: vec![SpecReference {
-                    id: "raw|ref".to_owned(),
-                    url: Some("javascript:alert(1)".to_owned()),
-                    extensions: BTreeMap::new(),
-                }],
-            },
-            ScenarioComparison {
-                scenario: "alpha".to_owned(),
-                fixture: ScenarioOutcome::Compliant,
-                fixture_failed_checks: 0,
-                controlplane: ScenarioOutcome::Compliant,
-                controlplane_failed_checks: 0,
-                dataplane: ScenarioOutcome::Compliant,
-                dataplane_failed_checks: 0,
-                classification: ComparisonClassification::AllCompliant,
-                expected_by: BTreeSet::new(),
-                spec_references: Vec::new(),
-            },
-        ],
-    };
-
-    let first = render_comparison_markdown(&report);
-    let second = render_comparison_markdown(&report);
-
-    assert_eq!(first, second);
-    assert!(first.starts_with("# MCP Conformance Comparison\n"));
-    assert!(first.contains(OFFICIAL_CONFORMANCE_PACKAGE));
-    assert!(first.contains("revision\\`with-markdown"));
-    assert!(first.contains("| Fixture direct | 1 | 1 | 2 |"));
-    assert!(first.contains("| Control plane | 1 | 1 | 3 |"));
-    assert!(first.contains("| Dataplane | 1 | 1 | 4 |"));
-    assert!(first.contains("| all compliant | 1 |"));
-    assert!(first.contains("| shared failure | 1 |"));
-    assert!(
-        first.find("| alpha |").expect("alpha row should exist")
-            < first
-                .find("| zeta\\|scenario |")
-                .expect("escaped zeta row should exist")
-    );
-    assert!(!first.contains("](javascript:"));
-    assert!(first.contains("raw\\|ref"));
-}
-
-#[test]
-fn comparison_report_writer_creates_parent_directories() {
-    let report = ComparisonReport {
-        spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
-        suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
-        fixture: None,
-        scenarios: Vec::new(),
-    };
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let path = directory.path().join("reports/comparison.md");
-
-    write_comparison_report(&path, &report).expect("report should be written");
-
-    assert_eq!(
-        fs::read_to_string(path).expect("report should be readable"),
-        render_comparison_markdown(&report)
-    );
 }

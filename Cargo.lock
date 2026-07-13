@@ -269,7 +269,6 @@ name = "cf-integration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "cf-integration-compliance",
  "cf-integration-load",
@@ -280,7 +279,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -294,12 +292,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "cf-integration-mcp",
  "cf-integration-platform",
  "reqwest",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",

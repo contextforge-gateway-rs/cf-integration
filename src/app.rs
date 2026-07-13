@@ -1,50 +1,45 @@
-//! CLI-to-runtime action resolution.
+//! CLI-to-runtime command resolution.
 
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use async_trait::async_trait;
-use cf_integration_compliance::ConformanceSuite;
-use cf_integration_load::{LoadEngine, LoadRequest};
+use cf_integration_compliance::conformance::ConformanceTarget;
+use cf_integration_load::LoadRequest;
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 
 use crate::cli::{
-    Cli, CliStackMode, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode, LiveGroup,
-    StackCommand, TestCommand, TokenKind,
+    Cli, CliTopology, Command, ConformanceCommand, DebugCommand, StackCommand, TokenKind,
+    TopologySelection,
 };
-use crate::error::AppFailure;
-
 const STACK_MODE_ENV: &str = "CF_MCP_STACK_MODE";
 
 /// Fully resolved application operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    Sync,
     Stack(StackAction),
-    Token {
-        kind: TokenKind,
-        server_id: Option<String>,
-    },
-    Test(TestAction),
-    Compliance(ComplianceAction),
-    Inspect {
-        mode: StackMode,
-        method: String,
-        server_id: Option<String>,
-    },
+    Probe(StackMode),
+    Load(ResolvedLoadArgs),
+    Conformance(ConformanceAction),
+    Debug(DebugAction),
 }
 
 /// Fully resolved stack operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackAction {
-    Up(StackMode),
-    Down(ComplianceMode),
-    Reset(ComplianceMode),
+    Up {
+        topology: StackMode,
+        fresh: bool,
+    },
+    Down {
+        topology: TopologySelection,
+        volumes: bool,
+    },
     Status(StackMode),
     Logs {
-        mode: StackMode,
+        topology: StackMode,
         services: Vec<OsString>,
     },
     Config(StackMode),
@@ -53,51 +48,17 @@ pub enum StackAction {
 /// Fully resolved load-test options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLoadArgs {
-    pub mode: StackMode,
+    pub topology: StackMode,
     pub request: LoadRequest,
 }
 
-/// Fully resolved test operation.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TestAction {
-    Probe(StackMode),
-    Load(ResolvedLoadArgs),
-    Live {
-        mode: StackMode,
-        group: LiveGroup,
-    },
-    Suite {
-        mode: ComplianceMode,
-        start: bool,
-        load: Vec<LoadEngine>,
-        exclude_plugins: bool,
-    },
-}
-
-/// Shared, resolved live-compliance options.
+/// Fully resolved official conformance operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedComplianceCommon {
-    pub mode: ComplianceMode,
-    pub start: bool,
-    pub server_id: Option<String>,
-    pub spec_version: String,
-    pub results_dir: Option<PathBuf>,
-}
-
-/// Fully resolved compliance operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComplianceAction {
-    Conformance {
-        common: ResolvedComplianceCommon,
-        suite: ConformanceSuite,
-        baseline: Option<PathBuf>,
-    },
-    Gateway {
-        common: ResolvedComplianceCommon,
-    },
-    All {
-        common: ResolvedComplianceCommon,
-        suite: ConformanceSuite,
+pub enum ConformanceAction {
+    Run {
+        lanes: Vec<ConformanceTarget>,
+        spec_version: String,
+        results_dir: Option<PathBuf>,
     },
     Report {
         results_dir: Option<PathBuf>,
@@ -105,11 +66,18 @@ pub enum ComplianceAction {
     },
 }
 
-/// Runtime boundary used after parsing and environment resolution.
-#[async_trait(?Send)]
-pub trait ActionExecutor {
-    /// Executes one fully resolved operation.
-    async fn execute(&mut self, action: Action) -> Result<(), AppFailure>;
+/// Fully resolved manual debugging operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugAction {
+    Inspect {
+        topology: StackMode,
+        method: String,
+        server_id: Option<String>,
+    },
+    Token {
+        kind: TokenKind,
+        server_id: Option<String>,
+    },
 }
 
 /// Resolves a parsed CLI without starting child processes or mutating global state.
@@ -120,76 +88,10 @@ pub trait ActionExecutor {
 /// neither `controlplane` nor `dataplane`.
 pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
     match cli.command {
-        Command::Sync => Ok(Action::Sync),
-        Command::Token(args) => {
-            if args.kind == TokenKind::Admin && args.server_id.is_some() {
-                bail!("--server-id is only valid with --kind scoped");
-            }
-            Ok(Action::Token {
-                kind: args.kind,
-                server_id: args.server_id,
-            })
-        }
         Command::Stack(args) => resolve_stack(args.command, environment).map(Action::Stack),
-        Command::Test(args) => resolve_test(args.command, environment).map(Action::Test),
-        Command::Compliance(args) => {
-            resolve_compliance(args.command, environment).map(Action::Compliance)
-        }
-        Command::Inspect(args) => Ok(Action::Inspect {
-            mode: resolve_single_mode(args.mode, environment)?,
-            method: args.method,
-            server_id: args.server_id,
-        }),
-    }
-}
-
-/// Resolves and executes a CLI operation.
-///
-/// # Errors
-///
-/// Returns mode-resolution or executor failures unchanged.
-pub async fn dispatch<E: ActionExecutor + ?Sized>(
-    cli: Cli,
-    environment: &Environment,
-    executor: &mut E,
-) -> Result<(), AppFailure> {
-    let action = resolve_action(cli, environment).map_err(AppFailure::from)?;
-    executor.execute(action).await
-}
-
-fn resolve_stack(command: StackCommand, environment: &Environment) -> Result<StackAction> {
-    match command {
-        StackCommand::Up(args) => Ok(StackAction::Up(resolve_single_mode(
-            args.mode,
-            environment,
-        )?)),
-        StackCommand::Down(args) => Ok(StackAction::Down(args.mode.unwrap_or(ComplianceMode::All))),
-        StackCommand::Reset(args) => {
-            Ok(StackAction::Reset(args.mode.unwrap_or(ComplianceMode::All)))
-        }
-        StackCommand::Status(args) => Ok(StackAction::Status(resolve_single_mode(
-            args.mode,
-            environment,
-        )?)),
-        StackCommand::Logs(args) => Ok(StackAction::Logs {
-            mode: resolve_single_mode(args.mode, environment)?,
-            services: args.services,
-        }),
-        StackCommand::Config(args) => Ok(StackAction::Config(resolve_single_mode(
-            args.mode,
-            environment,
-        )?)),
-    }
-}
-
-fn resolve_test(command: TestCommand, environment: &Environment) -> Result<TestAction> {
-    match command {
-        TestCommand::Probe(args) => Ok(TestAction::Probe(resolve_single_mode(
-            args.mode,
-            environment,
-        )?)),
-        TestCommand::Load(args) => Ok(TestAction::Load(ResolvedLoadArgs {
-            mode: resolve_single_mode(args.mode, environment)?,
+        Command::Probe(args) => resolve_topology(args.topology, environment).map(Action::Probe),
+        Command::Load(args) => Ok(Action::Load(ResolvedLoadArgs {
+            topology: resolve_topology(args.topology, environment)?,
             request: LoadRequest {
                 engine: args.engine.into(),
                 smoke: args.smoke,
@@ -198,118 +100,85 @@ fn resolve_test(command: TestCommand, environment: &Environment) -> Result<TestA
                 run_time: args.run_time,
             },
         })),
-        TestCommand::Live(args) => Ok(TestAction::Live {
-            mode: resolve_single_mode(args.mode, environment)?,
-            group: args.group,
-        }),
-        TestCommand::Suite(args) => {
-            let mode = resolve_multi_mode(args.mode, environment, ComplianceMode::Dataplane)?;
-            if mode == ComplianceMode::All && !args.start {
-                bail!("--mode all requires --start because the two stacks share host ports");
+        Command::Conformance(args) => Ok(Action::Conformance(match args.command {
+            ConformanceCommand::Run(args) => ConformanceAction::Run {
+                lanes: resolve_lanes(args.lane.into_iter().map(Into::into)),
+                spec_version: args.spec_version.spec_version().to_owned(),
+                results_dir: args.results_dir,
+            },
+            ConformanceCommand::Report(args) => ConformanceAction::Report {
+                results_dir: args.results_dir,
+                output_dir: args.output_dir,
+            },
+        })),
+        Command::Debug(args) => Ok(Action::Debug(match args.command {
+            DebugCommand::Inspect(args) => DebugAction::Inspect {
+                topology: resolve_topology(args.topology, environment)?,
+                method: args.method,
+                server_id: args.server_id,
+            },
+            DebugCommand::Token(args) => {
+                if args.kind == TokenKind::Admin && args.server_id.is_some() {
+                    bail!("--server-id is only valid with --kind scoped");
+                }
+                DebugAction::Token {
+                    kind: args.kind,
+                    server_id: args.server_id,
+                }
             }
-            Ok(TestAction::Suite {
-                mode,
-                start: args.start,
-                load: args.load.into_iter().map(Into::into).collect(),
-                exclude_plugins: args.exclude_plugins,
-            })
-        }
+        })),
     }
 }
 
-fn resolve_compliance(
-    command: ComplianceCommand,
-    environment: &Environment,
-) -> Result<ComplianceAction> {
+fn resolve_stack(command: StackCommand, environment: &Environment) -> Result<StackAction> {
     match command {
-        ComplianceCommand::Conformance(args) => {
-            let mut common = args.common;
-            if common.mode.is_none() {
-                common.mode = Some(ComplianceMode::All);
-            }
-            Ok(ComplianceAction::Conformance {
-                common: resolve_compliance_common(
-                    common,
-                    args.spec_version,
-                    environment,
-                    ComplianceMode::All,
-                )?,
-                suite: args.suite.into(),
-                baseline: args.baseline,
-            })
-        }
-        ComplianceCommand::Gateway(args) => Ok(ComplianceAction::Gateway {
-            common: resolve_compliance_common(
-                args.common,
-                args.spec_version,
-                environment,
-                ComplianceMode::Dataplane,
-            )?,
+        StackCommand::Up(args) => Ok(StackAction::Up {
+            topology: resolve_topology(args.topology, environment)?,
+            fresh: args.fresh,
         }),
-        ComplianceCommand::All(args) => {
-            let mut common = args.common;
-            if common.mode.is_none() {
-                common.mode = Some(ComplianceMode::All);
-            }
-            Ok(ComplianceAction::All {
-                common: resolve_compliance_common(
-                    common,
-                    args.spec_version,
-                    environment,
-                    ComplianceMode::All,
-                )?,
-                suite: args.suite.into(),
-            })
-        }
-        ComplianceCommand::Report(args) => Ok(ComplianceAction::Report {
-            results_dir: args.results_dir,
-            output_dir: args.output_dir,
+        StackCommand::Down(args) => Ok(StackAction::Down {
+            topology: args.topology.unwrap_or(TopologySelection::All),
+            volumes: args.volumes,
         }),
+        StackCommand::Status(args) => Ok(StackAction::Status(resolve_topology(
+            args.topology,
+            environment,
+        )?)),
+        StackCommand::Logs(args) => Ok(StackAction::Logs {
+            topology: resolve_topology(args.topology, environment)?,
+            services: args.services,
+        }),
+        StackCommand::Config(args) => Ok(StackAction::Config(resolve_topology(
+            args.topology,
+            environment,
+        )?)),
     }
 }
 
-fn resolve_compliance_common(
-    args: ComplianceCommonArgs,
-    spec_version: crate::cli::CliConformanceVersion,
-    environment: &Environment,
-    default: ComplianceMode,
-) -> Result<ResolvedComplianceCommon> {
-    Ok(ResolvedComplianceCommon {
-        mode: resolve_multi_mode(args.mode, environment, default)?,
-        start: args.start,
-        server_id: args.server_id,
-        spec_version: spec_version.spec_version().to_owned(),
-        results_dir: args.results_dir,
-    })
-}
-
-fn resolve_single_mode(
-    explicit: Option<CliStackMode>,
-    environment: &Environment,
-) -> Result<StackMode> {
-    if let Some(mode) = explicit {
-        return Ok(mode.into());
+fn resolve_lanes(lanes: impl IntoIterator<Item = ConformanceTarget>) -> Vec<ConformanceTarget> {
+    let selected = lanes.into_iter().collect::<BTreeSet<_>>();
+    let all = [
+        ConformanceTarget::Fixture,
+        ConformanceTarget::Controlplane,
+        ConformanceTarget::Dataplane,
+    ];
+    if selected.is_empty() {
+        all.into_iter().collect()
+    } else {
+        all.into_iter()
+            .filter(|lane| selected.contains(lane))
+            .collect()
     }
-    Ok(environment_mode(environment)?.unwrap_or(StackMode::Dataplane))
 }
 
-fn resolve_multi_mode(
-    explicit: Option<ComplianceMode>,
-    environment: &Environment,
-    default: ComplianceMode,
-) -> Result<ComplianceMode> {
-    if let Some(mode) = explicit {
-        return Ok(mode);
+fn resolve_topology(explicit: Option<CliTopology>, environment: &Environment) -> Result<StackMode> {
+    if let Some(topology) = explicit {
+        return Ok(topology.into());
     }
-    Ok(
-        environment_mode(environment)?.map_or(default, |mode| match mode {
-            StackMode::Controlplane => ComplianceMode::Controlplane,
-            StackMode::Dataplane => ComplianceMode::Dataplane,
-        }),
-    )
+    Ok(environment_topology(environment)?.unwrap_or(StackMode::Dataplane))
 }
 
-fn environment_mode(environment: &Environment) -> Result<Option<StackMode>> {
+fn environment_topology(environment: &Environment) -> Result<Option<StackMode>> {
     let Some(value) = environment.get(OsStr::new(STACK_MODE_ENV)) else {
         return Ok(None);
     };
@@ -320,5 +189,22 @@ fn environment_mode(environment: &Environment) -> Result<Option<StackMode>> {
             "invalid {STACK_MODE_ENV}; expected controlplane or dataplane (got {:?})",
             value
         ),
+    }
+}
+
+/// Converts a CLI topology selection into its ordered stack modes.
+pub(crate) fn selected_topologies(selection: TopologySelection) -> Vec<StackMode> {
+    match selection {
+        TopologySelection::Controlplane => vec![StackMode::Controlplane],
+        TopologySelection::Dataplane => vec![StackMode::Dataplane],
+        TopologySelection::All => vec![StackMode::Controlplane, StackMode::Dataplane],
+    }
+}
+
+/// Converts one concrete stack mode into a CLI topology selection.
+pub(crate) const fn topology_selection(topology: StackMode) -> TopologySelection {
+    match topology {
+        StackMode::Controlplane => TopologySelection::Controlplane,
+        StackMode::Dataplane => TopologySelection::Dataplane,
     }
 }

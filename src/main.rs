@@ -1,7 +1,8 @@
 use std::process::ExitCode;
 
-use cf_integration::app::dispatch;
+use cf_integration::app::resolve_action;
 use cf_integration::cli::Cli;
+use cf_integration::error::AppFailure;
 use cf_integration::runtime::RuntimeExecutor;
 use cf_integration_platform::config::{AppConfig, Environment};
 use cf_integration_platform::process::SystemProcessRunner;
@@ -43,7 +44,11 @@ async fn main() -> ExitCode {
         .map(|(key, value)| (key.clone(), value.value.clone()))
         .collect::<Environment>();
     let mut runtime = RuntimeExecutor::new(loaded.config, SystemProcessRunner);
-    match dispatch(cli, &effective_environment, &mut runtime).await {
+    let result = match resolve_action(cli, &effective_environment) {
+        Ok(action) => runtime.execute(action).await,
+        Err(error) => Err(AppFailure::from(error)),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");

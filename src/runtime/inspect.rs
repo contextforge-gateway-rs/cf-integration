@@ -24,7 +24,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         method: &str,
         server_id: Option<&str>,
     ) -> AppResult<()> {
-        self.ensure_mode_sources(mode)?;
+        self.require_mode_sources(mode)?;
         let server_id = server_id.unwrap_or_else(|| self.default_server_id());
         self.prepare_test_target(mode, server_id).await?;
         let token = self.bearer_token(mode, server_id)?;

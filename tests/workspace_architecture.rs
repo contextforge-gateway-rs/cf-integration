@@ -82,10 +82,6 @@ fn workspace_packages_and_internal_edges_match_the_architecture() {
                 "cf-integration-platform".to_owned(),
             ),
             (
-                "cf-integration-compliance".to_owned(),
-                "cf-integration-mcp".to_owned(),
-            ),
-            (
                 "cf-integration-load".to_owned(),
                 "cf-integration-platform".to_owned(),
             ),
