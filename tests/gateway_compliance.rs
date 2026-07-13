@@ -9,13 +9,13 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::gateway::{MCP_PROTOCOL_VERSION, MCP_SESSION_ID};
 use cf_integration::gateway_compliance::{
     GATEWAY_SPEC_VERSION, GatewayCaseResult, GatewayCaseStatus, GatewayComplianceConfig,
     GatewayComplianceReport, GatewayFailureEvidence, GatewayRequestEvidence,
     GatewayResponseEvidence, render_gateway_report, run_gateway_compliance, write_gateway_reports,
 };
-use cf_integration_platform::StackMode;
+use cf_integration_mcp::GatewayTopology;
+use cf_integration_mcp::gateway::{MCP_PROTOCOL_VERSION, MCP_SESSION_ID};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -462,7 +462,7 @@ fn config<'a>(
     wrong_scope_token: Option<&'a str>,
 ) -> GatewayComplianceConfig<'a> {
     GatewayComplianceConfig {
-        mode: StackMode::Dataplane,
+        mode: GatewayTopology::Dataplane,
         base_url: &gateway.base_url,
         server_id: "virtual/server",
         bearer_token: TOKEN,
@@ -532,7 +532,7 @@ async fn dataplane_suite_exercises_the_complete_gateway_lifecycle() {
 async fn controlplane_suite_uses_raw_mcp_and_skips_path_scoped_authorization() {
     let gateway = MockGateway::start(false).await;
     let config = GatewayComplianceConfig {
-        mode: StackMode::Controlplane,
+        mode: GatewayTopology::Direct,
         base_url: &gateway.base_url,
         server_id: "unused-server",
         bearer_token: TOKEN,
@@ -949,7 +949,7 @@ async fn transport_failure_records_captured_request_and_explicitly_unavailable_r
     );
     drop(listener);
     let config = GatewayComplianceConfig {
-        mode: StackMode::Dataplane,
+        mode: GatewayTopology::Dataplane,
         base_url: &base_url,
         server_id: "virtual/server",
         bearer_token: TOKEN,

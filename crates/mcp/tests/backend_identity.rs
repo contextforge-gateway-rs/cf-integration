@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use axum::http::{HeaderMap, HeaderValue};
-use cf_integration::backend_identity::{
+use cf_integration_mcp::backend_identity::{
     BACKEND_HEADER, BackendIdentity, CONTROLPLANE_BACKEND, CONTROLPLANE_FALLBACK_BACKEND,
     DATAPLANE_BACKEND, sanitized_backend_value,
 };
@@ -76,7 +76,10 @@ fn backend_identity_errors_and_capture_never_echo_an_untrusted_marker() {
 
 #[test]
 fn dataplane_nginx_replaces_upstream_markers_at_every_public_backend_boundary() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("MCP crate should be nested under crates");
     let nginx = fs::read_to_string(root.join("docker/nginx.cf-dataplane.conf"))
         .expect("dataplane nginx configuration should be readable");
 

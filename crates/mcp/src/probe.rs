@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use url::Url;
 
-use cf_integration_platform::StackMode;
+use crate::GatewayTopology;
 
 use crate::backend_identity::BackendIdentity;
 use crate::mcp::{initialize_with_id_and_version, jsonrpc_with_id, tool_call_args};
@@ -24,7 +24,7 @@ const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProbeConfig {
     /// Stack topology whose public route is under test.
-    pub mode: StackMode,
+    pub mode: GatewayTopology,
     /// Base URL of the public nginx endpoint.
     pub base_url: String,
     /// Virtual server identifier used in the public MCP route.
@@ -392,11 +392,11 @@ async fn post_with_timeout<T: ProbeTransport>(
     request: ProbeRequest,
     timeout: Duration,
     step: &'static str,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> Result<ProbeResponse> {
     match tokio::time::timeout(timeout, transport.post(request)).await {
         Ok(Ok(response)) => {
-            if mode == StackMode::Dataplane
+            if mode.requires_dataplane()
                 && let Some(message) = response.backend_identity.dataplane_error()
             {
                 bail!("{step}=FAIL {message}");
@@ -447,7 +447,7 @@ fn result_of<'a>(
         .ok_or_else(|| anyhow!("{step}=FAIL response result must be an object"))
 }
 
-fn probe_url(base_url: &str, mode: StackMode, server_id: &str) -> Result<String> {
+fn probe_url(base_url: &str, mode: GatewayTopology, server_id: &str) -> Result<String> {
     let mut url = Url::parse(base_url).map_err(|_| anyhow!("invalid probe base URL"))?;
     url.set_query(None);
     url.set_fragment(None);
@@ -455,7 +455,7 @@ fn probe_url(base_url: &str, mode: StackMode, server_id: &str) -> Result<String>
         .path_segments_mut()
         .map_err(|()| anyhow!("probe base URL must be hierarchical"))?;
     segments.pop_if_empty();
-    if mode == StackMode::Dataplane {
+    if mode.requires_dataplane() {
         segments.push("servers");
         segments.push(server_id);
     }

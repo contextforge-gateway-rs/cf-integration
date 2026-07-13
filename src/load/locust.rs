@@ -14,7 +14,7 @@ use cf_integration_platform::config::{AppConfig, SourcedValue, ValueOrigin};
 use cf_integration_platform::process::CommandSpec;
 
 use crate::cli::{LoadArgs, LoadEngine};
-use crate::mcp::PROTOCOL_VERSION;
+use cf_integration_mcp::mcp::PROTOCOL_VERSION;
 
 const SMOKE_USERS: &str = "1";
 const SMOKE_SPAWN_RATE: &str = "1";

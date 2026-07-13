@@ -25,8 +25,8 @@ use url::Url;
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::AppConfig;
 
-use crate::backend_identity::BackendIdentity;
-use crate::mcp::{
+use cf_integration_mcp::backend_identity::BackendIdentity;
+use cf_integration_mcp::mcp::{
     ACCEPT, PROTOCOL_VERSION, initialize_with_id, jsonrpc_with_id, parse_mcp_body, tool_call_args,
 };
 

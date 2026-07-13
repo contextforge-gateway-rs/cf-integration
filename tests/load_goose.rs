@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode};
 use axum::routing::any;
 use cf_integration::cli::{LoadArgs, LoadEngine};
 use cf_integration::load::{GooseLoadConfig, GooseRunError, LoadSettings};
-use cf_integration::mcp::{ACCEPT, PROTOCOL_VERSION};
+use cf_integration_mcp::mcp::{ACCEPT, PROTOCOL_VERSION};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::{AppConfig, Environment};
 use serde_json::{Value, json};

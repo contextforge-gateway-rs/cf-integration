@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use url::Url;
 
-use cf_integration_platform::StackMode;
+use crate::GatewayTopology;
 
 use crate::backend_identity::{BACKEND_HEADER, BackendIdentity, sanitized_backend_value};
 use crate::mcp::{
@@ -227,7 +227,7 @@ pub fn notification_message(method: &str, params: Option<Value>) -> Value {
 /// Safe diagnostic snapshot of an outbound HTTP request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestCapture {
-    mode: StackMode,
+    mode: GatewayTopology,
     method: String,
     url: String,
     headers: BTreeMap<String, String>,
@@ -237,7 +237,7 @@ pub struct RequestCapture {
 impl RequestCapture {
     /// Stack mode used for this request.
     #[must_use]
-    pub fn mode(&self) -> StackMode {
+    pub fn mode(&self) -> GatewayTopology {
         self.mode
     }
 
@@ -269,7 +269,7 @@ impl RequestCapture {
 /// Complete safe diagnostic record for one live gateway exchange.
 #[derive(Clone, PartialEq)]
 pub struct Exchange {
-    mode: StackMode,
+    mode: GatewayTopology,
     request: RequestCapture,
     status: u16,
     headers: BTreeMap<String, String>,
@@ -296,7 +296,7 @@ impl fmt::Debug for Exchange {
 impl Exchange {
     /// Stack mode used for this exchange.
     #[must_use]
-    pub fn mode(&self) -> StackMode {
+    pub fn mode(&self) -> GatewayTopology {
         self.mode
     }
 
@@ -359,7 +359,7 @@ impl Exchange {
 #[must_use = "a gateway client builder does nothing until build() is called"]
 #[derive(Clone)]
 pub struct GatewayClientBuilder {
-    mode: StackMode,
+    mode: GatewayTopology,
     base_url: String,
     server_id: String,
     bearer_token: String,
@@ -440,7 +440,7 @@ impl GatewayClientBuilder {
 /// Stateful client for the protected public MCP gateway route.
 #[derive(Clone)]
 pub struct GatewayClient {
-    mode: StackMode,
+    mode: GatewayTopology,
     endpoint: Url,
     bearer_token: String,
     protocol_version: String,
@@ -470,7 +470,7 @@ impl GatewayClient {
     ///
     /// Returns a mode-aware configuration error for invalid inputs.
     pub fn new(
-        mode: StackMode,
+        mode: GatewayTopology,
         base_url: &str,
         server_id: &str,
         bearer_token: &str,
@@ -480,7 +480,7 @@ impl GatewayClient {
 
     /// Starts a configurable gateway client builder.
     pub fn builder(
-        mode: StackMode,
+        mode: GatewayTopology,
         base_url: &str,
         server_id: &str,
         bearer_token: &str,
@@ -552,7 +552,7 @@ impl GatewayClient {
             outbound_session.as_deref().unwrap_or(""),
             response_session.unwrap_or(""),
         ];
-        if self.mode == StackMode::Dataplane
+        if self.mode.requires_dataplane()
             && let Some(message) = BackendIdentity::from_headers(&raw_headers).dataplane_error()
         {
             let exchange = Exchange {
@@ -772,7 +772,7 @@ pub enum GatewayError {
     #[error("gateway {mode:?}: configuration error: {message}")]
     Configuration {
         /// Stack mode for the failed operation.
-        mode: StackMode,
+        mode: GatewayTopology,
         /// Safe failure detail.
         message: String,
     },
@@ -780,7 +780,7 @@ pub enum GatewayError {
     #[error("gateway {mode:?}: request failed: {message}; request={request:?}")]
     Request {
         /// Stack mode for the failed operation.
-        mode: StackMode,
+        mode: GatewayTopology,
         /// Safe failure detail.
         message: String,
         /// Safe outbound request capture.
@@ -790,7 +790,7 @@ pub enum GatewayError {
     #[error("gateway {mode:?}: {message}; exchange={exchange:?}")]
     Exchange {
         /// Stack mode for the failed operation.
-        mode: StackMode,
+        mode: GatewayTopology,
         /// Safe failure detail.
         message: String,
         /// Complete safe exchange capture.
@@ -801,7 +801,7 @@ pub enum GatewayError {
 impl GatewayError {
     /// Stack mode in which the failure occurred.
     #[must_use]
-    pub fn mode(&self) -> StackMode {
+    pub fn mode(&self) -> GatewayTopology {
         match self {
             Self::Configuration { mode, .. }
             | Self::Request { mode, .. }
@@ -818,14 +818,14 @@ impl GatewayError {
         }
     }
 
-    fn configuration(mode: StackMode, message: impl Into<String>) -> Self {
+    fn configuration(mode: GatewayTopology, message: impl Into<String>) -> Self {
         Self::Configuration {
             mode,
             message: message.into(),
         }
     }
 
-    fn request(mode: StackMode, message: impl Into<String>, request: RequestCapture) -> Self {
+    fn request(mode: GatewayTopology, message: impl Into<String>, request: RequestCapture) -> Self {
         Self::Request {
             mode,
             message: message.into(),
@@ -833,7 +833,11 @@ impl GatewayError {
         }
     }
 
-    fn with_exchange(mode: StackMode, message: impl Into<String>, exchange: Exchange) -> Self {
+    fn with_exchange(
+        mode: GatewayTopology,
+        message: impl Into<String>,
+        exchange: Exchange,
+    ) -> Self {
         Self::Exchange {
             mode,
             message: message.into(),
@@ -842,7 +846,11 @@ impl GatewayError {
     }
 }
 
-fn gateway_endpoint(mode: StackMode, base_url: &str, server_id: &str) -> Result<Url, GatewayError> {
+fn gateway_endpoint(
+    mode: GatewayTopology,
+    base_url: &str,
+    server_id: &str,
+) -> Result<Url, GatewayError> {
     if server_id.is_empty() {
         return Err(GatewayError::configuration(
             mode,
@@ -875,7 +883,7 @@ fn gateway_endpoint(mode: StackMode, base_url: &str, server_id: &str) -> Result<
         .path_segments_mut()
         .map_err(|()| GatewayError::configuration(mode, "base URL cannot contain path segments"))?;
     segments.clear();
-    if mode == StackMode::Dataplane {
+    if mode.requires_dataplane() {
         segments.push("servers");
         segments.push(server_id);
     }
@@ -885,7 +893,7 @@ fn gateway_endpoint(mode: StackMode, base_url: &str, server_id: &str) -> Result<
 }
 
 fn materialize_payload(
-    mode: StackMode,
+    mode: GatewayTopology,
     payload: &Payload,
     protocol_version: &str,
 ) -> Result<Option<Vec<u8>>, GatewayError> {
@@ -906,7 +914,7 @@ fn materialize_payload(
 }
 
 fn apply_header(
-    mode: StackMode,
+    mode: GatewayTopology,
     mut builder: reqwest::RequestBuilder,
     name: &'static str,
     header_override: &HeaderOverride,
@@ -924,13 +932,21 @@ fn apply_header(
     Ok(builder)
 }
 
-fn validate_header_value(mode: StackMode, name: &str, value: &str) -> Result<(), GatewayError> {
+fn validate_header_value(
+    mode: GatewayTopology,
+    name: &str,
+    value: &str,
+) -> Result<(), GatewayError> {
     HeaderValue::from_str(value)
         .map(|_| ())
         .map_err(|_| GatewayError::configuration(mode, format!("{name} header value is invalid")))
 }
 
-fn capture_request(mode: StackMode, request: &reqwest::Request, token: &str) -> RequestCapture {
+fn capture_request(
+    mode: GatewayTopology,
+    request: &reqwest::Request,
+    token: &str,
+) -> RequestCapture {
     let session = request
         .headers()
         .get(MCP_SESSION_ID)

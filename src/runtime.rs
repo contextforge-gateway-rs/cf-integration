@@ -10,6 +10,12 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use cf_integration_mcp::GatewayTopology;
+use cf_integration_mcp::auth_proxy::AuthProxy;
+use cf_integration_mcp::gateway::GatewayClient;
+use cf_integration_mcp::http_transport::ReqwestProbeTransport;
+use cf_integration_mcp::mcp::{ACCEPT as MCP_ACCEPT, PROTOCOL_VERSION};
+use cf_integration_mcp::probe::{ProbeConfig, run_probe};
 use cf_integration_platform::checkout::{CheckoutManager, CheckoutRequest};
 use cf_integration_platform::compose::{ComposeProject, validate_integration_contract};
 use cf_integration_platform::config::AppConfig;
@@ -25,7 +31,6 @@ use crate::app::{
     Action, ActionExecutor, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs,
     StackAction, TestAction,
 };
-use crate::auth_proxy::AuthProxy;
 use crate::cli::{
     ComplianceMode, ConformanceSuite, LiveGroup, LoadArgs, LoadEngine, TokenKind as CliTokenKind,
 };
@@ -45,15 +50,11 @@ use crate::coverage::{
     parse_coverage_overlay, write_coverage_report,
 };
 use crate::error::AppFailure;
-use crate::gateway::GatewayClient;
 use crate::gateway_compliance::{
     GatewayCaseStatus, GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance,
     write_gateway_reports,
 };
-use crate::http_transport::ReqwestProbeTransport;
 use crate::load::{GooseLoadConfig, LoadSettings, LocustCommand, audit_locust_reports};
-use crate::mcp::{ACCEPT as MCP_ACCEPT, PROTOCOL_VERSION};
-use crate::probe::{ProbeConfig, run_probe};
 use crate::token::{TokenKind, make_token};
 
 type AppResult<T> = std::result::Result<T, AppFailure>;
@@ -306,7 +307,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
 
     async fn wait_for_public_endpoint(&self, mode: StackMode) -> AppResult<()> {
         let endpoint = GatewayClient::builder(
-            mode,
+            gateway_topology(mode),
             self.base_url()?,
             self.default_server_id(),
             "readiness-probe",
@@ -1084,7 +1085,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .unwrap_or(PROTOCOL_VERSION)
             .to_owned();
         let config = ProbeConfig {
-            mode,
+            mode: gateway_topology(mode),
             base_url: self.base_url()?.to_owned(),
             server_id,
             bearer_token: token,
@@ -1778,13 +1779,18 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             },
         )?;
 
-        let endpoint = GatewayClient::builder(run.mode, self.base_url()?, run.server_id, run.token)
-            .protocol_version(run.spec_version)
-            .build()
-            .context("failed to construct the conformance gateway endpoint")
-            .map_err(AppFailure::from)?
-            .endpoint()
-            .clone();
+        let endpoint = GatewayClient::builder(
+            gateway_topology(run.mode),
+            self.base_url()?,
+            run.server_id,
+            run.token,
+        )
+        .protocol_version(run.spec_version)
+        .build()
+        .context("failed to construct the conformance gateway endpoint")
+        .map_err(AppFailure::from)?
+        .endpoint()
+        .clone();
         let proxy = AuthProxy::start(endpoint, run.token)
             .await
             .context("failed to start the conformance authentication proxy")
@@ -1866,7 +1872,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     ) -> AppResult<()> {
         let wrong_scope_token = self.wrong_scope_token(server_id)?;
         let report = run_gateway_compliance(&GatewayComplianceConfig {
-            mode,
+            mode: gateway_topology(mode),
             base_url: self.base_url()?,
             server_id,
             bearer_token: token,
@@ -2190,11 +2196,12 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let server_id = server_id.unwrap_or_else(|| self.default_server_id());
         self.prepare_test_target(mode, server_id).await?;
         let token = self.bearer_token(mode, server_id)?;
-        let endpoint = GatewayClient::new(mode, self.base_url()?, server_id, &token)
-            .context("failed to construct the Inspector gateway endpoint")
-            .map_err(AppFailure::from)?
-            .endpoint()
-            .clone();
+        let endpoint =
+            GatewayClient::new(gateway_topology(mode), self.base_url()?, server_id, &token)
+                .context("failed to construct the Inspector gateway endpoint")
+                .map_err(AppFailure::from)?
+                .endpoint()
+                .clone();
         let proxy = AuthProxy::start(endpoint, &token)
             .await
             .context("failed to start the Inspector authentication proxy")
@@ -2780,6 +2787,13 @@ const fn stack_mode_label(mode: StackMode) -> &'static str {
     match mode {
         StackMode::Controlplane => "controlplane",
         StackMode::Dataplane => "dataplane",
+    }
+}
+
+const fn gateway_topology(mode: StackMode) -> GatewayTopology {
+    match mode {
+        StackMode::Controlplane => GatewayTopology::Direct,
+        StackMode::Dataplane => GatewayTopology::Dataplane,
     }
 }
 

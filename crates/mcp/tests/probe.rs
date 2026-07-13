@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use cf_integration::backend_identity::BackendIdentity;
-use cf_integration::probe::{ProbeConfig, ProbeRequest, ProbeResponse, ProbeTransport, run_probe};
-use cf_integration_platform::StackMode;
+use cf_integration_mcp::GatewayTopology;
+use cf_integration_mcp::backend_identity::BackendIdentity;
+use cf_integration_mcp::probe::{
+    ProbeConfig, ProbeRequest, ProbeResponse, ProbeTransport, run_probe,
+};
 use serde_json::{Value, json};
 
 const INITIALIZE_ID: u64 = 1;
@@ -74,7 +76,7 @@ impl ProbeTransport for FakeTransport {
 
 fn config() -> ProbeConfig {
     ProbeConfig {
-        mode: StackMode::Dataplane,
+        mode: GatewayTopology::Dataplane,
         base_url: "http://127.0.0.1:8080/".to_owned(),
         server_id: "server-123".to_owned(),
         bearer_token: "secret-token".to_owned(),
@@ -94,7 +96,7 @@ async fn controlplane_mode_uses_the_public_raw_mcp_route() {
         tools_success(json!([{"name": "custom_tool"}])),
     ]);
     let mut configured = config();
-    configured.mode = StackMode::Controlplane;
+    configured.mode = GatewayTopology::Direct;
     let mut output = Vec::new();
 
     run_probe(&transport, &configured, &mut output)

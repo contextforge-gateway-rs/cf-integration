@@ -5,8 +5,8 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::http_transport::{MAX_MCP_RESPONSE_BYTES, ReqwestProbeTransport};
-use cf_integration::probe::{ProbeRequest, ProbeTransport};
+use cf_integration_mcp::http_transport::{MAX_MCP_RESPONSE_BYTES, ReqwestProbeTransport};
+use cf_integration_mcp::probe::{ProbeRequest, ProbeTransport};
 use serde_json::json;
 use tokio::net::TcpListener;
 

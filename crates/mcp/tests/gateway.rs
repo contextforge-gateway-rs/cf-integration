@@ -8,11 +8,11 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::gateway::{
+use cf_integration_mcp::GatewayTopology;
+use cf_integration_mcp::gateway::{
     DEFAULT_PROTOCOL_VERSION, GatewayClient, GatewayRequest, HeaderOverride, MCP_PROTOCOL_VERSION,
     MCP_SESSION_ID,
 };
-use cf_integration_platform::StackMode;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -209,7 +209,7 @@ async fn initialize_uses_fixed_encoded_route_and_exact_required_headers() {
     .dataplane()])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Dataplane,
+        GatewayTopology::Dataplane,
         &server.base_url,
         "tenant/a b?%\u{00fc}",
         "secret-token",
@@ -235,7 +235,7 @@ async fn initialize_uses_fixed_encoded_route_and_exact_required_headers() {
     );
     assert_eq!(client.session_id(), Some("session-one"));
     assert_eq!(exchange.session_id(), Some("session-one"));
-    assert_eq!(exchange.mode(), StackMode::Dataplane);
+    assert_eq!(exchange.mode(), GatewayTopology::Dataplane);
     assert_eq!(exchange.status(), 200);
 
     let requests = server.requests();
@@ -269,7 +269,7 @@ async fn response_session_is_propagated_and_notification_requires_202() {
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -304,7 +304,7 @@ async fn jsonrpc_response_requires_exact_http_200() {
     )])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -327,7 +327,7 @@ async fn generic_requests_parse_json_and_sse_and_validate_ids() {
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Dataplane,
+        GatewayTopology::Dataplane,
         &server.base_url,
         "server",
         "secret-token",
@@ -374,7 +374,7 @@ async fn structured_json_suffix_is_not_accepted_as_mcp_json() {
     }])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -401,7 +401,7 @@ async fn custom_protocol_version_changes_header_and_initialize_body() {
     )])
     .await;
     let mut client = GatewayClient::builder(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -434,7 +434,7 @@ async fn get_delete_and_malformed_post_support_explicit_invalid_header_overrides
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Dataplane,
+        GatewayTopology::Dataplane,
         &server.base_url,
         "server",
         "secret-token",
@@ -476,7 +476,7 @@ async fn get_delete_and_malformed_post_support_explicit_invalid_header_overrides
 async fn get_returns_after_headers_without_draining_an_open_sse_stream() {
     let server = MockServer::start([MockResponse::open_sse().dataplane()]).await;
     let mut client = GatewayClient::new(
-        StackMode::Dataplane,
+        GatewayTopology::Dataplane,
         &server.base_url,
         "server",
         "secret-token",
@@ -504,7 +504,7 @@ async fn absent_response_session_is_never_synthesized_or_sent() {
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -537,7 +537,7 @@ async fn assigned_session_must_be_nonempty_visible_ascii_without_spaces() {
                 .with_header(MCP_SESSION_ID, invalid_session)])
             .await;
         let mut client = GatewayClient::new(
-            StackMode::Controlplane,
+            GatewayTopology::Direct,
             &server.base_url,
             "server",
             "secret-token",
@@ -565,8 +565,13 @@ async fn http_failure_diagnostics_capture_exchange_without_leaking_secrets_or_co
     }
     .dataplane()])
     .await;
-    let mut client = GatewayClient::new(StackMode::Dataplane, &server.base_url, "server", token)
-        .expect("valid gateway client should build");
+    let mut client = GatewayClient::new(
+        GatewayTopology::Dataplane,
+        &server.base_url,
+        "server",
+        token,
+    )
+    .expect("valid gateway client should build");
 
     let error = client
         .send(GatewayRequest::request("tools/list", None, json!(4)))
@@ -575,9 +580,9 @@ async fn http_failure_diagnostics_capture_exchange_without_leaking_secrets_or_co
     let diagnostic = format!("{error}\n{error:?}");
     let exchange = error.exchange().expect("HTTP error should retain exchange");
 
-    assert_eq!(error.mode(), StackMode::Dataplane);
+    assert_eq!(error.mode(), GatewayTopology::Dataplane);
     assert_eq!(exchange.status(), 500);
-    assert_eq!(exchange.request().mode(), StackMode::Dataplane);
+    assert_eq!(exchange.request().mode(), GatewayTopology::Dataplane);
     assert!(diagnostic.contains("Dataplane"));
     assert!(diagnostic.contains("status 500"));
     assert!(diagnostic.contains("<redacted>"));
@@ -614,7 +619,7 @@ async fn failure_exchange_redacts_session_ids_reflected_in_response_bodies() {
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Dataplane,
+        GatewayTopology::Dataplane,
         &server.base_url,
         "server",
         "secret-token",
@@ -657,7 +662,7 @@ async fn malformed_jsonrpc_version_id_and_error_shapes_are_rejected_with_exchang
     ])
     .await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",
@@ -677,7 +682,7 @@ async fn malformed_jsonrpc_version_id_and_error_shapes_are_rejected_with_exchang
             .expect_err("malformed JSON-RPC response should fail");
         assert!(error.to_string().contains(expected), "{error}");
         assert!(error.exchange().is_some());
-        assert_eq!(error.mode(), StackMode::Controlplane);
+        assert_eq!(error.mode(), GatewayTopology::Direct);
     }
 }
 
@@ -688,8 +693,13 @@ async fn debug_output_redacts_bearer_token_session_and_payload() {
         .with_header(MCP_SESSION_ID, "debug-secret-session")
         .dataplane()])
     .await;
-    let mut client = GatewayClient::new(StackMode::Dataplane, &server.base_url, "server", token)
-        .expect("valid gateway client should build");
+    let mut client = GatewayClient::new(
+        GatewayTopology::Dataplane,
+        &server.base_url,
+        "server",
+        token,
+    )
+    .expect("valid gateway client should build");
     client
         .send(GatewayRequest::initialize(json!(1)))
         .await
@@ -709,7 +719,7 @@ async fn debug_output_redacts_bearer_token_session_and_payload() {
 fn builder_debug_redacts_token_even_when_repeated_in_other_inputs() {
     let token = "repeated-secret";
     let builder = GatewayClient::builder(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &format!("http://example.test/base?token={token}"),
         token,
         token,
@@ -738,9 +748,13 @@ async fn dataplane_rejects_absent_fallback_forged_and_duplicate_backend_markers(
 
     for response in cases {
         let server = MockServer::start([response]).await;
-        let mut client =
-            GatewayClient::new(StackMode::Dataplane, &server.base_url, "server", token)
-                .expect("valid gateway client should build");
+        let mut client = GatewayClient::new(
+            GatewayTopology::Dataplane,
+            &server.base_url,
+            "server",
+            token,
+        )
+        .expect("valid gateway client should build");
 
         let error = client
             .send(GatewayRequest::initialize(json!(1)))
@@ -759,7 +773,7 @@ async fn controlplane_does_not_require_the_harness_only_backend_marker() {
     let server =
         MockServer::start([MockResponse::json(StatusCode::OK, response(1, json!({})))]).await;
     let mut client = GatewayClient::new(
-        StackMode::Controlplane,
+        GatewayTopology::Direct,
         &server.base_url,
         "server",
         "secret-token",

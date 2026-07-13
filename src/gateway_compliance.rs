@@ -12,14 +12,17 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use cf_integration_platform::StackMode;
-
-use crate::backend_identity::{BACKEND_HEADER, BackendIdentity, sanitized_backend_value};
-use crate::gateway::{
+use cf_integration_mcp::GatewayTopology;
+use cf_integration_mcp::backend_identity::{
+    BACKEND_HEADER, BackendIdentity, sanitized_backend_value,
+};
+use cf_integration_mcp::gateway::{
     Exchange, GatewayClient, GatewayError, GatewayRequest, HeaderOverride, MCP_PROTOCOL_VERSION,
     MCP_SESSION_ID, RequestCapture,
 };
-use crate::mcp::{ACCEPT as MCP_ACCEPT, initialize_with_id_and_version, tool_call_args};
+use cf_integration_mcp::mcp::{
+    ACCEPT as MCP_ACCEPT, initialize_with_id_and_version, tool_call_args,
+};
 
 /// Outcome of one gateway-specific compliance case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,7 +209,7 @@ impl GatewayComplianceReport {
 
 /// Live gateway-specific suite inputs.
 pub struct GatewayComplianceConfig<'a> {
-    pub mode: StackMode,
+    pub mode: GatewayTopology,
     pub base_url: &'a str,
     pub server_id: &'a str,
     pub bearer_token: &'a str,
@@ -449,7 +452,7 @@ enum ResponseBodyCapture {
 async fn send_raw(
     client: &Client,
     request: Request,
-    mode: StackMode,
+    mode: GatewayTopology,
     protocol_version: &str,
     secrets: &[&str],
 ) -> std::result::Result<RawExchange, RawExchangeFailure> {
@@ -467,7 +470,7 @@ async fn send_raw(
 async fn send_raw_headers_only(
     client: &Client,
     request: Request,
-    mode: StackMode,
+    mode: GatewayTopology,
     protocol_version: &str,
     secrets: &[&str],
 ) -> std::result::Result<RawExchange, RawExchangeFailure> {
@@ -487,7 +490,7 @@ async fn send_raw_headers_only(
 async fn send_raw_with_capture(
     client: &Client,
     request: Request,
-    mode: StackMode,
+    mode: GatewayTopology,
     protocol_version: &str,
     secrets: &[&str],
     body_capture: ResponseBodyCapture,
@@ -525,7 +528,7 @@ async fn send_raw_with_capture(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let captured_headers = capture_raw_headers(&raw_headers, &response_secret_refs);
-    if mode == StackMode::Dataplane
+    if mode.requires_dataplane()
         && let Some(detail) = BackendIdentity::from_headers(&raw_headers).dataplane_error()
     {
         return Err(RawExchangeFailure {
@@ -731,7 +734,7 @@ fn evidence_from_request(
 }
 
 fn unavailable_evidence(
-    mode: StackMode,
+    mode: GatewayTopology,
     protocol_version: &str,
     reason: impl Into<String>,
 ) -> GatewayFailureEvidence {
@@ -770,7 +773,7 @@ fn evidence_from_gateway_error(
 async fn send_gateway(
     client: &mut GatewayClient,
     request: GatewayRequest,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> std::result::Result<Exchange, GatewaySendFailure> {
     let protocol_version = client.protocol_version().to_owned();
     match tokio::time::timeout(CASE_TIMEOUT, client.send(request)).await {
@@ -947,7 +950,7 @@ async fn wrong_scope(
     config: &GatewayComplianceConfig<'_>,
     token: Option<&str>,
 ) -> GatewayCaseResult {
-    if config.mode == StackMode::Controlplane {
+    if !config.mode.requires_dataplane() {
         return not_applicable(
             "security.authorization-wrong-server",
             "Security",
@@ -1121,7 +1124,7 @@ fn result_object(exchange: &Exchange) -> Option<&serde_json::Map<String, Value>>
         .and_then(Value::as_object)
 }
 
-async fn ping_cases(client: &mut GatewayClient, mode: StackMode) -> Vec<GatewayCaseResult> {
+async fn ping_cases(client: &mut GatewayClient, mode: GatewayTopology) -> Vec<GatewayCaseResult> {
     let session_assigned = client.session_id().is_some();
     let ping = send_gateway(
         client,
@@ -1259,7 +1262,7 @@ async fn compare_second_tools_list(
     client: &mut GatewayClient,
     first: &[Value],
     first_evidence: Option<&GatewayFailureEvidence>,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> GatewayCaseResult {
     if first.is_empty() {
         return failed_with_evidence(
@@ -1326,7 +1329,7 @@ async fn compare_second_tools_list(
 async fn call_safe_tool(
     client: &mut GatewayClient,
     tools: &[Value],
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> GatewayCaseResult {
     if tools.is_empty() {
         return fixture(
@@ -1397,7 +1400,7 @@ async fn call_safe_tool(
 async fn capability_cases(
     client: &mut GatewayClient,
     initialize: Option<&serde_json::Map<String, Value>>,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> Vec<GatewayCaseResult> {
     if initialize.is_none() {
         return [("resources", RESOURCES_SPEC), ("prompts", PROMPTS_SPEC)]
@@ -1484,7 +1487,7 @@ async fn transport_negative_cases(
     endpoint: &url::Url,
     token: &str,
     protocol_version: &str,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> Vec<GatewayCaseResult> {
     let mut cases = Vec::new();
     cases.push(
@@ -1702,7 +1705,7 @@ async fn get_response(
     token: &str,
     protocol_version: &str,
     session_id: Option<&str>,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> std::result::Result<RawExchange, RawExchangeFailure> {
     let mut authorization =
         HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| RawExchangeFailure {
@@ -1841,7 +1844,7 @@ fn virtualization_cases(
 }
 
 fn federation_and_security_gaps(
-    mode: StackMode,
+    mode: GatewayTopology,
     tools: &[Value],
     tools_evidence: Option<&GatewayFailureEvidence>,
     session_assigned: bool,
@@ -1901,7 +1904,7 @@ fn federation_and_security_gaps(
             SECURITY_SPEC,
             "current live fixture provisions one tenant and cannot establish cross-tenant isolation",
         ),
-        if mode == StackMode::Dataplane {
+        if mode.requires_dataplane() {
             not_applicable(
                 "security.virtual-server-isolation",
                 "Security",
@@ -1936,7 +1939,7 @@ fn federation_and_security_gaps(
 
 async fn delete_and_reuse_session(
     client: &mut GatewayClient,
-    mode: StackMode,
+    mode: GatewayTopology,
 ) -> Vec<GatewayCaseResult> {
     if client.session_id().is_none() {
         return vec![
@@ -2388,11 +2391,8 @@ fn case(
     }
 }
 
-fn mode_label(mode: StackMode) -> &'static str {
-    match mode {
-        StackMode::Controlplane => "controlplane",
-        StackMode::Dataplane => "dataplane",
-    }
+fn mode_label(mode: GatewayTopology) -> &'static str {
+    mode.report_label()
 }
 
 fn markdown(value: &str) -> String {

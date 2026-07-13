@@ -1,4 +1,4 @@
-use cf_integration::mcp::{
+use cf_integration_mcp::mcp::{
     ACCEPT, PROTOCOL_VERSION, initialize, initialize_with_id, initialize_with_id_and_version,
     jsonrpc, jsonrpc_with_id, parse_mcp_body, tool_call_args,
 };

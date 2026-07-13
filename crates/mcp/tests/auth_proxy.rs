@@ -8,7 +8,7 @@ use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, LOCATION};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::auth_proxy::{AuthProxy, MAX_REQUEST_BODY_BYTES};
+use cf_integration_mcp::auth_proxy::{AuthProxy, MAX_REQUEST_BODY_BYTES};
 use reqwest::{Client, Method, Url};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
