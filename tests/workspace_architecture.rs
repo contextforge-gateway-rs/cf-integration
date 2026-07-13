@@ -95,4 +95,32 @@ fn workspace_packages_and_internal_edges_match_the_architecture() {
             ),
         ])
     );
+
+    let binary_targets = packages
+        .iter()
+        .flat_map(|package| {
+            let package_name = package["name"].as_str().expect("package name");
+            package["targets"]
+                .as_array()
+                .expect("targets should be an array")
+                .iter()
+                .filter(|target| {
+                    target["kind"]
+                        .as_array()
+                        .expect("target kind should be an array")
+                        .iter()
+                        .any(|kind| kind == "bin")
+                })
+                .map(move |target| {
+                    (
+                        package_name.to_owned(),
+                        target["name"].as_str().expect("target name").to_owned(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        binary_targets,
+        vec![("cf-integration".to_owned(), "cf-integration".to_owned())]
+    );
 }

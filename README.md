@@ -47,6 +47,29 @@ Cargo output is configured under `.integration/cargo-target`; the repository
 does not create a root `target/` directory. The examples below use
 `cargo run --locked --`, which can be replaced by the built binary.
 
+## Rust workspace
+
+The workspace has one application package and four internal library packages:
+
+- `cf-integration` owns the CLI, application workflows, and the only shipped
+  binary.
+- `cf-integration-platform` owns configuration, process execution, source
+  checkouts, Compose commands, and stack lifecycle.
+- `cf-integration-mcp` owns MCP messages, HTTP transport, authentication proxy,
+  gateway operations, backend identity checks, and probes.
+- `cf-integration-compliance` owns official conformance fixture orchestration,
+  conformance results, coverage, and gateway-specific compliance checks.
+- `cf-integration-load` owns shared load settings plus the Goose and Locust
+  engines.
+
+The application may depend on all four libraries. Compliance and load may
+depend on platform and MCP. Platform and MCP remain independent foundations;
+the four libraries never depend on the application. These are internal
+ownership boundaries, not compatibility facade crates.
+
+The official TypeScript fixture is exclusively for conformance. Fast Time
+remains the probe, load, and live-test fixture.
+
 ## Quick start
 
 Start the full dataplane topology and probe its public route:
