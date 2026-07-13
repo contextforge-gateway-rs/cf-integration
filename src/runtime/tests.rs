@@ -680,13 +680,36 @@ mod unit {
                 return Box::pin(async move { self.run(spec) });
             }
             Box::pin(async move {
-                self.events.lock().expect("event lock").push("npx".into());
+                assert_eq!(
+                    spec.arguments().get(1).and_then(|value| value.to_str()),
+                    Some(cf_integration_compliance::OFFICIAL_CONFORMANCE_PACKAGE),
+                    "official workflow must execute the pinned alpha.9 oracle"
+                );
+                let spec_version = spec
+                    .arguments()
+                    .windows(2)
+                    .find(|values| values[0] == "--spec-version")
+                    .map(|values| values[1].to_string_lossy().into_owned())
+                    .expect("official runner spec version should be present");
+                self.events
+                    .lock()
+                    .expect("event lock")
+                    .extend(["npx".into(), format!("npx spec {spec_version}")]);
                 let endpoint = spec
                     .arguments()
                     .windows(2)
                     .find(|values| values[0] == "--url")
                     .map(|values| values[1].to_string_lossy().into_owned())
                     .expect("official runner URL should be present");
+                if endpoint == "http://127.0.0.1:43123/mcp" {
+                    self.events
+                        .lock()
+                        .expect("event lock")
+                        .push("official fixture direct".into());
+                    return Err(PlatformError::from(anyhow!(
+                        "intentional direct npx failure"
+                    )));
+                }
                 reqwest::Client::builder()
                     .timeout(Duration::from_secs(2))
                     .build()
@@ -720,6 +743,15 @@ mod unit {
                         }
                     }))
                     .expect("valid Compose JSON"))
+                }
+                Some("docker")
+                    if spec.arguments().iter().any(|value| value == "port")
+                        && spec
+                            .arguments()
+                            .iter()
+                            .any(|value| value == OFFICIAL_CONFORMANCE_SERVICE) =>
+                {
+                    Ok(b"127.0.0.1:43123\n".to_vec())
                 }
                 Some("docker")
                     if spec.arguments().first().is_some_and(|value| value == "ps")
@@ -1228,6 +1260,34 @@ mod unit {
         ));
     }
 
+    #[test]
+    fn direct_fixture_endpoint_accepts_only_a_published_loopback_address() {
+        assert_eq!(
+            parse_conformance_fixture_endpoint(b"127.0.0.1:43123\n")
+                .expect("loopback fixture endpoint should parse")
+                .as_str(),
+            "http://127.0.0.1:43123/mcp"
+        );
+        assert_eq!(
+            parse_conformance_fixture_endpoint(b"[::1]:43124\n")
+                .expect("IPv6 loopback fixture endpoint should parse")
+                .as_str(),
+            "http://[::1]:43124/mcp"
+        );
+
+        for output in [
+            b"0.0.0.0:43123\n".as_slice(),
+            b"192.0.2.10:43123\n".as_slice(),
+            b"not-an-address\n".as_slice(),
+            b"\n".as_slice(),
+        ] {
+            assert!(
+                parse_conformance_fixture_endpoint(output).is_err(),
+                "unsafe or invalid Compose output must be rejected: {output:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn environment_server_ids_bypass_fixture_and_target_caller_server() {
         for (key, server_id) in [
@@ -1334,7 +1394,7 @@ mod unit {
             mode: ComplianceMode::All,
             start: true,
             server_id: None,
-            spec_version: "2025-11-25".to_owned(),
+            spec_version: "2026-07-28".to_owned(),
             results_dir: Some(reports.path().to_owned()),
         };
 
@@ -1515,7 +1575,7 @@ mod unit {
     }
 
     #[tokio::test]
-    async fn combined_workflow_routes_official_and_gateway_checks_to_scoped_fixture() {
+    async fn combined_workflow_routes_alpha9_july_conformance_through_dataplane_gateway() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let api_state = Arc::new(FixtureApiState {
             events: Arc::clone(&events),
@@ -1556,7 +1616,7 @@ mod unit {
             mode: ComplianceMode::Dataplane,
             start: false,
             server_id: None,
-            spec_version: "2025-11-25".to_owned(),
+            spec_version: "2026-07-28".to_owned(),
             results_dir: Some(reports.path().to_owned()),
         };
 
@@ -1566,6 +1626,12 @@ mod unit {
             .expect_err("intentional official and gateway responses should fail");
 
         let events = events.lock().expect("event lock");
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "official fixture direct"),
+            "the official oracle must first exercise the fixture directly: {events:?}"
+        );
         let npx = events
             .iter()
             .position(|event| event == "npx")
@@ -1574,6 +1640,7 @@ mod unit {
             .iter()
             .position(|event| event == "official proxy complete")
             .expect("official proxy boundary");
+        assert!(events.iter().any(|event| event == "npx spec 2026-07-28"));
         let expected_path = format!(
             "/servers/{}/mcp",
             cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
@@ -2695,14 +2762,18 @@ mod unit {
             OFFICIAL_CONFORMANCE_REVISION,
             cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
-        for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
+        for target in [
+            ConformanceTarget::Fixture,
+            ConformanceTarget::Controlplane,
+            ConformanceTarget::Dataplane,
+        ] {
             let mode_paths = paths.conformance_mode(target);
             write_official_results(
                 &mode_paths.official_results,
                 scenarios.iter().copied(),
                 "SUCCESS",
             );
-            if target == BaselineTarget::Controlplane {
+            if target == ConformanceTarget::Controlplane {
                 write_fixture_failure_result(&mode_paths.official_results, fixture_scenario);
             }
             fs::write(&mode_paths.rich_baseline, "server: []\n")
@@ -2732,7 +2803,7 @@ mod unit {
         assert!(report.contains("| fixture failure | 0 |"));
         assert!(report.contains("| control-plane only failure | 1 |"));
         assert!(report.contains(&format!(
-            "| {fixture_scenario} | failure | compliant | control-plane only failure |"
+            "| {fixture_scenario} | compliant | failure | compliant | control-plane only failure |"
         )));
     }
 
@@ -2748,14 +2819,18 @@ mod unit {
             "untrusted-revision",
             cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
-        for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
+        for target in [
+            ConformanceTarget::Fixture,
+            ConformanceTarget::Controlplane,
+            ConformanceTarget::Dataplane,
+        ] {
             let mode_paths = paths.conformance_mode(target);
             write_official_results(
                 &mode_paths.official_results,
                 scenarios.iter().copied(),
                 "SUCCESS",
             );
-            if target == BaselineTarget::Controlplane {
+            if target == ConformanceTarget::Controlplane {
                 write_fixture_failure_result(&mode_paths.official_results, fixture_scenario);
             }
             fs::write(&mode_paths.rich_baseline, "server: []\n")
@@ -2784,7 +2859,7 @@ mod unit {
 
         assert!(report.contains("| fixture failure | 1 |"));
         assert!(report.contains(&format!(
-            "| {fixture_scenario} | fixture failure | compliant | fixture failure |"
+            "| {fixture_scenario} | compliant | fixture failure | compliant | fixture failure |"
         )));
     }
 
@@ -3027,7 +3102,7 @@ mod unit {
         dataplane.target = "dataplane".to_owned();
         dataplane.suite = "all".to_owned();
 
-        let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+        let error = compatible_metadata(None, Some(&controlplane), Some(&dataplane), None)
             .expect_err("mixed suites must not be reported as one comparison");
         assert!(error.to_string().contains("incompatible runs"));
     }
@@ -3060,7 +3135,7 @@ mod unit {
         let mut dataplane = controlplane.clone();
         dataplane.target = "dataplane".to_owned();
 
-        compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+        compatible_metadata(None, Some(&controlplane), Some(&dataplane), None)
             .expect("historical paired metadata should remain compatible");
     }
 
@@ -3074,7 +3149,7 @@ mod unit {
         let mut dataplane = controlplane.clone();
         dataplane.target = "dataplane".to_owned();
 
-        compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+        compatible_metadata(None, Some(&controlplane), Some(&dataplane), None)
             .expect("identical fixture provenance should be compatible");
     }
 
@@ -3088,7 +3163,7 @@ mod unit {
         let mut dataplane = paired_metadata(None);
         dataplane.target = "dataplane".to_owned();
 
-        let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+        let error = compatible_metadata(None, Some(&controlplane), Some(&dataplane), None)
             .expect_err("fresh and historical fixture provenance must not be mixed");
         let message = error.to_string();
 
@@ -3118,7 +3193,7 @@ mod unit {
                 paired_metadata(Some(fixture_metadata(repository, revision, server_id)));
             dataplane.target = "dataplane".to_owned();
 
-            let error = compatible_metadata(Some(&controlplane), Some(&dataplane), None)
+            let error = compatible_metadata(None, Some(&controlplane), Some(&dataplane), None)
                 .expect_err("different fixture provenance must not be compared");
 
             let message = error.to_string();

@@ -10,11 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use url::Url;
 
-/// Pinned upstream repository containing the official conformance server.
-pub const OFFICIAL_CONFORMANCE_REPOSITORY: &str =
-    "https://github.com/modelcontextprotocol/conformance";
-/// Pinned upstream revision used to build the official conformance server.
-pub const OFFICIAL_CONFORMANCE_REVISION: &str = "21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0";
+pub use crate::profile::{OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION};
 /// Docker Compose service name for the official conformance server.
 pub const OFFICIAL_CONFORMANCE_SERVICE: &str = "mcp_conformance_server";
 /// Backend URL reachable from the control-plane container.

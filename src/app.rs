@@ -222,13 +222,29 @@ fn resolve_compliance(
     environment: &Environment,
 ) -> Result<ComplianceAction> {
     match command {
-        ComplianceCommand::Conformance(args) => Ok(ComplianceAction::Conformance {
-            common: resolve_compliance_common(args.common, environment, ComplianceMode::Dataplane)?,
-            suite: args.suite.into(),
-            baseline: args.baseline,
-        }),
+        ComplianceCommand::Conformance(args) => {
+            let mut common = args.common;
+            if common.mode.is_none() {
+                common.mode = Some(ComplianceMode::All);
+            }
+            Ok(ComplianceAction::Conformance {
+                common: resolve_compliance_common(
+                    common,
+                    args.spec_version,
+                    environment,
+                    ComplianceMode::All,
+                )?,
+                suite: args.suite.into(),
+                baseline: args.baseline,
+            })
+        }
         ComplianceCommand::Gateway(args) => Ok(ComplianceAction::Gateway {
-            common: resolve_compliance_common(args.common, environment, ComplianceMode::Dataplane)?,
+            common: resolve_compliance_common(
+                args.common,
+                args.spec_version,
+                environment,
+                ComplianceMode::Dataplane,
+            )?,
         }),
         ComplianceCommand::All(args) => {
             let mut common = args.common;
@@ -236,7 +252,12 @@ fn resolve_compliance(
                 common.mode = Some(ComplianceMode::All);
             }
             Ok(ComplianceAction::All {
-                common: resolve_compliance_common(common, environment, ComplianceMode::All)?,
+                common: resolve_compliance_common(
+                    common,
+                    args.spec_version,
+                    environment,
+                    ComplianceMode::All,
+                )?,
                 suite: args.suite.into(),
             })
         }
@@ -249,6 +270,7 @@ fn resolve_compliance(
 
 fn resolve_compliance_common(
     args: ComplianceCommonArgs,
+    spec_version: crate::cli::CliConformanceVersion,
     environment: &Environment,
     default: ComplianceMode,
 ) -> Result<ResolvedComplianceCommon> {
@@ -256,7 +278,7 @@ fn resolve_compliance_common(
         mode: resolve_multi_mode(args.mode, environment, default)?,
         start: args.start,
         server_id: args.server_id,
-        spec_version: args.spec_version,
+        spec_version: spec_version.spec_version().to_owned(),
         results_dir: args.results_dir,
     })
 }

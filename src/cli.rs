@@ -3,10 +3,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use cf_integration_compliance::{
+    DEFAULT_MCP_SPEC_VERSION, LEGACY_MCP_SPEC_VERSION, STABLE_MCP_SPEC_VERSION,
+};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-
-/// Default stable MCP revision exercised by compliance commands.
-pub const DEFAULT_MCP_SPEC_VERSION: &str = "2025-11-25";
 
 const RUN_TIME_ERROR: &str =
     "must be one or more positive integer+unit groups using ms, s, m, h, or d";
@@ -337,7 +337,7 @@ pub enum ComplianceCommand {
 /// Options shared by live compliance commands.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct ComplianceCommonArgs {
-    /// Stack mode; defaults to CF_MCP_STACK_MODE, or command-specific behavior.
+    /// Routed stack mode; conformance/all default to all, gateway defaults to the environment or dataplane.
     #[arg(long, value_enum)]
     pub mode: Option<ComplianceMode>,
 
@@ -348,10 +348,6 @@ pub struct ComplianceCommonArgs {
     /// Existing virtual server ID; uses the configured/default fixture when omitted.
     #[arg(long)]
     pub server_id: Option<String>,
-
-    /// Stable MCP specification revision to test.
-    #[arg(long, default_value = DEFAULT_MCP_SPEC_VERSION)]
-    pub spec_version: String,
 
     /// Result artifact root; defaults below CF_INTEGRATION_DIR.
     #[arg(long)]
@@ -364,7 +360,11 @@ pub struct ConformanceArgs {
     #[command(flatten)]
     pub common: ComplianceCommonArgs,
 
-    /// Official scenario suite; all includes pending 2025-11-25 scenarios.
+    /// MCP revision exercised by the official runner and fixture.
+    #[arg(long, value_enum, default_value = DEFAULT_MCP_SPEC_VERSION)]
+    pub spec_version: CliConformanceVersion,
+
+    /// Official scenario suite selected for the requested protocol revision.
     #[arg(long, value_enum, default_value = "all")]
     pub suite: CliConformanceSuite,
 
@@ -378,6 +378,10 @@ pub struct ConformanceArgs {
 pub struct GatewayComplianceArgs {
     #[command(flatten)]
     pub common: ComplianceCommonArgs,
+
+    /// MCP revision exercised by the Rust gateway-specific suite.
+    #[arg(long, value_enum, default_value = STABLE_MCP_SPEC_VERSION)]
+    pub spec_version: CliConformanceVersion,
 }
 
 /// Combined compliance options.
@@ -386,15 +390,45 @@ pub struct ComplianceAllArgs {
     #[command(flatten)]
     pub common: ComplianceCommonArgs,
 
+    /// MCP revision exercised by the official runner and fixture.
+    #[arg(long, value_enum, default_value = DEFAULT_MCP_SPEC_VERSION)]
+    pub spec_version: CliConformanceVersion,
+
     /// Official scenario suite to run before gateway-specific tests.
     #[arg(long, value_enum, default_value = "all")]
     pub suite: CliConformanceSuite,
 }
 
+/// MCP protocol revision supported by the pinned official conformance package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliConformanceVersion {
+    /// June 2025 stable protocol revision.
+    #[value(name = "2025-06-18")]
+    June2025,
+    /// November 2025 stable protocol revision.
+    #[value(name = "2025-11-25")]
+    November2025,
+    /// July 2026 draft protocol revision.
+    #[value(name = "2026-07-28")]
+    July2026,
+}
+
+impl CliConformanceVersion {
+    /// Returns the exact protocol revision selected for the command.
+    #[must_use]
+    pub const fn spec_version(self) -> &'static str {
+        match self {
+            Self::June2025 => LEGACY_MCP_SPEC_VERSION,
+            Self::November2025 => STABLE_MCP_SPEC_VERSION,
+            Self::July2026 => DEFAULT_MCP_SPEC_VERSION,
+        }
+    }
+}
+
 /// Official server scenario suite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CliConformanceSuite {
-    /// Stable scenarios, excluding upstream pending scenarios.
+    /// Active scenarios, excluding upstream pending and draft-only scenarios.
     Active,
     /// Every scenario tagged for the selected revision.
     All,

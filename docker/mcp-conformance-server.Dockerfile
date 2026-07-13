@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG MCP_CONFORMANCE_REVISION=21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0
+ARG MCP_CONFORMANCE_REVISION=794dcab99ed1ef2b89607be9999574140ea5c96e
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \

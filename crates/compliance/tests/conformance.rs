@@ -6,15 +6,15 @@ use std::process::Command;
 
 use cf_integration_compliance::conformance::{
     Baseline, BaselineClassification, BaselineEntry, BaselineTarget, CheckStatus,
-    ComparisonClassification, ComparisonReport, ConformanceCheck, ConformanceFixtureMetadata,
-    ConformanceResults, ConformanceRunMetadata, ConformanceScenarioResult,
-    DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION, OFFICIAL_CONFORMANCE_PACKAGE,
-    ScenarioComparison, ScenarioOutcome, SpecReference, audit_baseline, classify_outcomes,
-    compare_result_sets, compare_result_sets_with_fixture_trust, expected_server_scenarios,
-    is_trusted_official_fixture, load_baseline, load_server_results, official_server_command,
-    parse_baseline, project_official_baseline, render_comparison_markdown, validate_baseline,
-    validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
-    write_official_baseline_projection,
+    ComparisonClassification, ComparisonFixtureTrust, ComparisonReport, ConformanceCheck,
+    ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata,
+    ConformanceScenarioResult, DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION,
+    OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome, SpecReference,
+    audit_baseline, classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
+    expected_server_scenarios, is_trusted_official_fixture, load_baseline, load_server_results,
+    official_server_command, parse_baseline, project_official_baseline, render_comparison_markdown,
+    validate_baseline, validate_no_fixture_failures, validate_server_scenario_set,
+    write_comparison_report, write_official_baseline_projection,
 };
 use cf_integration_compliance::conformance_fixture::{
     OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID,
@@ -99,20 +99,32 @@ fn trusted_official_fixture_requires_exact_pinned_provenance() {
 
 #[test]
 fn pinned_server_scenario_catalog_has_exact_suite_differences() {
-    let active = expected_server_scenarios("active", "2025-11-25")
+    let stable_active = expected_server_scenarios("active", "2025-11-25")
         .expect("active scenario catalog should be pinned");
-    let all = expected_server_scenarios("all", "2025-11-25")
+    let stable_all = expected_server_scenarios("all", "2025-11-25")
         .expect("all scenario catalog should be pinned");
     let previous = expected_server_scenarios("all", "2025-06-18")
         .expect("previous stable scenario catalog should be pinned");
+    let draft_active = expected_server_scenarios("active", "2026-07-28")
+        .expect("draft active scenario catalog should be pinned");
+    let draft_all = expected_server_scenarios("all", "2026-07-28")
+        .expect("draft all scenario catalog should be pinned");
 
-    assert_eq!(active.len(), 30);
-    assert_eq!(all.len(), 32);
+    assert_eq!(stable_active.len(), 30);
+    assert_eq!(stable_all.len(), 32);
     assert_eq!(previous.len(), 26);
+    assert_eq!(draft_active.len(), 20);
+    assert_eq!(draft_all.len(), 40);
     assert_eq!(
-        all.difference(&active).copied().collect::<BTreeSet<_>>(),
+        stable_all
+            .difference(&stable_active)
+            .copied()
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from(["json-schema-2020-12", "server-sse-polling"])
     );
+    assert_eq!(draft_all.difference(&draft_active).count(), 20);
+    assert!(draft_all.contains("server-stateless"));
+    assert!(!draft_all.contains("server-initialize"));
     assert!(
         expected_server_scenarios("all", "2099-01-01")
             .expect_err("unverified package/spec catalogs must be rejected")
@@ -156,6 +168,8 @@ fn complete_scenario_names_with_empty_checks_are_rejected() {
 #[ignore = "requires the pinned official npm package"]
 fn pinned_server_scenario_catalog_matches_official_package() {
     for (suite, spec_version) in [
+        ("active", "2026-07-28"),
+        ("all", "2026-07-28"),
         ("active", "2025-11-25"),
         ("all", "2025-11-25"),
         ("all", "2025-06-18"),
@@ -257,9 +271,13 @@ fn official_command_is_pinned_complete_and_ordered() {
 
     assert_eq!(
         OFFICIAL_CONFORMANCE_PACKAGE,
-        "@modelcontextprotocol/conformance@0.1.16"
+        "@modelcontextprotocol/conformance@0.2.0-alpha.9"
     );
-    assert_eq!(DEFAULT_MCP_SPEC_VERSION, "2025-11-25");
+    assert_eq!(
+        OFFICIAL_CONFORMANCE_REVISION,
+        "794dcab99ed1ef2b89607be9999574140ea5c96e"
+    );
+    assert_eq!(DEFAULT_MCP_SPEC_VERSION, "2026-07-28");
     assert_eq!(DEFAULT_CONFORMANCE_SUITE, "all");
     assert_eq!(spec.program(), "npx");
     assert!(
@@ -277,7 +295,7 @@ fn official_command_is_pinned_complete_and_ordered() {
             OsString::from("--suite"),
             OsString::from("all"),
             OsString::from("--spec-version"),
-            OsString::from("2025-11-25"),
+            OsString::from("2026-07-28"),
             OsString::from("--expected-failures"),
             OsString::from("projected.yml"),
             OsString::from("--output-dir"),
@@ -836,7 +854,7 @@ fn unrelated_and_mixed_failures_remain_noncompliant() {
 }
 
 #[test]
-fn paired_outcomes_cover_every_report_classification() {
+fn three_way_outcomes_cover_every_report_classification() {
     use ComparisonClassification as Class;
     use ScenarioOutcome as Outcome;
 
@@ -844,28 +862,26 @@ fn paired_outcomes_cover_every_report_classification() {
         (
             Outcome::Compliant,
             Outcome::Compliant,
+            Outcome::Compliant,
             false,
-            Class::BothCompliant,
+            Class::AllCompliant,
+        ),
+        (
+            Outcome::NonCompliant,
+            Outcome::Compliant,
+            Outcome::Compliant,
+            false,
+            Class::FixtureOnlyFailure,
         ),
         (
             Outcome::Compliant,
-            Outcome::NotApplicable,
-            false,
-            Class::ControlplaneCompliant,
-        ),
-        (
-            Outcome::NotApplicable,
-            Outcome::Compliant,
-            false,
-            Class::DataplaneCompliant,
-        ),
-        (
             Outcome::NonCompliant,
             Outcome::Compliant,
             false,
             Class::ControlplaneOnlyFailure,
         ),
         (
+            Outcome::Compliant,
             Outcome::Compliant,
             Outcome::NonCompliant,
             false,
@@ -874,10 +890,33 @@ fn paired_outcomes_cover_every_report_classification() {
         (
             Outcome::NonCompliant,
             Outcome::NonCompliant,
+            Outcome::Compliant,
+            false,
+            Class::FixtureAndControlplaneFailure,
+        ),
+        (
+            Outcome::NonCompliant,
+            Outcome::Compliant,
+            Outcome::NonCompliant,
+            false,
+            Class::FixtureAndDataplaneFailure,
+        ),
+        (
+            Outcome::Compliant,
+            Outcome::NonCompliant,
+            Outcome::NonCompliant,
+            false,
+            Class::GatewaysOnlyFailure,
+        ),
+        (
+            Outcome::NonCompliant,
+            Outcome::NonCompliant,
+            Outcome::NonCompliant,
             false,
             Class::SharedFailure,
         ),
         (
+            Outcome::Compliant,
             Outcome::NonCompliant,
             Outcome::Compliant,
             true,
@@ -886,10 +925,12 @@ fn paired_outcomes_cover_every_report_classification() {
         (
             Outcome::FixtureFailure,
             Outcome::Compliant,
+            Outcome::Compliant,
             false,
             Class::FixtureFailure,
         ),
         (
+            Outcome::NotApplicable,
             Outcome::NotApplicable,
             Outcome::NotApplicable,
             false,
@@ -898,20 +939,15 @@ fn paired_outcomes_cover_every_report_classification() {
         (
             Outcome::Missing,
             Outcome::Compliant,
-            false,
-            Class::Ambiguous,
-        ),
-        (
-            Outcome::Ambiguous,
             Outcome::Compliant,
             false,
             Class::Ambiguous,
         ),
     ];
 
-    for (controlplane, dataplane, expected, classification) in cases {
+    for (fixture, controlplane, dataplane, expected, classification) in cases {
         assert_eq!(
-            classify_outcomes(controlplane, dataplane, expected),
+            classify_outcomes(fixture, controlplane, dataplane, expected),
             classification
         );
     }
@@ -919,6 +955,12 @@ fn paired_outcomes_cover_every_report_classification() {
 
 #[test]
 fn result_comparison_uses_independent_baselines_and_keeps_missing_results_ambiguous() {
+    let fixture = results([
+        result("both-pass", [CheckStatus::Success]),
+        result("expected-cp", [CheckStatus::Success]),
+        result("cp-only-failure", [CheckStatus::Success]),
+        result("missing-dataplane", [CheckStatus::Success]),
+    ]);
     let controlplane = results([
         result("both-pass", [CheckStatus::Success]),
         result("expected-cp", [CheckStatus::Failure]),
@@ -939,6 +981,7 @@ fn result_comparison_uses_independent_baselines_and_keeps_missing_results_ambigu
     let dataplane_baseline = Baseline { server: Vec::new() };
 
     let comparisons = compare_result_sets(
+        &fixture,
         &controlplane,
         &dataplane,
         &controlplane_baseline,
@@ -951,7 +994,7 @@ fn result_comparison_uses_independent_baselines_and_keeps_missing_results_ambigu
 
     assert_eq!(
         by_name["both-pass"].classification,
-        ComparisonClassification::BothCompliant
+        ComparisonClassification::AllCompliant
     );
     assert_eq!(
         by_name["expected-cp"].classification,
@@ -987,36 +1030,53 @@ fn trusted_comparison_attributes_fixture_not_found_per_side() {
         fixture_result("dataplane-failure"),
         fixture_result("shared-failure"),
     ]);
+    let fixture = results([
+        result("control-failure", [CheckStatus::Success]),
+        result("dataplane-failure", [CheckStatus::Success]),
+        result("shared-failure", [CheckStatus::Success]),
+    ]);
     let empty = Baseline::default();
 
     let trusted = compare_result_sets_with_fixture_trust(
+        &fixture,
         &controlplane,
         &dataplane,
         &empty,
         &empty,
-        true,
-        true,
+        ComparisonFixtureTrust {
+            fixture: true,
+            controlplane: true,
+            dataplane: true,
+        },
     )
     .into_iter()
     .map(|comparison| (comparison.scenario, comparison.classification))
     .collect::<BTreeMap<_, _>>();
     let controlplane_only_trusted = compare_result_sets_with_fixture_trust(
+        &fixture,
         &controlplane,
         &dataplane,
         &empty,
         &empty,
-        true,
-        false,
+        ComparisonFixtureTrust {
+            fixture: true,
+            controlplane: true,
+            dataplane: false,
+        },
     );
     let dataplane_only_trusted = compare_result_sets_with_fixture_trust(
+        &fixture,
         &controlplane,
         &dataplane,
         &empty,
         &empty,
-        false,
-        true,
+        ComparisonFixtureTrust {
+            fixture: true,
+            controlplane: false,
+            dataplane: true,
+        },
     );
-    let historical = compare_result_sets(&controlplane, &dataplane, &empty, &empty);
+    let historical = compare_result_sets(&fixture, &controlplane, &dataplane, &empty, &empty);
 
     assert_eq!(
         trusted["control-failure"],
@@ -1028,7 +1088,7 @@ fn trusted_comparison_attributes_fixture_not_found_per_side() {
     );
     assert_eq!(
         trusted["shared-failure"],
-        ComparisonClassification::SharedFailure
+        ComparisonClassification::GatewaysOnlyFailure
     );
     assert!(controlplane_only_trusted.iter().any(|comparison| {
         comparison.scenario == "shared-failure"
@@ -1048,11 +1108,20 @@ fn comparison_report_is_deterministic_sorted_complete_and_markdown_safe() {
     let report = ComparisonReport {
         spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
         suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
+        fixture: Some(ConformanceFixtureMetadata {
+            repository: "https://github.com/modelcontextprotocol/conformance".to_owned(),
+            revision: "revision`with-markdown".to_owned(),
+            server_id: "server-id".to_owned(),
+        }),
         scenarios: vec![
             ScenarioComparison {
                 scenario: "zeta|scenario".to_owned(),
+                fixture: ScenarioOutcome::NonCompliant,
+                fixture_failed_checks: 2,
                 controlplane: ScenarioOutcome::NonCompliant,
+                controlplane_failed_checks: 3,
                 dataplane: ScenarioOutcome::NonCompliant,
+                dataplane_failed_checks: 4,
                 classification: ComparisonClassification::SharedFailure,
                 expected_by: BTreeSet::new(),
                 spec_references: vec![SpecReference {
@@ -1063,9 +1132,13 @@ fn comparison_report_is_deterministic_sorted_complete_and_markdown_safe() {
             },
             ScenarioComparison {
                 scenario: "alpha".to_owned(),
+                fixture: ScenarioOutcome::Compliant,
+                fixture_failed_checks: 0,
                 controlplane: ScenarioOutcome::Compliant,
+                controlplane_failed_checks: 0,
                 dataplane: ScenarioOutcome::Compliant,
-                classification: ComparisonClassification::BothCompliant,
+                dataplane_failed_checks: 0,
+                classification: ComparisonClassification::AllCompliant,
                 expected_by: BTreeSet::new(),
                 spec_references: Vec::new(),
             },
@@ -1078,7 +1151,11 @@ fn comparison_report_is_deterministic_sorted_complete_and_markdown_safe() {
     assert_eq!(first, second);
     assert!(first.starts_with("# MCP Conformance Comparison\n"));
     assert!(first.contains(OFFICIAL_CONFORMANCE_PACKAGE));
-    assert!(first.contains("| both compliant | 1 |"));
+    assert!(first.contains("revision\\`with-markdown"));
+    assert!(first.contains("| Fixture direct | 1 | 1 | 2 |"));
+    assert!(first.contains("| Control plane | 1 | 1 | 3 |"));
+    assert!(first.contains("| Dataplane | 1 | 1 | 4 |"));
+    assert!(first.contains("| all compliant | 1 |"));
     assert!(first.contains("| shared failure | 1 |"));
     assert!(
         first.find("| alpha |").expect("alpha row should exist")
@@ -1095,6 +1172,7 @@ fn comparison_report_writer_creates_parent_directories() {
     let report = ComparisonReport {
         spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
         suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
+        fixture: None,
         scenarios: Vec::new(),
     };
     let directory = tempfile::tempdir().expect("temporary directory should be created");

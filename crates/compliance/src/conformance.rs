@@ -12,14 +12,13 @@ use serde_json::Value;
 
 use cf_integration_platform::process::CommandSpec;
 
-use crate::conformance_fixture::{
-    OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID,
+use crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID;
+pub use crate::profile::{DEFAULT_MCP_SPEC_VERSION, OFFICIAL_CONFORMANCE_PACKAGE};
+use crate::profile::{
+    LEGACY_MCP_SPEC_VERSION, OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION,
+    STABLE_MCP_SPEC_VERSION,
 };
 
-/// Pinned official MCP conformance package used as the protocol oracle.
-pub const OFFICIAL_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.1.16";
-/// Default MCP specification version exercised by the harness.
-pub const DEFAULT_MCP_SPEC_VERSION: &str = "2025-11-25";
 /// Default official server scenario suite.
 pub const DEFAULT_CONFORMANCE_SUITE: &str = "all";
 
@@ -52,6 +51,45 @@ pub struct ConformanceRunMetadata {
     pub fixture: Option<ConformanceFixtureMetadata>,
 }
 
+/// Endpoint topology exercised by one official server-conformance run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConformanceTarget {
+    /// Official oracle connected directly to the pinned TypeScript fixture.
+    Fixture,
+    /// Official oracle routed through the Python control plane.
+    Controlplane,
+    /// Official oracle routed through the Rust dataplane.
+    Dataplane,
+}
+
+impl ConformanceTarget {
+    /// Stable metadata and report label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture direct",
+            Self::Controlplane => "control-plane",
+            Self::Dataplane => "dataplane",
+        }
+    }
+
+    /// Expected-failure baseline owner, when the target is a gateway path.
+    #[must_use]
+    pub const fn baseline_target(self) -> Option<BaselineTarget> {
+        match self {
+            Self::Fixture => None,
+            Self::Controlplane => Some(BaselineTarget::Controlplane),
+            Self::Dataplane => Some(BaselineTarget::Dataplane),
+        }
+    }
+}
+
+impl fmt::Display for ConformanceTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
 /// Whether provenance identifies the exact pinned official TypeScript fixture.
 #[must_use]
 pub fn is_trusted_official_fixture(fixture: Option<&ConformanceFixtureMetadata>) -> bool {
@@ -62,7 +100,7 @@ pub fn is_trusted_official_fixture(fixture: Option<&ConformanceFixtureMetadata>)
     })
 }
 
-// Exact server catalogs emitted by @modelcontextprotocol/conformance@0.1.16.
+// Exact server catalogs emitted by @modelcontextprotocol/conformance@0.2.0-alpha.9.
 // Keep these coupled to OFFICIAL_CONFORMANCE_PACKAGE and verify the pin with
 // the ignored package-backed test before updating either.
 const SERVER_SCENARIOS_2025_06_18: [&str; 26] = [
@@ -100,6 +138,50 @@ const SERVER_ACTIVE_ADDITIONS_2025_11_25: [&str; 4] = [
     "dns-rebinding-protection",
 ];
 const SERVER_PENDING_2025_11_25: [&str; 2] = ["json-schema-2020-12", "server-sse-polling"];
+const SERVER_ACTIVE_2026_07_28: [&str; 20] = [
+    "completion-complete",
+    "dns-rebinding-protection",
+    "prompts-get-embedded-resource",
+    "prompts-get-simple",
+    "prompts-get-with-args",
+    "prompts-get-with-image",
+    "prompts-list",
+    "resources-list",
+    "resources-read-binary",
+    "resources-read-text",
+    "resources-templates-read",
+    "server-sse-multiple-streams",
+    "tools-call-audio",
+    "tools-call-embedded-resource",
+    "tools-call-error",
+    "tools-call-image",
+    "tools-call-mixed-content",
+    "tools-call-simple-text",
+    "tools-call-with-progress",
+    "tools-list",
+];
+const SERVER_ALL_ADDITIONS_2026_07_28: [&str; 20] = [
+    "caching",
+    "http-custom-header-server-validation",
+    "http-header-validation",
+    "input-required-result-basic-elicitation",
+    "input-required-result-basic-list-roots",
+    "input-required-result-basic-sampling",
+    "input-required-result-capability-check",
+    "input-required-result-ignore-extra-params",
+    "input-required-result-missing-input-response",
+    "input-required-result-multi-round",
+    "input-required-result-multiple-input-requests",
+    "input-required-result-non-tool-request",
+    "input-required-result-request-state",
+    "input-required-result-result-type",
+    "input-required-result-tampered-state",
+    "input-required-result-unsupported-methods",
+    "input-required-result-validate-input",
+    "json-schema-2020-12",
+    "sep-2164-resource-not-found",
+    "server-stateless",
+];
 
 const MAX_CHECKS_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -153,6 +235,15 @@ impl BaselineTarget {
 impl fmt::Display for BaselineTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.label())
+    }
+}
+
+impl From<BaselineTarget> for ConformanceTarget {
+    fn from(target: BaselineTarget) -> Self {
+        match target {
+            BaselineTarget::Controlplane => Self::Controlplane,
+            BaselineTarget::Dataplane => Self::Dataplane,
+        }
     }
 }
 
@@ -535,22 +626,31 @@ pub fn expected_server_scenarios(
     if !matches!(suite, "active" | "all") {
         bail!("unsupported official server suite {suite:?}; expected active or all");
     }
-    let mut scenarios = SERVER_SCENARIOS_2025_06_18
-        .into_iter()
-        .collect::<BTreeSet<_>>();
     match spec_version {
-        "2025-06-18" => {}
-        "2025-11-25" => {
+        LEGACY_MCP_SPEC_VERSION => Ok(SERVER_SCENARIOS_2025_06_18.into_iter().collect()),
+        STABLE_MCP_SPEC_VERSION => {
+            let mut scenarios = SERVER_SCENARIOS_2025_06_18
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             scenarios.extend(SERVER_ACTIVE_ADDITIONS_2025_11_25);
             if suite == "all" {
                 scenarios.extend(SERVER_PENDING_2025_11_25);
             }
+            Ok(scenarios)
         }
-        _ => bail!(
+        DEFAULT_MCP_SPEC_VERSION => {
+            let mut scenarios = SERVER_ACTIVE_2026_07_28
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            if suite == "all" {
+                scenarios.extend(SERVER_ALL_ADDITIONS_2026_07_28);
+            }
+            Ok(scenarios)
+        }
+        _ => Err(anyhow::anyhow!(
             "no verified {OFFICIAL_CONFORMANCE_PACKAGE} server scenario catalog for specification {spec_version:?}"
-        ),
+        )),
     }
-    Ok(scenarios)
 }
 
 /// Requires parsed results to exactly cover the pinned suite/spec scenario set.
@@ -835,8 +935,8 @@ pub fn audit_baseline(results: &ConformanceResults, baseline: &Baseline) -> Base
     audit
 }
 
-/// Scenario-level outcome used for control-plane/dataplane comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Scenario-level outcome used for direct and routed comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScenarioOutcome {
     /// No failures or unknown statuses; at least one success or warning was observed.
     Compliant,
@@ -867,20 +967,24 @@ impl ScenarioOutcome {
     }
 }
 
-/// Required comparison report classification.
+/// Required three-way comparison report classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ComparisonClassification {
-    /// Both paths are compliant.
-    BothCompliant,
-    /// Only the control-plane scenario applies and it is compliant.
-    ControlplaneCompliant,
-    /// Only the dataplane scenario applies and it is compliant.
-    DataplaneCompliant,
-    /// The control plane fails while the dataplane passes or is not applicable.
+    /// Direct and both routed paths are compliant.
+    AllCompliant,
+    /// Only the direct fixture run fails.
+    FixtureOnlyFailure,
+    /// Only the control-plane path fails.
     ControlplaneOnlyFailure,
-    /// The dataplane fails while the control plane passes or is not applicable.
+    /// Only the dataplane path fails.
     DataplaneOnlyFailure,
-    /// Both paths fail.
+    /// The direct fixture and control-plane path fail.
+    FixtureAndControlplaneFailure,
+    /// The direct fixture and dataplane path fail.
+    FixtureAndDataplaneFailure,
+    /// Both gateway paths fail while the direct fixture passes.
+    GatewaysOnlyFailure,
+    /// Direct and both routed paths fail.
     SharedFailure,
     /// Every observed implementation failure is documented in its independent baseline.
     ExpectedFailure,
@@ -893,12 +997,14 @@ pub enum ComparisonClassification {
 }
 
 impl ComparisonClassification {
-    const ALL: [Self; 10] = [
-        Self::BothCompliant,
-        Self::ControlplaneCompliant,
-        Self::DataplaneCompliant,
+    const ALL: [Self; 12] = [
+        Self::AllCompliant,
+        Self::FixtureOnlyFailure,
         Self::ControlplaneOnlyFailure,
         Self::DataplaneOnlyFailure,
+        Self::FixtureAndControlplaneFailure,
+        Self::FixtureAndDataplaneFailure,
+        Self::GatewaysOnlyFailure,
         Self::SharedFailure,
         Self::ExpectedFailure,
         Self::FixtureFailure,
@@ -910,11 +1016,13 @@ impl ComparisonClassification {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::BothCompliant => "both compliant",
-            Self::ControlplaneCompliant => "control-plane compliant",
-            Self::DataplaneCompliant => "dataplane compliant",
+            Self::AllCompliant => "all compliant",
+            Self::FixtureOnlyFailure => "fixture-only failure",
             Self::ControlplaneOnlyFailure => "control-plane only failure",
             Self::DataplaneOnlyFailure => "dataplane only failure",
+            Self::FixtureAndControlplaneFailure => "fixture + control-plane failure",
+            Self::FixtureAndDataplaneFailure => "fixture + dataplane failure",
+            Self::GatewaysOnlyFailure => "both gateways only failure",
             Self::SharedFailure => "shared failure",
             Self::ExpectedFailure => "expected failure",
             Self::FixtureFailure => "fixture failure",
@@ -924,18 +1032,20 @@ impl ComparisonClassification {
     }
 }
 
-/// Classifies a pair of scenario outcomes.
+/// Classifies direct-fixture, control-plane, and dataplane scenario outcomes.
 #[must_use]
 pub fn classify_outcomes(
+    fixture: ScenarioOutcome,
     controlplane: ScenarioOutcome,
     dataplane: ScenarioOutcome,
     expected_failure: bool,
 ) -> ComparisonClassification {
-    use ScenarioOutcome::{
-        Ambiguous, Compliant, FixtureFailure, Missing, NonCompliant, NotApplicable,
-    };
+    use ScenarioOutcome::{Ambiguous, FixtureFailure, Missing, NonCompliant, NotApplicable};
 
-    if matches!(controlplane, FixtureFailure) || matches!(dataplane, FixtureFailure) {
+    if matches!(fixture, FixtureFailure)
+        || matches!(controlplane, FixtureFailure)
+        || matches!(dataplane, FixtureFailure)
+    {
         return ComparisonClassification::FixtureFailure;
     }
     if expected_failure
@@ -943,18 +1053,29 @@ pub fn classify_outcomes(
     {
         return ComparisonClassification::ExpectedFailure;
     }
-    match (controlplane, dataplane) {
-        (Compliant, Compliant) => ComparisonClassification::BothCompliant,
-        (Compliant, NotApplicable) => ComparisonClassification::ControlplaneCompliant,
-        (NotApplicable, Compliant) => ComparisonClassification::DataplaneCompliant,
-        (NonCompliant, Compliant | NotApplicable) => {
-            ComparisonClassification::ControlplaneOnlyFailure
-        }
-        (Compliant | NotApplicable, NonCompliant) => ComparisonClassification::DataplaneOnlyFailure,
-        (NonCompliant, NonCompliant) => ComparisonClassification::SharedFailure,
-        (NotApplicable, NotApplicable) => ComparisonClassification::NotApplicable,
-        (Ambiguous | Missing, _) | (_, Ambiguous | Missing) => ComparisonClassification::Ambiguous,
-        _ => ComparisonClassification::Ambiguous,
+    if matches!(fixture, Ambiguous | Missing)
+        || matches!(controlplane, Ambiguous | Missing)
+        || matches!(dataplane, Ambiguous | Missing)
+    {
+        return ComparisonClassification::Ambiguous;
+    }
+    if fixture == NotApplicable && controlplane == NotApplicable && dataplane == NotApplicable {
+        return ComparisonClassification::NotApplicable;
+    }
+
+    match (
+        fixture == NonCompliant,
+        controlplane == NonCompliant,
+        dataplane == NonCompliant,
+    ) {
+        (false, false, false) => ComparisonClassification::AllCompliant,
+        (true, false, false) => ComparisonClassification::FixtureOnlyFailure,
+        (false, true, false) => ComparisonClassification::ControlplaneOnlyFailure,
+        (false, false, true) => ComparisonClassification::DataplaneOnlyFailure,
+        (true, true, false) => ComparisonClassification::FixtureAndControlplaneFailure,
+        (true, false, true) => ComparisonClassification::FixtureAndDataplaneFailure,
+        (false, true, true) => ComparisonClassification::GatewaysOnlyFailure,
+        (true, true, true) => ComparisonClassification::SharedFailure,
     }
 }
 
@@ -963,10 +1084,18 @@ pub fn classify_outcomes(
 pub struct ScenarioComparison {
     /// Official scenario name.
     pub scenario: String,
+    /// Direct official fixture result.
+    pub fixture: ScenarioOutcome,
+    /// Raw failed checks in the direct fixture result.
+    pub fixture_failed_checks: usize,
     /// Control-plane result.
     pub controlplane: ScenarioOutcome,
+    /// Raw failed checks in the control-plane result.
+    pub controlplane_failed_checks: usize,
     /// Dataplane result.
     pub dataplane: ScenarioOutcome,
+    /// Raw failed checks in the dataplane result.
+    pub dataplane_failed_checks: usize,
     /// Reduced report classification.
     pub classification: ComparisonClassification,
     /// Baselines that expected an observed failure.
@@ -975,21 +1104,33 @@ pub struct ScenarioComparison {
     pub spec_references: Vec<SpecReference>,
 }
 
-/// Compares parsed official results using independent expected-failure baselines.
+/// Per-target provenance trust used when reducing fixture-shaped failures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ComparisonFixtureTrust {
+    /// Direct fixture provenance is the exact pinned source revision.
+    pub fixture: bool,
+    /// Control-plane fixture provenance is the exact pinned source revision.
+    pub controlplane: bool,
+    /// Dataplane fixture provenance is the exact pinned source revision.
+    pub dataplane: bool,
+}
+
+/// Compares direct and routed official results using gateway-specific baselines.
 #[must_use]
 pub fn compare_result_sets(
+    fixture: &ConformanceResults,
     controlplane: &ConformanceResults,
     dataplane: &ConformanceResults,
     controlplane_baseline: &Baseline,
     dataplane_baseline: &Baseline,
 ) -> Vec<ScenarioComparison> {
     compare_result_sets_with_fixture_trust(
+        fixture,
         controlplane,
         dataplane,
         controlplane_baseline,
         dataplane_baseline,
-        false,
-        false,
+        ComparisonFixtureTrust::default(),
     )
 }
 
@@ -999,12 +1140,12 @@ pub fn compare_result_sets(
 /// implementation failures. An untrusted side preserves historical behavior.
 #[must_use]
 pub fn compare_result_sets_with_fixture_trust(
+    fixture: &ConformanceResults,
     controlplane: &ConformanceResults,
     dataplane: &ConformanceResults,
     controlplane_baseline: &Baseline,
     dataplane_baseline: &Baseline,
-    controlplane_trusted_fixture: bool,
-    dataplane_trusted_fixture: bool,
+    trust: ComparisonFixtureTrust,
 ) -> Vec<ScenarioComparison> {
     let controlplane_expected: BTreeSet<_> = controlplane_baseline
         .server
@@ -1016,7 +1157,8 @@ pub fn compare_result_sets_with_fixture_trust(
         .iter()
         .map(|entry| entry.scenario.as_str())
         .collect();
-    let mut scenarios: BTreeSet<_> = controlplane.scenarios.keys().cloned().collect();
+    let mut scenarios: BTreeSet<_> = fixture.scenarios.keys().cloned().collect();
+    scenarios.extend(controlplane.scenarios.keys().cloned());
     scenarios.extend(dataplane.scenarios.keys().cloned());
     scenarios.extend(
         controlplane_expected
@@ -1032,13 +1174,17 @@ pub fn compare_result_sets_with_fixture_trust(
     scenarios
         .into_iter()
         .map(|scenario| {
+            let fixture_result = fixture.scenarios.get(&scenario);
             let controlplane_result = controlplane.scenarios.get(&scenario);
             let dataplane_result = dataplane.scenarios.get(&scenario);
+            let fixture_outcome = fixture_result
+                .map(|result| result.outcome_with_trusted_fixture(trust.fixture))
+                .unwrap_or(ScenarioOutcome::Missing);
             let controlplane_outcome = controlplane_result
-                .map(|result| result.outcome_with_trusted_fixture(controlplane_trusted_fixture))
+                .map(|result| result.outcome_with_trusted_fixture(trust.controlplane))
                 .unwrap_or(ScenarioOutcome::Missing);
             let dataplane_outcome = dataplane_result
-                .map(|result| result.outcome_with_trusted_fixture(dataplane_trusted_fixture))
+                .map(|result| result.outcome_with_trusted_fixture(trust.dataplane))
                 .unwrap_or(ScenarioOutcome::Missing);
 
             let mut expected_by = BTreeSet::new();
@@ -1052,9 +1198,15 @@ pub fn compare_result_sets_with_fixture_trust(
             {
                 expected_by.insert(BaselineTarget::Dataplane);
             }
-            let failed_sides = usize::from(controlplane_outcome == ScenarioOutcome::NonCompliant)
+            let failed_sides = usize::from(fixture_outcome == ScenarioOutcome::NonCompliant)
+                + usize::from(controlplane_outcome == ScenarioOutcome::NonCompliant)
                 + usize::from(dataplane_outcome == ScenarioOutcome::NonCompliant);
             let evidence_is_complete = !matches!(
+                fixture_outcome,
+                ScenarioOutcome::Missing
+                    | ScenarioOutcome::Ambiguous
+                    | ScenarioOutcome::FixtureFailure
+            ) && !matches!(
                 controlplane_outcome,
                 ScenarioOutcome::Missing
                     | ScenarioOutcome::Ambiguous
@@ -1065,10 +1217,15 @@ pub fn compare_result_sets_with_fixture_trust(
                     | ScenarioOutcome::Ambiguous
                     | ScenarioOutcome::FixtureFailure
             );
-            let expected =
-                evidence_is_complete && failed_sides > 0 && expected_by.len() == failed_sides;
+            let expected = evidence_is_complete
+                && fixture_outcome != ScenarioOutcome::NonCompliant
+                && failed_sides > 0
+                && expected_by.len() == failed_sides;
 
             let mut spec_references = Vec::new();
+            if let Some(result) = fixture_result {
+                append_references(&mut spec_references, result);
+            }
             if let Some(result) = controlplane_result {
                 append_references(&mut spec_references, result);
             }
@@ -1079,9 +1236,14 @@ pub fn compare_result_sets_with_fixture_trust(
 
             ScenarioComparison {
                 scenario,
+                fixture: fixture_outcome,
+                fixture_failed_checks: failed_check_count(fixture_result),
                 controlplane: controlplane_outcome,
+                controlplane_failed_checks: failed_check_count(controlplane_result),
                 dataplane: dataplane_outcome,
+                dataplane_failed_checks: failed_check_count(dataplane_result),
                 classification: classify_outcomes(
+                    fixture_outcome,
                     controlplane_outcome,
                     dataplane_outcome,
                     expected,
@@ -1091,6 +1253,16 @@ pub fn compare_result_sets_with_fixture_trust(
             }
         })
         .collect()
+}
+
+fn failed_check_count(result: Option<&ConformanceScenarioResult>) -> usize {
+    result.map_or(0, |result| {
+        result
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Failure)
+            .count()
+    })
 }
 
 fn append_references(output: &mut Vec<SpecReference>, result: &ConformanceScenarioResult) {
@@ -1117,10 +1289,12 @@ fn reference_key(reference: &SpecReference) -> String {
 /// Inputs for a deterministic Markdown comparison report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComparisonReport {
-    /// MCP specification version exercised by both result sets.
+    /// MCP specification version exercised by all result sets.
     pub spec_version: String,
-    /// Official scenario suite exercised by both result sets.
+    /// Official scenario suite exercised by all result sets.
     pub suite: String,
+    /// Exact official fixture provenance when recorded by the run.
+    pub fixture: Option<ConformanceFixtureMetadata>,
     /// Scenario comparisons in any order; rendering sorts them.
     pub scenarios: Vec<ScenarioComparison>,
 }
@@ -1131,17 +1305,82 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
     let mut output = String::new();
     output.push_str("# MCP Conformance Comparison\n\n");
     output.push_str(&format!(
-        "- Official oracle: `{}`\n- Specification: `{}`\n- Suite: `{}`\n\n",
+        "- Official oracle: `{}`\n- Specification: `{}`\n- Suite: `{}`\n",
         OFFICIAL_CONFORMANCE_PACKAGE,
         markdown_code(&report.spec_version),
         markdown_code(&report.suite)
     ));
+    if let Some(fixture) = report.fixture.as_ref() {
+        output.push_str(&format!(
+            "- Fixture source: `{}` at `{}`\n",
+            markdown_code(&fixture.repository),
+            markdown_code(&fixture.revision)
+        ));
+    }
+    output.push('\n');
 
     let mut counts = BTreeMap::new();
     for scenario in &report.scenarios {
         *counts.entry(scenario.classification).or_insert(0_usize) += 1;
     }
-    output.push_str("## Summary\n\n");
+    output.push_str("## Target outcomes\n\n");
+    output.push_str("| Target | Compliant scenarios | Failed scenarios | Failed checks | Fixture failures | Not applicable | Ambiguous | Missing |\n");
+    output.push_str("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    type Outcome = fn(&ScenarioComparison) -> ScenarioOutcome;
+    type FailedChecks = fn(&ScenarioComparison) -> usize;
+    let target_outcomes: [(&str, Outcome, FailedChecks); 3] = [
+        (
+            "Fixture direct",
+            |scenario: &ScenarioComparison| scenario.fixture,
+            |scenario: &ScenarioComparison| scenario.fixture_failed_checks,
+        ),
+        (
+            "Control plane",
+            |scenario: &ScenarioComparison| scenario.controlplane,
+            |scenario: &ScenarioComparison| scenario.controlplane_failed_checks,
+        ),
+        (
+            "Dataplane",
+            |scenario: &ScenarioComparison| scenario.dataplane,
+            |scenario: &ScenarioComparison| scenario.dataplane_failed_checks,
+        ),
+    ];
+    for (label, outcome, failed_checks) in target_outcomes {
+        let mut counts = BTreeMap::new();
+        for scenario in &report.scenarios {
+            *counts.entry(outcome(scenario)).or_insert(0_usize) += 1;
+        }
+        let failed_checks = report.scenarios.iter().map(failed_checks).sum::<usize>();
+        output.push_str(&format!(
+            "| {label} | {} | {} | {failed_checks} | {} | {} | {} | {} |\n",
+            counts
+                .get(&ScenarioOutcome::Compliant)
+                .copied()
+                .unwrap_or_default(),
+            counts
+                .get(&ScenarioOutcome::NonCompliant)
+                .copied()
+                .unwrap_or_default(),
+            counts
+                .get(&ScenarioOutcome::FixtureFailure)
+                .copied()
+                .unwrap_or_default(),
+            counts
+                .get(&ScenarioOutcome::NotApplicable)
+                .copied()
+                .unwrap_or_default(),
+            counts
+                .get(&ScenarioOutcome::Ambiguous)
+                .copied()
+                .unwrap_or_default(),
+            counts
+                .get(&ScenarioOutcome::Missing)
+                .copied()
+                .unwrap_or_default(),
+        ));
+    }
+
+    output.push_str("\n## Comparison summary\n\n");
     output.push_str("| Classification | Scenarios |\n|---|---:|\n");
     for classification in ComparisonClassification::ALL {
         output.push_str(&format!(
@@ -1153,9 +1392,9 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
 
     output.push_str("\n## Scenarios\n\n");
     output.push_str(
-        "| Scenario | Control plane | Dataplane | Classification | Expected by | Specification references |\n",
+        "| Scenario | Fixture direct | Control plane | Dataplane | Classification | Expected by | Specification references |\n",
     );
-    output.push_str("|---|---|---|---|---|---|\n");
+    output.push_str("|---|---|---|---|---|---|---|\n");
     let mut scenarios: Vec<_> = report.scenarios.iter().collect();
     scenarios.sort_by(|left, right| left.scenario.cmp(&right.scenario));
     for scenario in scenarios {
@@ -1180,8 +1419,9 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
                 .join("<br>")
         };
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&scenario.scenario),
+            scenario.fixture.label(),
             scenario.controlplane.label(),
             scenario.dataplane.label(),
             scenario.classification.label(),

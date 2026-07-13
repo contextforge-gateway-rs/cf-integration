@@ -65,7 +65,8 @@ fn readme_documents_the_official_conformance_fixture_contract() {
         "official TypeScript conformance server",
         "Fast Time remains",
         "`--server-id` bypasses automatic provisioning",
-        "21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0",
+        "794dcab99ed1ef2b89607be9999574140ea5c96e",
+        "`2026-07-28` MCP revision",
         "loopback `MCP_CLI_BASE_URL`",
         "`MCP_SERVER_ID` and `MCP_VIRTUAL_SERVER_ID` bypass automatic provisioning",
         "fresh conformance-run completion",
@@ -188,7 +189,7 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
     assert!(dockerfile.contains("FROM node:22-bookworm-slim"));
     assert!(
         dockerfile
-            .contains("ARG MCP_CONFORMANCE_REVISION=21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0")
+            .contains("ARG MCP_CONFORMANCE_REVISION=794dcab99ed1ef2b89607be9999574140ea5c96e")
     );
     assert!(dockerfile.contains(
         "git clone https://github.com/modelcontextprotocol/conformance.git mcp-conformance"
@@ -239,13 +240,15 @@ services:
       GATEWAY_TOOL_NAME_SEPARATOR: "_"
   mcp_conformance_server:
     profiles: ["conformance"]
-    image: cf-integration/mcp-conformance-server:0.1.16
+    image: cf-integration/mcp-conformance-server:0.2.0-alpha.9
     build:
       context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
       dockerfile: docker/mcp-conformance-server.Dockerfile
     restart: "no"
     environment:
       PORT: "3000"
+    ports:
+      - "127.0.0.1::3000"
     networks:
       - mcpnet
     healthcheck:

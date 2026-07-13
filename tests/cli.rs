@@ -2,10 +2,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use cf_integration::cli::{
-    Cli, CliConformanceSuite, CliLoadEngine, CliStackMode, Command, ComplianceAllArgs,
-    ComplianceArgs, ComplianceCommand, ComplianceMode, ComplianceReportArgs, InspectArgs,
-    LiveGroup, LoadArgs, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs,
-    TestArgs, TestCommand, TokenArgs, TokenKind,
+    Cli, CliConformanceSuite, CliConformanceVersion, CliLoadEngine, CliStackMode, Command,
+    ComplianceAllArgs, ComplianceArgs, ComplianceCommand, ComplianceMode, ComplianceReportArgs,
+    InspectArgs, LiveGroup, LoadArgs, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand,
+    StackLogsArgs, TestArgs, TestCommand, TokenArgs, TokenKind,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -369,13 +369,18 @@ fn compliance_commands_parse_reproducible_options() {
     assert_eq!(args.common.mode, Some(ComplianceMode::Controlplane));
     assert!(args.common.start);
     assert_eq!(args.common.server_id.as_deref(), Some("server-1"));
-    assert_eq!(args.common.spec_version, "2025-11-25");
+    assert_eq!(args.spec_version, CliConformanceVersion::November2025);
     assert_eq!(args.suite, CliConformanceSuite::All);
     assert_eq!(args.baseline, Some(PathBuf::from("baseline.yml")));
     assert_eq!(args.common.results_dir, Some(PathBuf::from("results")));
 
     let Command::Compliance(ComplianceArgs {
-        command: ComplianceCommand::All(ComplianceAllArgs { common, suite }),
+        command:
+            ComplianceCommand::All(ComplianceAllArgs {
+                common,
+                spec_version,
+                suite,
+            }),
     }) = parse(&[
         "cf-integration",
         "compliance",
@@ -390,7 +395,18 @@ fn compliance_commands_parse_reproducible_options() {
         panic!("expected all compliance")
     };
     assert_eq!(common.mode, Some(ComplianceMode::All));
+    assert_eq!(spec_version, CliConformanceVersion::July2026);
     assert_eq!(suite, CliConformanceSuite::Active);
+
+    for unsupported in ["draft", "2099-01-01"] {
+        rejected(&[
+            "cf-integration",
+            "compliance",
+            "conformance",
+            "--spec-version",
+            unsupported,
+        ]);
+    }
 
     let Command::Compliance(ComplianceArgs {
         command:
@@ -467,7 +483,18 @@ fn help_lists_exact_enum_values_and_default_spec() {
         .find(|arg| arg.get_id().as_str() == "spec_version")
         .and_then(|arg| arg.get_default_values().first())
         .expect("spec version default");
-    assert_eq!(spec, "2025-11-25");
+    assert_eq!(spec, "2026-07-28");
+    assert_eq!(
+        values(&["compliance", "conformance"], "spec_version"),
+        ["2025-06-18", "2025-11-25", "2026-07-28"]
+    );
+    let gateway = command_at(&["compliance", "gateway"]);
+    let gateway_spec = gateway
+        .get_arguments()
+        .find(|arg| arg.get_id().as_str() == "spec_version")
+        .and_then(|arg| arg.get_default_values().first())
+        .expect("gateway spec version default");
+    assert_eq!(gateway_spec, "2025-11-25");
 
     for path in [
         &["compliance", "conformance"][..],

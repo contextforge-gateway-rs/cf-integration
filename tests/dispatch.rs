@@ -21,12 +21,12 @@ fn action(arguments: &[&str], environment: &[(&str, &str)]) -> Action {
     resolve_action(cli, &environment).expect("action should resolve")
 }
 
-fn common(mode: ComplianceMode) -> ResolvedComplianceCommon {
+fn common(mode: ComplianceMode, spec_version: &str) -> ResolvedComplianceCommon {
     ResolvedComplianceCommon {
         mode,
         start: false,
         server_id: None,
-        spec_version: "2025-11-25".to_owned(),
+        spec_version: spec_version.to_owned(),
         results_dir: None,
     }
 }
@@ -214,6 +214,14 @@ fn multi_mode_suite_requires_stack_ownership() {
 #[test]
 fn compliance_actions_preserve_reproducibility_inputs() {
     assert_eq!(
+        action(&["cf-integration", "compliance", "conformance"], &[],),
+        Action::Compliance(ComplianceAction::Conformance {
+            common: common(ComplianceMode::All, "2026-07-28"),
+            suite: ConformanceSuite::All,
+            baseline: None,
+        })
+    );
+    assert_eq!(
         action(
             &[
                 "cf-integration",
@@ -250,13 +258,13 @@ fn compliance_actions_preserve_reproducibility_inputs() {
     assert_eq!(
         action(&["cf-integration", "compliance", "gateway"], &[]),
         Action::Compliance(ComplianceAction::Gateway {
-            common: common(ComplianceMode::Dataplane),
+            common: common(ComplianceMode::Dataplane, "2025-11-25"),
         })
     );
     assert_eq!(
         action(&["cf-integration", "compliance", "all"], &[]),
         Action::Compliance(ComplianceAction::All {
-            common: common(ComplianceMode::All),
+            common: common(ComplianceMode::All, "2026-07-28"),
             suite: ConformanceSuite::All,
         })
     );
@@ -310,7 +318,7 @@ fn inspector_resolves_one_mode_and_stays_separate_from_compliance() {
                 mode: ComplianceMode::All,
                 start: true,
                 server_id: None,
-                spec_version: "2025-11-25".to_owned(),
+                spec_version: "2026-07-28".to_owned(),
                 results_dir: None,
             },
             suite: ConformanceSuite::All,
@@ -322,7 +330,7 @@ fn inspector_resolves_one_mode_and_stays_separate_from_compliance() {
             &[("CF_MCP_STACK_MODE", "controlplane")],
         ),
         Action::Compliance(ComplianceAction::All {
-            common: common(ComplianceMode::Dataplane),
+            common: common(ComplianceMode::Dataplane, "2026-07-28"),
             suite: ConformanceSuite::All,
         })
     );

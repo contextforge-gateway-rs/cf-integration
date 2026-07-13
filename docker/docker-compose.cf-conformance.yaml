@@ -4,13 +4,15 @@ services:
       GATEWAY_TOOL_NAME_SEPARATOR: "_"
   mcp_conformance_server:
     profiles: ["conformance"]
-    image: cf-integration/mcp-conformance-server:0.1.16
+    image: cf-integration/mcp-conformance-server:0.2.0-alpha.9
     build:
       context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
       dockerfile: docker/mcp-conformance-server.Dockerfile
     restart: "no"
     environment:
       PORT: "3000"
+    ports:
+      - "127.0.0.1::3000"
     networks:
       - mcpnet
     healthcheck:

@@ -16,15 +16,39 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .map(Path::to_owned)
                 .unwrap_or_else(|| self.config.root().join("reports")),
         );
-        let coverage = self.write_spec_coverage_report(&paths.report_output, &paths)?;
-        println!("Specification coverage: {}", coverage.display());
-        if [BaselineTarget::Controlplane, BaselineTarget::Dataplane]
+        let conformance_targets = [
+            ConformanceTarget::Fixture,
+            ConformanceTarget::Controlplane,
+            ConformanceTarget::Dataplane,
+        ];
+        let has_conformance = conformance_targets
             .into_iter()
             .map(|target| paths.conformance_mode(target))
-            .any(|artifact| artifact.metadata.is_file() || artifact.official_results.is_dir())
-        {
+            .any(|artifact| artifact.metadata.is_file() || artifact.official_results.is_dir());
+        if has_conformance {
             let comparison = self.write_comparison_from_artifacts(&paths, None)?;
             println!("Conformance comparison: {}", comparison.display());
+        }
+
+        let conformance_spec = conformance_targets
+            .into_iter()
+            .map(|target| self.load_conformance_artifact(&paths, target))
+            .collect::<AppResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .map(|artifact| artifact.metadata.spec_version)
+            .next();
+        if conformance_spec
+            .as_deref()
+            .is_some_and(|version| version != COVERAGE_SPEC_VERSION)
+        {
+            println!(
+                "Specification coverage skipped: inventory is pinned to {COVERAGE_SPEC_VERSION}, official conformance used {}",
+                conformance_spec.as_deref().unwrap_or_default()
+            );
+        } else {
+            let coverage = self.write_spec_coverage_report(&paths.report_output, &paths)?;
+            println!("Specification coverage: {}", coverage.display());
         }
 
         for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
@@ -84,9 +108,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         paths: &CompliancePaths,
     ) -> AppResult<()> {
         let controlplane_official =
-            self.load_conformance_artifact(paths, BaselineTarget::Controlplane)?;
+            self.load_conformance_artifact(paths, ConformanceTarget::Controlplane)?;
         let dataplane_official =
-            self.load_conformance_artifact(paths, BaselineTarget::Dataplane)?;
+            self.load_conformance_artifact(paths, ConformanceTarget::Dataplane)?;
         let controlplane_gateway =
             self.load_gateway_artifact(paths, BaselineTarget::Controlplane)?;
         let dataplane_gateway = self.load_gateway_artifact(paths, BaselineTarget::Dataplane)?;
@@ -161,9 +185,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         paths: &CompliancePaths,
         expected_run: Option<(&str, &str)>,
     ) -> AppResult<PathBuf> {
-        let controlplane = self.load_conformance_artifact(paths, BaselineTarget::Controlplane)?;
-        let dataplane = self.load_conformance_artifact(paths, BaselineTarget::Dataplane)?;
-        if controlplane.is_none() && dataplane.is_none() {
+        let fixture = self.load_conformance_artifact(paths, ConformanceTarget::Fixture)?;
+        let controlplane =
+            self.load_conformance_artifact(paths, ConformanceTarget::Controlplane)?;
+        let dataplane = self.load_conformance_artifact(paths, ConformanceTarget::Dataplane)?;
+        if fixture.is_none() && controlplane.is_none() && dataplane.is_none() {
             return Err(AppFailure::from(anyhow!(
                 "no official conformance artifacts found beneath {}",
                 paths.conformance_root.display()
@@ -171,6 +197,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         }
 
         let metadata = compatible_metadata(
+            fixture.as_ref().map(|artifact| &artifact.metadata),
             controlplane.as_ref().map(|artifact| &artifact.metadata),
             dataplane.as_ref().map(|artifact| &artifact.metadata),
             expected_run,
@@ -178,6 +205,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let empty_results = ConformanceResults::default();
         let empty_baseline = Baseline::default();
         let scenarios = compare_result_sets_with_fixture_trust(
+            fixture
+                .as_ref()
+                .map_or(&empty_results, |artifact| &artifact.results),
             controlplane
                 .as_ref()
                 .map_or(&empty_results, |artifact| &artifact.results),
@@ -190,16 +220,23 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             dataplane
                 .as_ref()
                 .map_or(&empty_baseline, |artifact| &artifact.baseline),
-            is_trusted_official_fixture(
-                controlplane
-                    .as_ref()
-                    .and_then(|artifact| artifact.metadata.fixture.as_ref()),
-            ),
-            is_trusted_official_fixture(
-                dataplane
-                    .as_ref()
-                    .and_then(|artifact| artifact.metadata.fixture.as_ref()),
-            ),
+            ComparisonFixtureTrust {
+                fixture: is_trusted_official_fixture(
+                    fixture
+                        .as_ref()
+                        .and_then(|artifact| artifact.metadata.fixture.as_ref()),
+                ),
+                controlplane: is_trusted_official_fixture(
+                    controlplane
+                        .as_ref()
+                        .and_then(|artifact| artifact.metadata.fixture.as_ref()),
+                ),
+                dataplane: is_trusted_official_fixture(
+                    dataplane
+                        .as_ref()
+                        .and_then(|artifact| artifact.metadata.fixture.as_ref()),
+                ),
+            },
         );
         let output = paths.report_output.join("mcp-conformance-comparison.md");
         write_comparison_report(
@@ -207,6 +244,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             &ComparisonReport {
                 spec_version: metadata.spec_version.clone(),
                 suite: metadata.suite.clone(),
+                fixture: metadata.fixture.clone(),
                 scenarios,
             },
         )
@@ -217,8 +255,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) fn load_conformance_artifact(
         &self,
         paths: &CompliancePaths,
-        target: BaselineTarget,
+        target: impl Into<ConformanceTarget>,
     ) -> AppResult<Option<LoadedConformanceArtifact>> {
+        let target = target.into();
         let artifact = paths.conformance_mode(target);
         if !artifact.metadata.is_file()
             && !artifact.official_results.is_dir()
@@ -253,12 +292,17 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let results = load_server_results(&artifact.official_results).map_err(AppFailure::from)?;
         validate_server_scenario_set(&results, &metadata.suite, &metadata.spec_version)
             .map_err(AppFailure::from)?;
-        let baseline_path = if artifact.rich_baseline.is_file() {
-            artifact.rich_baseline
-        } else {
-            default_baseline_path(self.config.root(), target)
+        let baseline = match target.baseline_target() {
+            Some(baseline_target) => {
+                let baseline_path = if artifact.rich_baseline.is_file() {
+                    artifact.rich_baseline
+                } else {
+                    default_baseline_path(self.config.root(), baseline_target)
+                };
+                load_baseline(&baseline_path, baseline_target).map_err(AppFailure::from)?
+            }
+            None => Baseline::default(),
         };
-        let baseline = load_baseline(&baseline_path, target).map_err(AppFailure::from)?;
         Ok(Some(LoadedConformanceArtifact {
             results,
             baseline,
@@ -283,8 +327,13 @@ impl CompliancePaths {
         }
     }
 
-    pub(super) fn conformance_mode(&self, target: BaselineTarget) -> ConformanceModePaths {
-        let root = self.conformance_root.join(target_slug(target));
+    pub(super) fn conformance_mode(
+        &self,
+        target: impl Into<ConformanceTarget>,
+    ) -> ConformanceModePaths {
+        let root = self
+            .conformance_root
+            .join(conformance_target_slug(target.into()));
         ConformanceModePaths {
             official_results: root.join("official"),
             projection: root.join("expected-failures.yml"),
@@ -311,13 +360,15 @@ impl CompliancePaths {
         gateway: bool,
     ) -> AppResult<()> {
         for mode in selected_modes(selection) {
-            let target = baseline_target(mode);
             if conformance {
-                remove_artifact_directory(&self.conformance_mode(target).root)?;
+                remove_artifact_directory(&self.conformance_mode(conformance_target(mode)).root)?;
             }
             if gateway {
-                remove_artifact_directory(&self.gateway_mode(target).root)?;
+                remove_artifact_directory(&self.gateway_mode(baseline_target(mode)).root)?;
             }
+        }
+        if conformance {
+            remove_artifact_directory(&self.conformance_mode(ConformanceTarget::Fixture).root)?;
         }
         Ok(())
     }
@@ -386,11 +437,12 @@ pub(super) fn conformance_process_completed(process_result: &AppResult<()>) -> b
 pub(super) fn mark_conformance_complete(
     process_result: &AppResult<()>,
     results: &ConformanceResults,
-    target: BaselineTarget,
+    target: impl Into<ConformanceTarget>,
     suite: &str,
     spec_version: &str,
     path: &Path,
 ) -> AppResult<bool> {
+    let target = target.into();
     if !conformance_process_completed(process_result) {
         return Ok(false);
     }
@@ -441,30 +493,30 @@ pub(super) fn read_run_metadata(path: &Path) -> AppResult<ConformanceRunMetadata
 }
 
 pub(super) fn compatible_metadata<'a>(
+    fixture: Option<&'a ConformanceRunMetadata>,
     controlplane: Option<&'a ConformanceRunMetadata>,
     dataplane: Option<&'a ConformanceRunMetadata>,
     expected_run: Option<(&str, &str)>,
 ) -> AppResult<&'a ConformanceRunMetadata> {
-    let metadata = controlplane.or(dataplane).ok_or_else(|| {
+    let metadata = fixture.or(controlplane).or(dataplane).ok_or_else(|| {
         AppFailure::from(anyhow!(
             "no conformance metadata is available for reporting"
         ))
     })?;
-    if let (Some(controlplane), Some(dataplane)) = (controlplane, dataplane)
-        && controlplane.fixture != dataplane.fixture
-    {
-        return Err(AppFailure::from(anyhow!(
-            "control-plane and dataplane conformance fixture provenance mismatch"
-        )));
-    }
-    if let (Some(controlplane), Some(dataplane)) = (controlplane, dataplane)
-        && (controlplane.spec_version != dataplane.spec_version
-            || controlplane.suite != dataplane.suite
-            || controlplane.oracle != dataplane.oracle)
-    {
-        return Err(AppFailure::from(anyhow!(
-            "control-plane and dataplane conformance artifacts were produced by incompatible runs"
-        )));
+    for candidate in [fixture, controlplane, dataplane].into_iter().flatten() {
+        if candidate.fixture != metadata.fixture {
+            return Err(AppFailure::from(anyhow!(
+                "direct fixture, control-plane, and dataplane conformance fixture provenance mismatch"
+            )));
+        }
+        if candidate.spec_version != metadata.spec_version
+            || candidate.suite != metadata.suite
+            || candidate.oracle != metadata.oracle
+        {
+            return Err(AppFailure::from(anyhow!(
+                "direct fixture, control-plane, and dataplane conformance artifacts were produced by incompatible runs"
+            )));
+        }
     }
     if let Some((spec_version, suite)) = expected_run
         && (metadata.spec_version != spec_version || metadata.suite != suite)
@@ -476,7 +528,7 @@ pub(super) fn compatible_metadata<'a>(
     Ok(metadata)
 }
 
-pub(super) fn format_baseline_audit(target: BaselineTarget, audit: &BaselineAudit) -> String {
+pub(super) fn format_baseline_audit(target: ConformanceTarget, audit: &BaselineAudit) -> String {
     let mut details = Vec::new();
     for (label, scenarios) in [
         ("unexpected failures", &audit.unexpected_failures),
@@ -504,6 +556,21 @@ pub(super) const fn baseline_target(mode: StackMode) -> BaselineTarget {
     match mode {
         StackMode::Controlplane => BaselineTarget::Controlplane,
         StackMode::Dataplane => BaselineTarget::Dataplane,
+    }
+}
+
+pub(super) const fn conformance_target(mode: StackMode) -> ConformanceTarget {
+    match mode {
+        StackMode::Controlplane => ConformanceTarget::Controlplane,
+        StackMode::Dataplane => ConformanceTarget::Dataplane,
+    }
+}
+
+pub(super) const fn conformance_target_slug(target: ConformanceTarget) -> &'static str {
+    match target {
+        ConformanceTarget::Fixture => "fixture-direct",
+        ConformanceTarget::Controlplane => "controlplane",
+        ConformanceTarget::Dataplane => "dataplane",
     }
 }
 

@@ -11,11 +11,12 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use cf_integration_compliance::ConformanceSuite;
 use cf_integration_compliance::conformance::{
-    Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceFixtureMetadata,
-    ConformanceResults, ConformanceRunMetadata, audit_baseline,
-    compare_result_sets_with_fixture_trust, expected_server_scenarios, is_trusted_official_fixture,
-    load_baseline, load_server_results, official_server_command, validate_no_fixture_failures,
-    validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
+    Baseline, BaselineAudit, BaselineTarget, ComparisonFixtureTrust, ComparisonReport,
+    ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata, ConformanceTarget,
+    audit_baseline, compare_result_sets_with_fixture_trust, expected_server_scenarios,
+    is_trusted_official_fixture, load_baseline, load_server_results, official_server_command,
+    validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
+    write_official_baseline_projection,
 };
 use cf_integration_compliance::conformance_fixture::{
     ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
@@ -23,11 +24,12 @@ use cf_integration_compliance::conformance_fixture::{
 };
 use cf_integration_compliance::coverage::{
     CoverageOverlay, ModeCoverageEvidence, PINNED_SOURCE_COMMIT, PINNED_SOURCE_REPOSITORY,
-    enrich_overlay_results, extract_catalog_from_checkout, parse_coverage_overlay,
-    write_coverage_report,
+    SPEC_VERSION as COVERAGE_SPEC_VERSION, enrich_overlay_results, extract_catalog_from_checkout,
+    parse_coverage_overlay, write_coverage_report,
 };
 use cf_integration_compliance::gateway_compliance::{
-    GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance, write_gateway_reports,
+    GATEWAY_SPEC_VERSION, GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance,
+    write_gateway_reports,
 };
 use cf_integration_load::{
     GooseLoadConfig, LoadEngine, LoadRequest, LoadSettings, LocustCommand, audit_locust_reports,

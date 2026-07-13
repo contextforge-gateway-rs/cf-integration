@@ -73,6 +73,17 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         Ok(self.runner.run_async(&up).await?)
     }
 
+    pub(super) fn conformance_fixture_endpoint(&self, mode: StackMode) -> AppResult<url::Url> {
+        let command = self.conformance_compose_project(mode).command([
+            "port",
+            OFFICIAL_CONFORMANCE_SERVICE,
+            "3000",
+        ]);
+        let command = self.compose_environment(command, mode, true)?;
+        let output = self.runner.capture_stdout(&command)?;
+        parse_conformance_fixture_endpoint(&output).map_err(AppFailure::from)
+    }
+
     pub(super) async fn stop_conformance_service(&self, mode: StackMode) -> AppResult<()> {
         let remove = self.conformance_compose_project(mode).command([
             "rm",
@@ -192,7 +203,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         tokio::pin!(interrupt);
         let (cancellation_sender, cancellation_receiver) = tokio::sync::watch::channel(false);
 
-        for mode in selected_modes(common.mode) {
+        let selected_modes = selected_modes(common.mode);
+        let direct_fixture_mode = selected_modes.first().copied();
+        for mode in selected_modes {
             let base_server_id = caller_server_id
                 .unwrap_or_else(|| self.default_server_id())
                 .to_owned();
@@ -211,6 +224,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             };
             let mut fixture_state = None;
             let mut fixture_metadata = None;
+            let mut fixture_endpoint = None;
             let mut selected_server_id = base_server_id;
 
             if mode_failure.is_none() && auto_fixture {
@@ -221,11 +235,16 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .await;
                 interrupted |= start_interrupted;
                 match start_result {
-                    Ok(()) => match self.admin_token().and_then(|token| {
-                        ConformanceFixtureClient::builder(self.base_url()?, token)
-                            .build()
-                            .map_err(AppFailure::from)
-                    }) {
+                    Ok(()) => match self
+                        .conformance_fixture_endpoint(mode)
+                        .and_then(|endpoint| {
+                            fixture_endpoint = Some(endpoint);
+                            self.admin_token().and_then(|token| {
+                                ConformanceFixtureClient::builder(self.base_url()?, token)
+                                    .build()
+                                    .map_err(AppFailure::from)
+                            })
+                        }) {
                         Ok(client) => {
                             if interrupted {
                                 mode_failure = Some(interrupted_conformance_failure());
@@ -315,6 +334,27 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                         return Some(interrupted_conformance_failure());
                     }
                     let mut failure = None;
+                    if direct_fixture_mode == Some(mode)
+                        && let (Some(suite_name), Some(endpoint), Some(fixture)) = (
+                            suite_name,
+                            fixture_endpoint.as_ref(),
+                            fixture_metadata.as_ref(),
+                        )
+                        && let Err(error) = self
+                            .run_official_conformance_direct(
+                                &DirectConformanceRun {
+                                    endpoint,
+                                    spec_version: &common.spec_version,
+                                    suite: suite_name,
+                                    fixture,
+                                    cancellation: cancellation_receiver.clone(),
+                                },
+                                &paths,
+                            )
+                            .await
+                    {
+                        failure = Some(error);
+                    }
                     if let Some(suite_name) = suite_name
                         && let Err(error) = self
                             .run_official_conformance_mode(
@@ -339,12 +379,17 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                         return Some(interrupted_conformance_failure());
                     }
                     if run_gateway {
+                        let gateway_spec_version = if suite_name.is_some() {
+                            GATEWAY_SPEC_VERSION
+                        } else {
+                            &common.spec_version
+                        };
                         let gateway_result = tokio::select! {
                             result = self.run_gateway_compliance_mode(
                                 mode,
                                 &selected_server_id,
                                 &token,
-                                &common.spec_version,
+                                gateway_spec_version,
                                 &paths,
                             ) => result,
                             () = wait_for_runtime_cancellation(&mut tests_cancellation) => {
@@ -410,11 +455,20 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 Err(error) => last_failure = Some(error),
             }
         }
-        if !interrupted && run_gateway && suite_name.is_some() {
+        if !interrupted
+            && run_gateway
+            && suite_name.is_some()
+            && common.spec_version == COVERAGE_SPEC_VERSION
+        {
             match self.write_spec_coverage_report(&paths.report_output, &paths) {
                 Ok(path) => println!("Specification coverage: {}", path.display()),
                 Err(error) => last_failure = Some(error),
             }
+        } else if !interrupted && run_gateway && suite_name.is_some() {
+            println!(
+                "Specification coverage skipped: inventory is pinned to {COVERAGE_SPEC_VERSION}, official conformance used {}",
+                common.spec_version
+            );
         }
 
         last_failure.map_or(Ok(()), Err)
@@ -425,39 +479,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         run: &OfficialConformanceRun<'_>,
         paths: &CompliancePaths,
     ) -> AppResult<()> {
-        let target = baseline_target(run.mode);
+        let baseline_target = baseline_target(run.mode);
         let baseline_path = run
             .custom_baseline
             .map(Path::to_owned)
-            .unwrap_or_else(|| default_baseline_path(self.config.root(), target));
-        let baseline = load_baseline(&baseline_path, target).map_err(AppFailure::from)?;
-        expected_server_scenarios(run.suite, run.spec_version).map_err(AppFailure::from)?;
-        let mode_paths = paths.conformance_mode(target);
-        remove_file_if_exists(&mode_paths.completion)?;
-        recreate_directory(&mode_paths.official_results)?;
-        fs::create_dir_all(&mode_paths.root)
-            .with_context(|| {
-                format!(
-                    "failed to create conformance artifact directory {:?}",
-                    mode_paths.root
-                )
-            })
-            .map_err(AppFailure::from)?;
-        write_official_baseline_projection(&baseline, target, &mode_paths.projection)
-            .map_err(AppFailure::from)?;
-        write_rich_baseline(&mode_paths.rich_baseline, &baseline)?;
-        write_run_metadata(
-            &mode_paths.metadata,
-            &ConformanceRunMetadata {
-                oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
-                    .to_owned(),
-                target: target.label().to_owned(),
-                spec_version: run.spec_version.to_owned(),
-                suite: run.suite.to_owned(),
-                fixture: run.fixture.cloned(),
-            },
-        )?;
-
+            .unwrap_or_else(|| default_baseline_path(self.config.root(), baseline_target));
+        let baseline = load_baseline(&baseline_path, baseline_target).map_err(AppFailure::from)?;
+        let target = conformance_target(run.mode);
         let endpoint = GatewayClient::builder(
             gateway_topology(run.mode),
             self.base_url()?,
@@ -474,9 +502,98 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .await
             .context("failed to start the conformance authentication proxy")
             .map_err(AppFailure::from)?;
+        let result = self
+            .run_official_conformance_target(
+                &ConformanceTargetRun {
+                    target,
+                    endpoint: proxy.url(),
+                    spec_version: run.spec_version,
+                    suite: run.suite,
+                    baseline: &baseline,
+                    baseline_target: Some(baseline_target),
+                    fixture: run.fixture,
+                    cancellation: run.cancellation.clone(),
+                },
+                paths,
+            )
+            .await;
+        let shutdown = proxy
+            .shutdown()
+            .await
+            .context("failed to stop the conformance authentication proxy")
+            .map_err(AppFailure::from);
+        finish_with_cleanup(result.err(), shutdown)
+    }
+
+    pub(super) async fn run_official_conformance_direct(
+        &self,
+        run: &DirectConformanceRun<'_>,
+        paths: &CompliancePaths,
+    ) -> AppResult<()> {
+        let baseline = Baseline::default();
+        self.run_official_conformance_target(
+            &ConformanceTargetRun {
+                target: ConformanceTarget::Fixture,
+                endpoint: run.endpoint,
+                spec_version: run.spec_version,
+                suite: run.suite,
+                baseline: &baseline,
+                baseline_target: None,
+                fixture: Some(run.fixture),
+                cancellation: run.cancellation.clone(),
+            },
+            paths,
+        )
+        .await
+    }
+
+    async fn run_official_conformance_target(
+        &self,
+        run: &ConformanceTargetRun<'_>,
+        paths: &CompliancePaths,
+    ) -> AppResult<()> {
+        expected_server_scenarios(run.suite, run.spec_version).map_err(AppFailure::from)?;
+        let mode_paths = paths.conformance_mode(run.target);
+        remove_file_if_exists(&mode_paths.completion)?;
+        recreate_directory(&mode_paths.official_results)?;
+        fs::create_dir_all(&mode_paths.root)
+            .with_context(|| {
+                format!(
+                    "failed to create conformance artifact directory {:?}",
+                    mode_paths.root
+                )
+            })
+            .map_err(AppFailure::from)?;
+        match run.baseline_target {
+            Some(target) => {
+                write_official_baseline_projection(run.baseline, target, &mode_paths.projection)
+                    .map_err(AppFailure::from)?;
+            }
+            None => fs::write(&mode_paths.projection, "server: []\n")
+                .with_context(|| {
+                    format!(
+                        "failed to write direct-fixture expected-failure projection {:?}",
+                        mode_paths.projection
+                    )
+                })
+                .map_err(AppFailure::from)?,
+        }
+        write_rich_baseline(&mode_paths.rich_baseline, run.baseline)?;
+        write_run_metadata(
+            &mode_paths.metadata,
+            &ConformanceRunMetadata {
+                oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                    .to_owned(),
+                target: run.target.label().to_owned(),
+                spec_version: run.spec_version.to_owned(),
+                suite: run.suite.to_owned(),
+                fixture: run.fixture.cloned(),
+            },
+        )?;
+
         let command = allowlisted_npx_environment(
             official_server_command(
-                proxy.url().as_str(),
+                run.endpoint.as_str(),
                 run.suite,
                 run.spec_version,
                 &mode_paths.projection,
@@ -489,27 +606,21 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .run_async_cancellable(&command, run.cancellation.clone())
             .await
             .map_err(AppFailure::from);
-        let shutdown_result = proxy
-            .shutdown()
-            .await
-            .context("failed to stop the conformance authentication proxy")
-            .map_err(AppFailure::from);
 
         let results = load_server_results(&mode_paths.official_results).map_err(AppFailure::from);
         let audit = results
             .as_ref()
             .ok()
-            .map(|results| audit_baseline(results, &baseline));
+            .map(|results| audit_baseline(results, run.baseline));
         if let Some(audit) = audit.as_ref()
             && !audit.is_clean()
         {
-            eprintln!("{}", format_baseline_audit(target, audit));
+            eprintln!("{}", format_baseline_audit(run.target, audit));
         }
 
         if !conformance_process_completed(&process_result) {
             return process_result;
         }
-        shutdown_result?;
         let results = results?;
         if !is_trusted_official_fixture(run.fixture) {
             validate_no_fixture_failures(&results).map_err(AppFailure::from)?;
@@ -517,25 +628,26 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         mark_conformance_complete(
             &process_result,
             &results,
-            target,
+            run.target,
             run.suite,
             run.spec_version,
             &mode_paths.completion,
         )?;
         let audit = audit.ok_or_else(|| {
             AppFailure::from(anyhow!(
-                "failed to audit parsed official conformance results for {target}"
+                "failed to audit parsed official conformance results for {target}",
+                target = run.target
             ))
         })?;
         if !audit.is_clean() {
             return Err(AppFailure::from(anyhow!(format_baseline_audit(
-                target, &audit
+                run.target, &audit
             ))));
         }
         process_result?;
         println!(
             "Official conformance artifacts ({}): {}",
-            target,
+            run.target,
             mode_paths.root.display()
         );
         Ok(())
@@ -624,6 +736,25 @@ pub(super) fn selected_compliance_server_id<'a>(
     }
 }
 
+pub(super) fn parse_conformance_fixture_endpoint(output: &[u8]) -> anyhow::Result<url::Url> {
+    let output = std::str::from_utf8(output).context("Compose fixture port output is not UTF-8")?;
+    let address = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| anyhow!("Compose did not publish the conformance fixture port"))?
+        .parse::<std::net::SocketAddr>()
+        .context("Compose returned an invalid conformance fixture address")?;
+    if !address.ip().is_loopback() {
+        return Err(anyhow!(
+            "Compose published the conformance fixture on non-loopback address {}",
+            address.ip()
+        ));
+    }
+    url::Url::parse(&format!("http://{address}/mcp"))
+        .context("failed to construct the direct conformance fixture URL")
+}
+
 pub(super) struct OfficialConformanceRun<'a> {
     pub(super) mode: StackMode,
     pub(super) server_id: &'a str,
@@ -633,6 +764,25 @@ pub(super) struct OfficialConformanceRun<'a> {
     pub(super) custom_baseline: Option<&'a Path>,
     pub(super) fixture: Option<&'a ConformanceFixtureMetadata>,
     pub(super) cancellation: tokio::sync::watch::Receiver<bool>,
+}
+
+pub(super) struct DirectConformanceRun<'a> {
+    pub(super) endpoint: &'a url::Url,
+    pub(super) spec_version: &'a str,
+    pub(super) suite: &'a str,
+    pub(super) fixture: &'a ConformanceFixtureMetadata,
+    pub(super) cancellation: tokio::sync::watch::Receiver<bool>,
+}
+
+struct ConformanceTargetRun<'a> {
+    target: ConformanceTarget,
+    endpoint: &'a url::Url,
+    spec_version: &'a str,
+    suite: &'a str,
+    baseline: &'a Baseline,
+    baseline_target: Option<BaselineTarget>,
+    fixture: Option<&'a ConformanceFixtureMetadata>,
+    cancellation: tokio::sync::watch::Receiver<bool>,
 }
 
 pub(super) fn combine_cleanup_results(
