@@ -9,7 +9,7 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::gateway_compliance::{
+use cf_integration_compliance::gateway_compliance::{
     GATEWAY_SPEC_VERSION, GatewayCaseResult, GatewayCaseStatus, GatewayComplianceConfig,
     GatewayComplianceReport, GatewayFailureEvidence, GatewayRequestEvidence,
     GatewayResponseEvidence, render_gateway_report, run_gateway_compliance, write_gateway_reports,

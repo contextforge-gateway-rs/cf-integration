@@ -1,6 +1,5 @@
 //! Operating-system-backed execution of resolved CLI actions.
 
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::future::Future;
@@ -10,6 +9,26 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use cf_integration_compliance::ConformanceSuite;
+use cf_integration_compliance::conformance::{
+    Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceFixtureMetadata,
+    ConformanceResults, ConformanceRunMetadata, audit_baseline,
+    compare_result_sets_with_fixture_trust, expected_server_scenarios, is_trusted_official_fixture,
+    load_baseline, load_server_results, official_server_command, validate_no_fixture_failures,
+    validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
+};
+use cf_integration_compliance::conformance_fixture::{
+    ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
+    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVICE,
+};
+use cf_integration_compliance::coverage::{
+    CoverageOverlay, ModeCoverageEvidence, PINNED_SOURCE_COMMIT, PINNED_SOURCE_REPOSITORY,
+    enrich_overlay_results, extract_catalog_from_checkout, parse_coverage_overlay,
+    write_coverage_report,
+};
+use cf_integration_compliance::gateway_compliance::{
+    GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance, write_gateway_reports,
+};
 use cf_integration_mcp::GatewayTopology;
 use cf_integration_mcp::auth_proxy::AuthProxy;
 use cf_integration_mcp::gateway::GatewayClient;
@@ -25,35 +44,13 @@ use cf_integration_platform::stack::{
     StackFreshness, resolve_build,
 };
 use cf_integration_platform::{PlatformError, StackMode};
-use serde::{Deserialize, Serialize};
 
 use crate::app::{
     Action, ActionExecutor, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs,
     StackAction, TestAction,
 };
-use crate::cli::{
-    ComplianceMode, ConformanceSuite, LiveGroup, LoadArgs, LoadEngine, TokenKind as CliTokenKind,
-};
-use crate::conformance::{
-    Baseline, BaselineAudit, BaselineTarget, ComparisonReport, ConformanceResults, ScenarioOutcome,
-    audit_baseline, compare_result_sets_with_fixture_trust, expected_server_scenarios,
-    load_baseline, load_server_results, official_server_command, validate_no_fixture_failures,
-    validate_server_scenario_set, write_comparison_report, write_official_baseline_projection,
-};
-use crate::conformance_fixture::{
-    ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
-    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID, OFFICIAL_CONFORMANCE_SERVICE,
-};
-use crate::coverage::{
-    CoverageOverlay, CoverageResult, GatewayApplicability, PINNED_SOURCE_COMMIT,
-    PINNED_SOURCE_REPOSITORY, RequirementCoverageOverride, extract_catalog_from_checkout,
-    parse_coverage_overlay, write_coverage_report,
-};
+use crate::cli::{ComplianceMode, LiveGroup, LoadArgs, LoadEngine, TokenKind as CliTokenKind};
 use crate::error::AppFailure;
-use crate::gateway_compliance::{
-    GatewayCaseStatus, GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance,
-    write_gateway_reports,
-};
 use crate::load::{GooseLoadConfig, LoadSettings, LocustCommand, audit_locust_reports};
 use crate::token::{TokenKind, make_token};
 
@@ -1501,7 +1498,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .unwrap_or_else(|| self.config.integration_dir()),
             self.config.root().join("reports"),
         );
-        let suite_name = conformance_suite.map(conformance_suite_name);
+        let suite_name = conformance_suite.map(ConformanceSuite::label);
         let caller_server_id = self.caller_managed_server_id(common.server_id.as_deref());
         let auto_fixture =
             uses_automatic_conformance_fixture(conformance_suite.is_some(), caller_server_id);
@@ -1771,7 +1768,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         write_run_metadata(
             &mode_paths.metadata,
             &ConformanceRunMetadata {
-                oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                    .to_owned(),
                 target: target.label().to_owned(),
                 spec_version: run.spec_version.to_owned(),
                 suite: run.suite.to_owned(),
@@ -2066,11 +2064,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 target_slug(target)
             )));
         }
-        if report.specification_version != crate::coverage::SPEC_VERSION {
+        if report.specification_version != cf_integration_compliance::coverage::SPEC_VERSION {
             return Err(AppFailure::from(anyhow!(
                 "gateway artifact specification {:?} does not match coverage specification {:?}",
                 report.specification_version,
-                crate::coverage::SPEC_VERSION
+                cf_integration_compliance::coverage::SPEC_VERSION
             )));
         }
         Ok(Some(report))
@@ -2163,11 +2161,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 metadata.target
             )));
         }
-        if metadata.oracle != crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE {
+        if metadata.oracle != cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE {
             return Err(AppFailure::from(anyhow!(
                 "conformance artifacts used oracle {:?}, expected {:?}",
                 metadata.oracle,
-                crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
             )));
         }
         let results = load_server_results(&artifact.official_results).map_err(AppFailure::from)?;
@@ -2293,137 +2291,10 @@ struct GatewayModePaths {
     json: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConformanceFixtureMetadata {
-    repository: String,
-    revision: String,
-    server_id: String,
-}
-
-fn is_trusted_official_fixture(fixture: Option<&ConformanceFixtureMetadata>) -> bool {
-    fixture.is_some_and(|fixture| {
-        fixture.repository == OFFICIAL_CONFORMANCE_REPOSITORY
-            && fixture.revision == OFFICIAL_CONFORMANCE_REVISION
-            && fixture.server_id == OFFICIAL_CONFORMANCE_SERVER_ID
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConformanceRunMetadata {
-    oracle: String,
-    target: String,
-    spec_version: String,
-    suite: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    fixture: Option<ConformanceFixtureMetadata>,
-}
-
 struct LoadedConformanceArtifact {
     results: ConformanceResults,
     baseline: Baseline,
     metadata: ConformanceRunMetadata,
-}
-
-#[derive(Debug, Default)]
-struct ModeCoverageEvidence {
-    available: bool,
-    official: BTreeMap<String, CoverageResult>,
-    gateway: BTreeMap<String, CoverageResult>,
-}
-
-impl ModeCoverageEvidence {
-    fn from_artifacts(
-        official: Option<&ConformanceResults>,
-        gateway: Option<&GatewayComplianceReport>,
-        official_fixture: Option<&ConformanceFixtureMetadata>,
-    ) -> Self {
-        let trusted_official_fixture = is_trusted_official_fixture(official_fixture);
-        let official_results = official
-            .into_iter()
-            .flat_map(|results| &results.scenarios)
-            .map(|(scenario, result)| {
-                let result = match result.outcome_with_trusted_fixture(trusted_official_fixture) {
-                    ScenarioOutcome::Compliant => CoverageResult::Pass,
-                    ScenarioOutcome::NonCompliant => CoverageResult::Fail,
-                    ScenarioOutcome::NotApplicable => CoverageResult::NotApplicable,
-                    ScenarioOutcome::FixtureFailure
-                    | ScenarioOutcome::Ambiguous
-                    | ScenarioOutcome::Missing => CoverageResult::NotRun,
-                };
-                (scenario.clone(), result)
-            })
-            .collect();
-        let gateway_results = gateway
-            .into_iter()
-            .flat_map(|report| &report.cases)
-            .map(|case| {
-                let result = match case.status {
-                    GatewayCaseStatus::Passed => CoverageResult::Pass,
-                    GatewayCaseStatus::Failed => CoverageResult::Fail,
-                    GatewayCaseStatus::NotApplicable => CoverageResult::NotApplicable,
-                    GatewayCaseStatus::FixtureFailure => CoverageResult::NotRun,
-                };
-                (case.name.clone(), result)
-            })
-            .collect();
-        Self {
-            available: official.is_some() || gateway.is_some(),
-            official: official_results,
-            gateway: gateway_results,
-        }
-    }
-}
-
-fn enrich_overlay_results(
-    overlay: &mut CoverageOverlay,
-    controlplane: &ModeCoverageEvidence,
-    dataplane: &ModeCoverageEvidence,
-) {
-    for requirement in &mut overlay.requirements {
-        if controlplane.available {
-            requirement.controlplane_result = derive_coverage_result(requirement, controlplane);
-        }
-        if dataplane.available {
-            requirement.dataplane_result = derive_coverage_result(requirement, dataplane);
-        }
-    }
-}
-
-fn derive_coverage_result(
-    requirement: &RequirementCoverageOverride,
-    evidence: &ModeCoverageEvidence,
-) -> CoverageResult {
-    let mut results = Vec::with_capacity(3);
-    if requirement.gateway_applicability == GatewayApplicability::NotApplicable {
-        results.push(CoverageResult::NotApplicable);
-    }
-    if requirement.official_conformance.covered
-        && let Some(scenario) = requirement.official_conformance.scenario.as_deref()
-        && let Some(result) = evidence.official.get(scenario)
-    {
-        results.push(*result);
-    }
-    if requirement.rust_gateway.covered
-        && let Some(test_name) = requirement.rust_gateway.test_name.as_deref()
-        && let Some(result) = evidence.gateway.get(test_name).or_else(|| {
-            test_name
-                .strip_prefix("gateway-compliance/")
-                .and_then(|case_name| evidence.gateway.get(case_name))
-        })
-    {
-        results.push(*result);
-    }
-    if results.contains(&CoverageResult::Fail) {
-        CoverageResult::Fail
-    } else if results.contains(&CoverageResult::Pass) {
-        CoverageResult::Pass
-    } else if results.contains(&CoverageResult::NotApplicable) {
-        CoverageResult::NotApplicable
-    } else {
-        CoverageResult::NotRun
-    }
 }
 
 struct OfficialConformanceRun<'a> {
@@ -2635,13 +2506,6 @@ const fn mode_selection(mode: StackMode) -> ComplianceMode {
     }
 }
 
-const fn conformance_suite_name(suite: ConformanceSuite) -> &'static str {
-    match suite {
-        ConformanceSuite::Active => "active",
-        ConformanceSuite::All => "all",
-    }
-}
-
 fn selected_modes(selection: ComplianceMode) -> Vec<StackMode> {
     match selection {
         ComplianceMode::Controlplane => vec![StackMode::Controlplane],
@@ -2813,6 +2677,7 @@ mod tests {
     use axum::extract::State;
     use axum::http::{Method, StatusCode, Uri};
     use axum::routing::{any, get};
+    use cf_integration_compliance::conformance::ScenarioOutcome;
     use cf_integration_platform::config::Environment;
     use cf_integration_platform::process::CapturedOutput;
 
@@ -3539,7 +3404,7 @@ mod tests {
                 StatusCode::OK,
                 if resource_exists("POST /servers", "DELETE /servers/") {
                     serde_json::json!([{
-                        "id": crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+                        "id": cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
                         "name": "Official MCP Conformance Server",
                         "description": "Virtual server for the pinned official MCP conformance fixture."
                     }])
@@ -3552,8 +3417,8 @@ mod tests {
                 if resource_exists("POST /gateways", "DELETE /gateways/") {
                     serde_json::json!([{
                         "id": "fixture-gateway",
-                        "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
-                        "url": crate::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
+                        "name": cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                        "url": cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
                         "transport": "STREAMABLEHTTP",
                         "description": "Official MCP conformance fixture"
                     }])
@@ -3565,8 +3430,8 @@ mod tests {
                 StatusCode::OK,
                 serde_json::json!({
                     "id": "fixture-gateway",
-                    "name": crate::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
-                    "url": crate::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
+                    "name": cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_GATEWAY_NAME,
+                    "url": cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_BACKEND_URL,
                     "transport": "STREAMABLEHTTP",
                     "description": "Official MCP conformance fixture",
                 }),
@@ -3839,9 +3704,15 @@ mod tests {
         assert_eq!(
             metadata.fixture,
             Some(ConformanceFixtureMetadata {
-                repository: crate::conformance_fixture::OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
-                revision: crate::conformance_fixture::OFFICIAL_CONFORMANCE_REVISION.to_owned(),
-                server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+                repository:
+                    cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_REPOSITORY
+                        .to_owned(),
+                revision:
+                    cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_REVISION
+                        .to_owned(),
+                server_id:
+                    cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+                        .to_owned(),
             })
         );
         let events = events.lock().expect("event lock");
@@ -3883,7 +3754,7 @@ mod tests {
             event
                 == &format!(
                     "DELETE /servers/{}",
-                    crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+                    cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
                 )
         }));
         server.abort();
@@ -3929,7 +3800,8 @@ mod tests {
             events: Arc::clone(&events),
             fail_cleanup: false,
             expected_scoped_server_id: Some(
-                crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+                cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+                    .to_owned(),
             ),
             block_gateway: false,
             finish_provision_after_interrupt: false,
@@ -3983,7 +3855,7 @@ mod tests {
             .expect("official proxy boundary");
         let expected_path = format!(
             "/servers/{}/mcp",
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
         );
         assert!(
             events[npx + 1..official_complete]
@@ -4018,7 +3890,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [format!(
                 "publisher {}",
-                crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+                cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
             )]
         );
         server.abort();
@@ -4504,7 +4376,7 @@ mod tests {
         assert!(gateway_restores[1] < dataplane_down);
         let server_cleanup = format!(
             "DELETE /servers/{}",
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID
         );
         for (start, rm, down) in [
             (controlplane_up, fixture_removals[0], controlplane_down),
@@ -4977,72 +4849,6 @@ mod tests {
         assert!(!dataplane_gateway.root.exists());
     }
 
-    #[test]
-    fn conformance_metadata_roundtrips_exact_fixture_provenance() {
-        let metadata = ConformanceRunMetadata {
-            oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
-            target: "control-plane".to_owned(),
-            spec_version: "2025-11-25".to_owned(),
-            suite: "active".to_owned(),
-            fixture: Some(ConformanceFixtureMetadata {
-                repository: "https://example.test/conformance".to_owned(),
-                revision: "exact-revision".to_owned(),
-                server_id: "actual-provisioned-server".to_owned(),
-            }),
-        };
-
-        let serialized = serde_json::to_vec(&metadata).expect("metadata should serialize");
-        let roundtrip: ConformanceRunMetadata =
-            serde_json::from_slice(&serialized).expect("metadata should deserialize");
-
-        assert_eq!(roundtrip, metadata);
-    }
-
-    #[test]
-    fn historical_metadata_without_fixture_roundtrips_without_new_field() {
-        let historical = serde_json::to_vec(&serde_json::json!({
-            "oracle": crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE,
-            "target": "control-plane",
-            "spec_version": "2025-11-25",
-            "suite": "active",
-        }))
-        .expect("historical metadata should serialize");
-
-        let metadata: ConformanceRunMetadata =
-            serde_json::from_slice(&historical).expect("historical metadata should deserialize");
-        let reserialized = serde_json::to_value(metadata).expect("metadata should reserialize");
-
-        assert!(reserialized.get("fixture").is_none());
-    }
-
-    #[test]
-    fn trusted_official_fixture_requires_exact_pinned_provenance() {
-        let exact = fixture_metadata(
-            OFFICIAL_CONFORMANCE_REPOSITORY,
-            OFFICIAL_CONFORMANCE_REVISION,
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
-        );
-
-        assert!(is_trusted_official_fixture(Some(&exact)));
-        assert!(!is_trusted_official_fixture(None));
-        for mismatch in [
-            ConformanceFixtureMetadata {
-                repository: "https://example.test/untrusted".to_owned(),
-                ..exact.clone()
-            },
-            ConformanceFixtureMetadata {
-                revision: "untrusted-revision".to_owned(),
-                ..exact.clone()
-            },
-            ConformanceFixtureMetadata {
-                server_id: "untrusted-server".to_owned(),
-                ..exact.clone()
-            },
-        ] {
-            assert!(!is_trusted_official_fixture(Some(&mismatch)));
-        }
-    }
-
     #[tokio::test]
     async fn caller_managed_resource_template_not_found_is_not_complete_or_reportable() {
         let artifacts = tempfile::tempdir().expect("temporary artifact root");
@@ -5089,14 +4895,14 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             OFFICIAL_CONFORMANCE_REVISION,
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
 
         let error = runtime
             .run_official_conformance_mode(
                 &OfficialConformanceRun {
                     mode: StackMode::Controlplane,
-                    server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+                    server_id: cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
                     token: "token",
                     spec_version: "2025-11-25",
                     suite: "active",
@@ -5127,14 +4933,14 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             "untrusted-revision",
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
 
         let error = runtime
             .run_official_conformance_mode(
                 &OfficialConformanceRun {
                     mode: StackMode::Controlplane,
-                    server_id: crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+                    server_id: cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
                     token: "token",
                     spec_version: "2025-11-25",
                     suite: "active",
@@ -5166,7 +4972,7 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             OFFICIAL_CONFORMANCE_REVISION,
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
         for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
             let mode_paths = paths.conformance_mode(target);
@@ -5183,7 +4989,8 @@ mod tests {
             write_run_metadata(
                 &mode_paths.metadata,
                 &ConformanceRunMetadata {
-                    oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                    oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                        .to_owned(),
                     target: target.label().to_owned(),
                     spec_version: "2025-11-25".to_owned(),
                     suite: "active".to_owned(),
@@ -5218,7 +5025,7 @@ mod tests {
         let fixture = fixture_metadata(
             OFFICIAL_CONFORMANCE_REPOSITORY,
             "untrusted-revision",
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
+            cf_integration_compliance::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
         );
         for target in [BaselineTarget::Controlplane, BaselineTarget::Dataplane] {
             let mode_paths = paths.conformance_mode(target);
@@ -5235,7 +5042,8 @@ mod tests {
             write_run_metadata(
                 &mode_paths.metadata,
                 &ConformanceRunMetadata {
-                    oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                    oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                        .to_owned(),
                     target: target.label().to_owned(),
                     spec_version: "2025-11-25".to_owned(),
                     suite: "active".to_owned(),
@@ -5295,7 +5103,7 @@ mod tests {
         fs::write(
             &mode_paths.metadata,
             serde_json::to_vec(&serde_json::json!({
-                "oracle": crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE,
+                "oracle": cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE,
                 "target": "control-plane",
                 "spec_version": "2025-11-25",
                 "suite": "active",
@@ -5339,7 +5147,8 @@ mod tests {
         write_run_metadata(
             &mode_paths.metadata,
             &ConformanceRunMetadata {
-                oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                    .to_owned(),
                 target: BaselineTarget::Controlplane.label().to_owned(),
                 spec_version: "2025-11-25".to_owned(),
                 suite: "active".to_owned(),
@@ -5394,7 +5203,8 @@ mod tests {
         write_run_metadata(
             &mode_paths.metadata,
             &ConformanceRunMetadata {
-                oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+                oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+                    .to_owned(),
                 target: BaselineTarget::Controlplane.label().to_owned(),
                 spec_version: "2025-11-25".to_owned(),
                 suite: "active".to_owned(),
@@ -5486,7 +5296,7 @@ mod tests {
     #[test]
     fn incompatible_paired_metadata_is_rejected() {
         let controlplane = ConformanceRunMetadata {
-            oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+            oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
             target: "control-plane".to_owned(),
             spec_version: "2025-11-25".to_owned(),
             suite: "active".to_owned(),
@@ -5503,7 +5313,7 @@ mod tests {
 
     fn paired_metadata(fixture: Option<ConformanceFixtureMetadata>) -> ConformanceRunMetadata {
         ConformanceRunMetadata {
-            oracle: crate::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+            oracle: cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
             target: "control-plane".to_owned(),
             spec_version: "2025-11-25".to_owned(),
             suite: "active".to_owned(),
@@ -5596,140 +5406,6 @@ mod tests {
                 assert!(!message.contains(value));
             }
         }
-    }
-
-    #[test]
-    fn coverage_enrichment_uses_fail_pass_na_precedence_and_preserves_missing_modes() {
-        use crate::coverage::{OfficialCoverageClaim, RustGatewayCoverageClaim};
-
-        let requirement = RequirementCoverageOverride {
-            id: "requirement".to_owned(),
-            official_conformance: OfficialCoverageClaim {
-                covered: true,
-                scenario: Some("official-case".to_owned()),
-            },
-            rust_gateway: RustGatewayCoverageClaim {
-                covered: true,
-                test_name: Some("gateway-compliance/gateway-case".to_owned()),
-            },
-            gateway_applicability: GatewayApplicability::Applicable,
-            capability_condition: None,
-            not_applicable_justification: None,
-            controlplane_result: CoverageResult::NotRun,
-            dataplane_result: CoverageResult::NotApplicable,
-            notes: None,
-            issue: None,
-        };
-        let mut overlay = CoverageOverlay {
-            spec_version: crate::coverage::SPEC_VERSION.to_owned(),
-            requirements: vec![requirement.clone(), requirement.clone(), requirement],
-        };
-        overlay.requirements[0].id = "failure-dominates".to_owned();
-        overlay.requirements[1].id = "pass-dominates-na".to_owned();
-        overlay.requirements[1].rust_gateway.test_name =
-            Some("gateway-compliance/gateway-na".to_owned());
-        overlay.requirements[2].id = "explicit-na".to_owned();
-        overlay.requirements[2].official_conformance.covered = false;
-        overlay.requirements[2].official_conformance.scenario = None;
-        overlay.requirements[2].rust_gateway.test_name =
-            Some("gateway-compliance/gateway-na".to_owned());
-        let controlplane = ModeCoverageEvidence {
-            available: true,
-            official: BTreeMap::from([("official-case".to_owned(), CoverageResult::Pass)]),
-            gateway: BTreeMap::from([
-                ("gateway-case".to_owned(), CoverageResult::Fail),
-                ("gateway-na".to_owned(), CoverageResult::NotApplicable),
-            ]),
-        };
-        let dataplane = ModeCoverageEvidence::default();
-
-        enrich_overlay_results(&mut overlay, &controlplane, &dataplane);
-
-        assert_eq!(
-            overlay.requirements[0].controlplane_result,
-            CoverageResult::Fail
-        );
-        assert_eq!(
-            overlay.requirements[1].controlplane_result,
-            CoverageResult::Pass
-        );
-        assert_eq!(
-            overlay.requirements[2].controlplane_result,
-            CoverageResult::NotApplicable
-        );
-        assert!(
-            overlay
-                .requirements
-                .iter()
-                .all(|requirement| requirement.dataplane_result == CoverageResult::NotApplicable)
-        );
-    }
-
-    #[test]
-    fn coverage_enrichment_marks_missing_claim_evidence_not_run() {
-        let requirement = RequirementCoverageOverride {
-            id: "missing-evidence".to_owned(),
-            official_conformance: crate::coverage::OfficialCoverageClaim {
-                covered: true,
-                scenario: Some("missing-scenario".to_owned()),
-            },
-            controlplane_result: CoverageResult::Pass,
-            ..RequirementCoverageOverride::default()
-        };
-        let mut overlay = CoverageOverlay {
-            spec_version: crate::coverage::SPEC_VERSION.to_owned(),
-            requirements: vec![requirement],
-        };
-
-        enrich_overlay_results(
-            &mut overlay,
-            &ModeCoverageEvidence {
-                available: true,
-                ..ModeCoverageEvidence::default()
-            },
-            &ModeCoverageEvidence::default(),
-        );
-
-        assert_eq!(
-            overlay.requirements[0].controlplane_result,
-            CoverageResult::NotRun
-        );
-    }
-
-    #[test]
-    fn trusted_fixture_failure_is_failed_coverage_while_historical_is_not_run() {
-        let artifacts = tempfile::tempdir().expect("temporary official results");
-        write_official_results(artifacts.path(), ["resources-templates-read"], "SUCCESS");
-        write_fixture_failure_result(artifacts.path(), "resources-templates-read");
-        let results = load_server_results(artifacts.path()).expect("fixture failure should parse");
-
-        let exact = fixture_metadata(
-            OFFICIAL_CONFORMANCE_REPOSITORY,
-            OFFICIAL_CONFORMANCE_REVISION,
-            crate::conformance_fixture::OFFICIAL_CONFORMANCE_SERVER_ID,
-        );
-        let mismatch = ConformanceFixtureMetadata {
-            revision: "untrusted-revision".to_owned(),
-            ..exact.clone()
-        };
-
-        let trusted = ModeCoverageEvidence::from_artifacts(Some(&results), None, Some(&exact));
-        let historical = ModeCoverageEvidence::from_artifacts(Some(&results), None, None);
-        let mismatched =
-            ModeCoverageEvidence::from_artifacts(Some(&results), None, Some(&mismatch));
-
-        assert_eq!(
-            trusted.official["resources-templates-read"],
-            CoverageResult::Fail
-        );
-        assert_eq!(
-            historical.official["resources-templates-read"],
-            CoverageResult::NotRun
-        );
-        assert_eq!(
-            mismatched.official["resources-templates-read"],
-            CoverageResult::NotRun
-        );
     }
 
     #[test]

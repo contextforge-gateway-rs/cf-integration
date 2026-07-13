@@ -5,12 +5,13 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
+use cf_integration_compliance::ConformanceSuite;
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 
 use crate::cli::{
-    Cli, CliStackMode, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode,
-    ConformanceSuite, LiveGroup, LoadEngine, StackCommand, TestCommand, TokenKind,
+    Cli, CliStackMode, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode, LiveGroup,
+    LoadEngine, StackCommand, TestCommand, TokenKind,
 };
 use crate::error::AppFailure;
 
@@ -224,7 +225,7 @@ fn resolve_compliance(
     match command {
         ComplianceCommand::Conformance(args) => Ok(ComplianceAction::Conformance {
             common: resolve_compliance_common(args.common, environment, ComplianceMode::Dataplane)?,
-            suite: args.suite,
+            suite: args.suite.into(),
             baseline: args.baseline,
         }),
         ComplianceCommand::Gateway(args) => Ok(ComplianceAction::Gateway {
@@ -237,7 +238,7 @@ fn resolve_compliance(
             }
             Ok(ComplianceAction::All {
                 common: resolve_compliance_common(common, environment, ComplianceMode::All)?,
-                suite: args.suite,
+                suite: args.suite.into(),
             })
         }
         ComplianceCommand::Report(args) => Ok(ComplianceAction::Report {

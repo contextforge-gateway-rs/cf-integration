@@ -9,7 +9,7 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::conformance_fixture::{
+use cf_integration_compliance::conformance_fixture::{
     ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_GATEWAY_NAME,
     OFFICIAL_CONFORMANCE_SERVER_ID, ProvisionedConformanceFixture,
 };

@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cf_integration::coverage::{
-    self, NORMATIVE_PAGES, PINNED_SOURCE_COMMIT, PINNED_SOURCE_REPOSITORY, SPEC_VERSION,
+use cf_integration_compliance::coverage::{
+    self, CoverageOverlay, CoverageResult, GatewayApplicability, ModeCoverageEvidence,
+    NORMATIVE_PAGES, OfficialCoverageClaim, PINNED_SOURCE_COMMIT, PINNED_SOURCE_REPOSITORY,
+    RequirementCoverageOverride, RustGatewayCoverageClaim, SPEC_VERSION, enrich_overlay_results,
     extract_catalog_from_checkout, extract_page_requirements, parse_coverage_overlay,
     render_coverage_report, validate_coverage_overlay, write_coverage_report,
 };
@@ -29,6 +32,64 @@ const EXPECTED_PAGE_PATHS: &[&str] = &[
     "server/utilities/pagination",
     "schema",
 ];
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("compliance crate should be nested under the workspace root")
+        .to_path_buf()
+}
+
+#[test]
+fn coverage_reduction_uses_fail_pass_not_applicable_precedence() {
+    let requirement = RequirementCoverageOverride {
+        id: "requirement".to_owned(),
+        official_conformance: OfficialCoverageClaim {
+            covered: true,
+            scenario: Some("official-case".to_owned()),
+        },
+        rust_gateway: RustGatewayCoverageClaim {
+            covered: true,
+            test_name: Some("gateway-compliance/gateway-case".to_owned()),
+        },
+        gateway_applicability: GatewayApplicability::Applicable,
+        ..RequirementCoverageOverride::default()
+    };
+    let mut overlay = CoverageOverlay {
+        spec_version: SPEC_VERSION.to_owned(),
+        requirements: vec![requirement.clone(), requirement.clone(), requirement],
+    };
+    overlay.requirements[0].id = "failure-dominates".to_owned();
+    overlay.requirements[1].id = "pass-dominates-na".to_owned();
+    overlay.requirements[1].rust_gateway.test_name = Some("gateway-na".to_owned());
+    overlay.requirements[2].id = "explicit-na".to_owned();
+    overlay.requirements[2].official_conformance = OfficialCoverageClaim::default();
+    overlay.requirements[2].rust_gateway.test_name = Some("gateway-na".to_owned());
+    let evidence = ModeCoverageEvidence::from_results(
+        true,
+        BTreeMap::from([("official-case".to_owned(), CoverageResult::Pass)]),
+        BTreeMap::from([
+            ("gateway-case".to_owned(), CoverageResult::Fail),
+            ("gateway-na".to_owned(), CoverageResult::NotApplicable),
+        ]),
+    );
+
+    enrich_overlay_results(&mut overlay, &evidence, &ModeCoverageEvidence::default());
+
+    assert_eq!(
+        overlay.requirements[0].controlplane_result,
+        CoverageResult::Fail
+    );
+    assert_eq!(
+        overlay.requirements[1].controlplane_result,
+        CoverageResult::Pass
+    );
+    assert_eq!(
+        overlay.requirements[2].controlplane_result,
+        CoverageResult::NotApplicable
+    );
+}
 
 #[test]
 fn page_catalog_is_complete_stable_and_pinned_to_the_official_release_commit() {
@@ -284,8 +345,9 @@ fn pinned_official_checkout_extracts_every_catalog_page() {
         );
     }
 
-    let overlay_source = fs::read_to_string("conformance/coverage-overrides.yml")
-        .expect("repository coverage overlay should be readable");
+    let overlay_source =
+        fs::read_to_string(workspace_root().join("conformance/coverage-overrides.yml"))
+            .expect("repository coverage overlay should be readable");
     let overlay = parse_coverage_overlay(&overlay_source, &requirements)
         .expect("repository coverage overlay should be valid");
     let checked_in = fs::read_to_string("reports/mcp-spec-coverage.md")

@@ -357,7 +357,7 @@ pub struct ConformanceArgs {
 
     /// Official scenario suite; all includes pending 2025-11-25 scenarios.
     #[arg(long, value_enum, default_value = "all")]
-    pub suite: ConformanceSuite,
+    pub suite: CliConformanceSuite,
 
     /// Rich expected-failure baseline; mode-specific default when omitted.
     #[arg(long)]
@@ -379,16 +379,25 @@ pub struct ComplianceAllArgs {
 
     /// Official scenario suite to run before gateway-specific tests.
     #[arg(long, value_enum, default_value = "all")]
-    pub suite: ConformanceSuite,
+    pub suite: CliConformanceSuite,
 }
 
 /// Official server scenario suite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ConformanceSuite {
+pub enum CliConformanceSuite {
     /// Stable scenarios, excluding upstream pending scenarios.
     Active,
     /// Every scenario tagged for the selected revision.
     All,
+}
+
+impl From<CliConformanceSuite> for cf_integration_compliance::ConformanceSuite {
+    fn from(suite: CliConformanceSuite) -> Self {
+        match suite {
+            CliConformanceSuite::Active => Self::Active,
+            CliConformanceSuite::All => Self::All,
+        }
+    }
 }
 
 /// Report-only options.

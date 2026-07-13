@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use cf_integration::cli::{
-    Cli, CliStackMode, Command, ComplianceAllArgs, ComplianceArgs, ComplianceCommand,
-    ComplianceMode, ComplianceReportArgs, ConformanceSuite, InspectArgs, LiveGroup, LoadArgs,
+    Cli, CliConformanceSuite, CliStackMode, Command, ComplianceAllArgs, ComplianceArgs,
+    ComplianceCommand, ComplianceMode, ComplianceReportArgs, InspectArgs, LiveGroup, LoadArgs,
     LoadEngine, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs, TestArgs,
     TestCommand, TokenArgs, TokenKind,
 };
@@ -370,7 +370,7 @@ fn compliance_commands_parse_reproducible_options() {
     assert!(args.common.start);
     assert_eq!(args.common.server_id.as_deref(), Some("server-1"));
     assert_eq!(args.common.spec_version, "2025-11-25");
-    assert_eq!(args.suite, ConformanceSuite::All);
+    assert_eq!(args.suite, CliConformanceSuite::All);
     assert_eq!(args.baseline, Some(PathBuf::from("baseline.yml")));
     assert_eq!(args.common.results_dir, Some(PathBuf::from("results")));
 
@@ -390,7 +390,7 @@ fn compliance_commands_parse_reproducible_options() {
         panic!("expected all compliance")
     };
     assert_eq!(common.mode, Some(ComplianceMode::All));
-    assert_eq!(suite, ConformanceSuite::Active);
+    assert_eq!(suite, CliConformanceSuite::Active);
 
     let Command::Compliance(ComplianceArgs {
         command:

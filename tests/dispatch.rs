@@ -5,9 +5,8 @@ use cf_integration::app::{
     Action, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs, StackAction, TestAction,
     resolve_action,
 };
-use cf_integration::cli::{
-    Cli, ComplianceMode, ConformanceSuite, LiveGroup, LoadEngine, TokenKind,
-};
+use cf_integration::cli::{Cli, ComplianceMode, LiveGroup, LoadEngine, TokenKind};
+use cf_integration_compliance::ConformanceSuite;
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 use clap::Parser;

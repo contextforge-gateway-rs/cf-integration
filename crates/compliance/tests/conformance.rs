@@ -4,21 +4,98 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cf_integration::conformance::{
+use cf_integration_compliance::conformance::{
     Baseline, BaselineClassification, BaselineEntry, BaselineTarget, CheckStatus,
-    ComparisonClassification, ComparisonReport, ConformanceCheck, ConformanceResults,
-    ConformanceScenarioResult, DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION,
-    OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome, SpecReference,
-    audit_baseline, classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
-    expected_server_scenarios, load_baseline, load_server_results, official_server_command,
+    ComparisonClassification, ComparisonReport, ConformanceCheck, ConformanceFixtureMetadata,
+    ConformanceResults, ConformanceRunMetadata, ConformanceScenarioResult,
+    DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION, OFFICIAL_CONFORMANCE_PACKAGE,
+    ScenarioComparison, ScenarioOutcome, SpecReference, audit_baseline, classify_outcomes,
+    compare_result_sets, compare_result_sets_with_fixture_trust, expected_server_scenarios,
+    is_trusted_official_fixture, load_baseline, load_server_results, official_server_command,
     parse_baseline, project_official_baseline, render_comparison_markdown, validate_baseline,
     validate_no_fixture_failures, validate_server_scenario_set, write_comparison_report,
     write_official_baseline_projection,
+};
+use cf_integration_compliance::conformance_fixture::{
+    OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID,
 };
 
 const SPEC_REFERENCE: &str =
     "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization";
 const ISSUE: &str = "https://github.com/example/project/issues/123";
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("compliance crate should be nested under the workspace root")
+        .to_path_buf()
+}
+
+#[test]
+fn conformance_metadata_roundtrips_exact_fixture_provenance() {
+    let metadata = ConformanceRunMetadata {
+        oracle: OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
+        target: "control-plane".to_owned(),
+        spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
+        suite: "active".to_owned(),
+        fixture: Some(ConformanceFixtureMetadata {
+            repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+            revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+            server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+        }),
+    };
+
+    let serialized = serde_json::to_vec(&metadata).expect("metadata should serialize");
+    let roundtrip: ConformanceRunMetadata =
+        serde_json::from_slice(&serialized).expect("metadata should deserialize");
+
+    assert_eq!(roundtrip, metadata);
+}
+
+#[test]
+fn historical_metadata_defaults_fixture_to_absent_and_omits_it_again() {
+    let historical = serde_json::json!({
+        "oracle": OFFICIAL_CONFORMANCE_PACKAGE,
+        "target": "control-plane",
+        "spec_version": DEFAULT_MCP_SPEC_VERSION,
+        "suite": "active",
+    });
+
+    let metadata: ConformanceRunMetadata =
+        serde_json::from_value(historical).expect("historical metadata should deserialize");
+    let reserialized = serde_json::to_value(metadata).expect("metadata should reserialize");
+
+    assert!(reserialized.get("fixture").is_none());
+}
+
+#[test]
+fn trusted_official_fixture_requires_exact_pinned_provenance() {
+    let exact = ConformanceFixtureMetadata {
+        repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+        revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+    };
+
+    assert!(is_trusted_official_fixture(Some(&exact)));
+    assert!(!is_trusted_official_fixture(None));
+    for mismatch in [
+        ConformanceFixtureMetadata {
+            repository: "https://example.test/untrusted".to_owned(),
+            ..exact.clone()
+        },
+        ConformanceFixtureMetadata {
+            revision: "untrusted-revision".to_owned(),
+            ..exact.clone()
+        },
+        ConformanceFixtureMetadata {
+            server_id: "untrusted-server".to_owned(),
+            ..exact.clone()
+        },
+    ] {
+        assert!(!is_trusted_official_fixture(Some(&mismatch)));
+    }
+}
 
 #[test]
 fn pinned_server_scenario_catalog_has_exact_suite_differences() {
@@ -242,12 +319,12 @@ fn empty_baseline_projects_to_an_official_empty_server_list() {
 #[test]
 fn repository_baselines_are_independent_valid_and_initially_empty() {
     let controlplane = load_baseline(
-        Path::new("conformance/baseline-controlplane.yml"),
+        &workspace_root().join("conformance/baseline-controlplane.yml"),
         BaselineTarget::Controlplane,
     )
     .expect("control-plane baseline should be valid");
     let dataplane = load_baseline(
-        Path::new("conformance/baseline-dataplane.yml"),
+        &workspace_root().join("conformance/baseline-dataplane.yml"),
         BaselineTarget::Dataplane,
     )
     .expect("dataplane baseline should be valid");
@@ -357,7 +434,7 @@ fn baseline_rejects_missing_fields_unknown_fields_and_non_issue_urls() {
 
 #[test]
 fn fixture_results_parse_recursively_with_typed_statuses_and_raw_references() {
-    let parsed = load_server_results(Path::new("tests/fixtures/conformance/results"))
+    let parsed = load_server_results(&workspace_root().join("tests/fixtures/conformance/results"))
         .expect("fixture results should parse");
 
     assert_eq!(

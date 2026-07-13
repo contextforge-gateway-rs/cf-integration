@@ -21,6 +21,11 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::conformance::{
+    ConformanceFixtureMetadata, ConformanceResults, ScenarioOutcome, is_trusted_official_fixture,
+};
+use crate::gateway_compliance::{GatewayCaseStatus, GatewayComplianceReport};
+
 /// MCP specification release inventoried by this module.
 pub const SPEC_VERSION: &str = "2025-11-25";
 /// Official source repository for the pinned specification.
@@ -314,6 +319,130 @@ pub struct CoverageOverlay {
     /// Sparse evidence annotations. Missing entries remain explicitly untested.
     #[serde(default)]
     pub requirements: Vec<RequirementCoverageOverride>,
+}
+
+/// Per-mode result evidence used to reduce test outcomes into coverage rows.
+#[derive(Debug, Default)]
+pub struct ModeCoverageEvidence {
+    available: bool,
+    official: BTreeMap<String, CoverageResult>,
+    gateway: BTreeMap<String, CoverageResult>,
+}
+
+impl ModeCoverageEvidence {
+    /// Reduces official and gateway artifacts into named coverage evidence.
+    #[must_use]
+    pub fn from_artifacts(
+        official: Option<&ConformanceResults>,
+        gateway: Option<&GatewayComplianceReport>,
+        official_fixture: Option<&ConformanceFixtureMetadata>,
+    ) -> Self {
+        let trusted_official_fixture = is_trusted_official_fixture(official_fixture);
+        let official_results = official
+            .into_iter()
+            .flat_map(|results| &results.scenarios)
+            .map(|(scenario, result)| {
+                let result = match result.outcome_with_trusted_fixture(trusted_official_fixture) {
+                    ScenarioOutcome::Compliant => CoverageResult::Pass,
+                    ScenarioOutcome::NonCompliant => CoverageResult::Fail,
+                    ScenarioOutcome::NotApplicable => CoverageResult::NotApplicable,
+                    ScenarioOutcome::FixtureFailure
+                    | ScenarioOutcome::Ambiguous
+                    | ScenarioOutcome::Missing => CoverageResult::NotRun,
+                };
+                (scenario.clone(), result)
+            })
+            .collect();
+        let gateway_results = gateway
+            .into_iter()
+            .flat_map(|report| &report.cases)
+            .map(|case| {
+                let result = match case.status {
+                    GatewayCaseStatus::Passed => CoverageResult::Pass,
+                    GatewayCaseStatus::Failed => CoverageResult::Fail,
+                    GatewayCaseStatus::NotApplicable => CoverageResult::NotApplicable,
+                    GatewayCaseStatus::FixtureFailure => CoverageResult::NotRun,
+                };
+                (case.name.clone(), result)
+            })
+            .collect();
+        Self {
+            available: official.is_some() || gateway.is_some(),
+            official: official_results,
+            gateway: gateway_results,
+        }
+    }
+
+    /// Builds explicit evidence, primarily for deterministic reduction tests.
+    #[must_use]
+    pub fn from_results(
+        available: bool,
+        official: BTreeMap<String, CoverageResult>,
+        gateway: BTreeMap<String, CoverageResult>,
+    ) -> Self {
+        Self {
+            available,
+            official,
+            gateway,
+        }
+    }
+
+    /// Returns reduced official evidence for one scenario.
+    #[must_use]
+    pub fn official_result(&self, scenario: &str) -> Option<CoverageResult> {
+        self.official.get(scenario).copied()
+    }
+}
+
+/// Applies available mode evidence to every sparse coverage override.
+pub fn enrich_overlay_results(
+    overlay: &mut CoverageOverlay,
+    controlplane: &ModeCoverageEvidence,
+    dataplane: &ModeCoverageEvidence,
+) {
+    for requirement in &mut overlay.requirements {
+        if controlplane.available {
+            requirement.controlplane_result = derive_coverage_result(requirement, controlplane);
+        }
+        if dataplane.available {
+            requirement.dataplane_result = derive_coverage_result(requirement, dataplane);
+        }
+    }
+}
+
+fn derive_coverage_result(
+    requirement: &RequirementCoverageOverride,
+    evidence: &ModeCoverageEvidence,
+) -> CoverageResult {
+    let mut results = Vec::with_capacity(3);
+    if requirement.gateway_applicability == GatewayApplicability::NotApplicable {
+        results.push(CoverageResult::NotApplicable);
+    }
+    if requirement.official_conformance.covered
+        && let Some(scenario) = requirement.official_conformance.scenario.as_deref()
+        && let Some(result) = evidence.official.get(scenario)
+    {
+        results.push(*result);
+    }
+    if requirement.rust_gateway.covered
+        && let Some(test_name) = requirement.rust_gateway.test_name.as_deref()
+        && let Some(result) = evidence.gateway.get(test_name).or_else(|| {
+            test_name
+                .strip_prefix("gateway-compliance/")
+                .and_then(|case_name| evidence.gateway.get(case_name))
+        })
+    {
+        results.push(*result);
+    }
+    if results.contains(&CoverageResult::Fail) {
+        CoverageResult::Fail
+    } else if results.contains(&CoverageResult::Pass) {
+        CoverageResult::Pass
+    } else if results.contains(&CoverageResult::NotApplicable) {
+        CoverageResult::NotApplicable
+    } else {
+        CoverageResult::NotRun
+    }
 }
 
 /// Extracts all BCP 14 requirement occurrences from one cataloged MDX page.

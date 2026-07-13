@@ -12,12 +12,55 @@ use serde_json::Value;
 
 use cf_integration_platform::process::CommandSpec;
 
+use crate::conformance_fixture::{
+    OFFICIAL_CONFORMANCE_REPOSITORY, OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID,
+};
+
 /// Pinned official MCP conformance package used as the protocol oracle.
 pub const OFFICIAL_CONFORMANCE_PACKAGE: &str = "@modelcontextprotocol/conformance@0.1.16";
 /// Default MCP specification version exercised by the harness.
 pub const DEFAULT_MCP_SPEC_VERSION: &str = "2025-11-25";
 /// Default official server scenario suite.
 pub const DEFAULT_CONFORMANCE_SUITE: &str = "all";
+
+/// Exact provenance for the backing server used by an official run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceFixtureMetadata {
+    /// Upstream fixture repository.
+    pub repository: String,
+    /// Immutable upstream fixture revision.
+    pub revision: String,
+    /// Provisioned virtual-server identity.
+    pub server_id: String,
+}
+
+/// Reproducibility metadata stored beside one official result set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceRunMetadata {
+    /// Pinned official runner package.
+    pub oracle: String,
+    /// Stack label exercised by this artifact.
+    pub target: String,
+    /// MCP specification revision.
+    pub spec_version: String,
+    /// Official scenario suite label.
+    pub suite: String,
+    /// Backing fixture provenance, absent on historical or caller-managed runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<ConformanceFixtureMetadata>,
+}
+
+/// Whether provenance identifies the exact pinned official TypeScript fixture.
+#[must_use]
+pub fn is_trusted_official_fixture(fixture: Option<&ConformanceFixtureMetadata>) -> bool {
+    fixture.is_some_and(|fixture| {
+        fixture.repository == OFFICIAL_CONFORMANCE_REPOSITORY
+            && fixture.revision == OFFICIAL_CONFORMANCE_REVISION
+            && fixture.server_id == OFFICIAL_CONFORMANCE_SERVER_ID
+    })
+}
 
 // Exact server catalogs emitted by @modelcontextprotocol/conformance@0.1.16.
 // Keep these coupled to OFFICIAL_CONFORMANCE_PACKAGE and verify the pin with
