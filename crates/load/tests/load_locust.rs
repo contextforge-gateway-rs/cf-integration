@@ -3,8 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 
-use cf_integration::cli::{LoadArgs, LoadEngine};
-use cf_integration::load::{LoadSettings, LocustCommand};
+use cf_integration_load::{LoadEngine, LoadRequest, LoadSettings, LocustCommand};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::{AppConfig, Environment};
 use tempfile::TempDir;
@@ -40,9 +39,8 @@ fn config(root: &Path, process: &Environment) -> AppConfig {
         .config
 }
 
-fn args(smoke: bool) -> LoadArgs {
-    LoadArgs {
-        mode: None,
+fn args(smoke: bool) -> LoadRequest {
+    LoadRequest {
         engine: LoadEngine::Locust,
         smoke,
         users: None,

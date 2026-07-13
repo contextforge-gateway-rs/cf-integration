@@ -29,6 +29,9 @@ use cf_integration_compliance::coverage::{
 use cf_integration_compliance::gateway_compliance::{
     GatewayComplianceConfig, GatewayComplianceReport, run_gateway_compliance, write_gateway_reports,
 };
+use cf_integration_load::{
+    GooseLoadConfig, LoadEngine, LoadRequest, LoadSettings, LocustCommand, audit_locust_reports,
+};
 use cf_integration_mcp::GatewayTopology;
 use cf_integration_mcp::auth_proxy::AuthProxy;
 use cf_integration_mcp::gateway::GatewayClient;
@@ -49,9 +52,8 @@ use crate::app::{
     Action, ActionExecutor, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs,
     StackAction, TestAction,
 };
-use crate::cli::{ComplianceMode, LiveGroup, LoadArgs, LoadEngine, TokenKind as CliTokenKind};
+use crate::cli::{ComplianceMode, LiveGroup, TokenKind as CliTokenKind};
 use crate::error::AppFailure;
-use crate::load::{GooseLoadConfig, LoadSettings, LocustCommand, audit_locust_reports};
 use crate::token::{TokenKind, make_token};
 
 type AppResult<T> = std::result::Result<T, AppFailure>;
@@ -1107,16 +1109,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let server_id = self.default_server_id().to_owned();
         self.prepare_test_target(args.mode, &server_id).await?;
         let token = self.bearer_token(args.mode, &server_id)?;
-        let cli_args = LoadArgs {
-            mode: None,
-            engine: args.engine,
-            smoke: args.smoke,
-            users: args.users,
-            spawn_rate: args.spawn_rate,
-            run_time: args.run_time,
-        };
-        let settings = LoadSettings::resolve(&self.config, &cli_args).map_err(AppFailure::from)?;
-        match args.engine {
+        let settings =
+            LoadSettings::resolve(&self.config, &args.request).map_err(AppFailure::from)?;
+        match args.request.engine {
             LoadEngine::Locust => {
                 let command = LocustCommand::new(
                     &self.config,
@@ -1295,11 +1290,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 self.run_probe(mode).await,
                 self.run_load(ResolvedLoadArgs {
                     mode,
-                    engine: LoadEngine::Locust,
-                    smoke: true,
-                    users: None,
-                    spawn_rate: None,
-                    run_time: None,
+                    request: LoadRequest {
+                        engine: LoadEngine::Locust,
+                        smoke: true,
+                        users: None,
+                        spawn_rate: None,
+                        run_time: None,
+                    },
                 })
                 .await,
                 self.run_live(mode, LiveGroup::Mcp, exclude_plugins).await,
@@ -1316,11 +1313,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 if let Err(error) = self
                     .run_load(ResolvedLoadArgs {
                         mode,
-                        engine: *engine,
-                        smoke: false,
-                        users: None,
-                        spawn_rate: None,
-                        run_time: None,
+                        request: LoadRequest {
+                            engine: *engine,
+                            smoke: false,
+                            users: None,
+                            spawn_rate: None,
+                            run_time: None,
+                        },
                     })
                     .await
                 {

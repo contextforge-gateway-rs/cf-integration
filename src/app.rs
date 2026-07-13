@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use cf_integration_compliance::ConformanceSuite;
+use cf_integration_load::{LoadEngine, LoadRequest};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 
 use crate::cli::{
     Cli, CliStackMode, Command, ComplianceCommand, ComplianceCommonArgs, ComplianceMode, LiveGroup,
-    LoadEngine, StackCommand, TestCommand, TokenKind,
+    StackCommand, TestCommand, TokenKind,
 };
 use crate::error::AppFailure;
 
@@ -53,11 +54,7 @@ pub enum StackAction {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLoadArgs {
     pub mode: StackMode,
-    pub engine: LoadEngine,
-    pub smoke: bool,
-    pub users: Option<usize>,
-    pub spawn_rate: Option<f64>,
-    pub run_time: Option<String>,
+    pub request: LoadRequest,
 }
 
 /// Fully resolved test operation.
@@ -193,11 +190,13 @@ fn resolve_test(command: TestCommand, environment: &Environment) -> Result<TestA
         )?)),
         TestCommand::Load(args) => Ok(TestAction::Load(ResolvedLoadArgs {
             mode: resolve_single_mode(args.mode, environment)?,
-            engine: args.engine,
-            smoke: args.smoke,
-            users: args.users,
-            spawn_rate: args.spawn_rate,
-            run_time: args.run_time,
+            request: LoadRequest {
+                engine: args.engine.into(),
+                smoke: args.smoke,
+                users: args.users,
+                spawn_rate: args.spawn_rate,
+                run_time: args.run_time,
+            },
         })),
         TestCommand::Live(args) => Ok(TestAction::Live {
             mode: resolve_single_mode(args.mode, environment)?,
@@ -211,7 +210,7 @@ fn resolve_test(command: TestCommand, environment: &Environment) -> Result<TestA
             Ok(TestAction::Suite {
                 mode,
                 start: args.start,
-                load: args.load,
+                load: args.load.into_iter().map(Into::into).collect(),
                 exclude_plugins: args.exclude_plugins,
             })
         }

@@ -5,8 +5,9 @@ use cf_integration::app::{
     Action, ComplianceAction, ResolvedComplianceCommon, ResolvedLoadArgs, StackAction, TestAction,
     resolve_action,
 };
-use cf_integration::cli::{Cli, ComplianceMode, LiveGroup, LoadEngine, TokenKind};
+use cf_integration::cli::{Cli, ComplianceMode, LiveGroup, TokenKind};
 use cf_integration_compliance::ConformanceSuite;
+use cf_integration_load::{LoadEngine, LoadRequest};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 use clap::Parser;
@@ -156,11 +157,13 @@ fn test_actions_have_fully_resolved_modes_and_options() {
         ),
         Action::Test(TestAction::Load(ResolvedLoadArgs {
             mode: StackMode::Controlplane,
-            engine: LoadEngine::Goose,
-            smoke: true,
-            users: Some(2),
-            spawn_rate: Some(0.5),
-            run_time: Some("10s".to_owned()),
+            request: LoadRequest {
+                engine: LoadEngine::Goose,
+                smoke: true,
+                users: Some(2),
+                spawn_rate: Some(0.5),
+                run_time: Some("10s".to_owned()),
+            },
         }))
     );
     assert_eq!(

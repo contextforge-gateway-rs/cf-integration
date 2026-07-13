@@ -9,8 +9,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Request, Response, StatusCode};
 use axum::routing::any;
-use cf_integration::cli::{LoadArgs, LoadEngine};
-use cf_integration::load::{GooseLoadConfig, GooseRunError, LoadSettings};
+use cf_integration_load::{GooseLoadConfig, GooseRunError, LoadEngine, LoadRequest, LoadSettings};
 use cf_integration_mcp::mcp::{ACCEPT, PROTOCOL_VERSION};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::{AppConfig, Environment};
@@ -51,8 +50,7 @@ fn app_config(root: &Path, process: &Environment) -> AppConfig {
 fn load_settings(config: &AppConfig, run_time: &str) -> LoadSettings {
     LoadSettings::resolve(
         config,
-        &LoadArgs {
-            mode: None,
+        &LoadRequest {
             engine: LoadEngine::Goose,
             smoke: false,
             users: Some(1),

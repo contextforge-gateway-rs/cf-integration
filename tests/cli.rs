@@ -2,10 +2,10 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use cf_integration::cli::{
-    Cli, CliConformanceSuite, CliStackMode, Command, ComplianceAllArgs, ComplianceArgs,
-    ComplianceCommand, ComplianceMode, ComplianceReportArgs, InspectArgs, LiveGroup, LoadArgs,
-    LoadEngine, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs, TestArgs,
-    TestCommand, TokenArgs, TokenKind,
+    Cli, CliConformanceSuite, CliLoadEngine, CliStackMode, Command, ComplianceAllArgs,
+    ComplianceArgs, ComplianceCommand, ComplianceMode, ComplianceReportArgs, InspectArgs,
+    LiveGroup, LoadArgs, ModeArgs, ModeSelectionArgs, StackArgs, StackCommand, StackLogsArgs,
+    TestArgs, TestCommand, TokenArgs, TokenKind,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -285,7 +285,7 @@ fn probe_live_and_suite_share_stack_modes() {
     };
     assert_eq!(args.mode, Some(ComplianceMode::All));
     assert!(args.start);
-    assert_eq!(args.load, [LoadEngine::Locust, LoadEngine::Goose]);
+    assert_eq!(args.load, [CliLoadEngine::Locust, CliLoadEngine::Goose]);
     assert!(args.exclude_plugins);
 }
 
@@ -295,7 +295,7 @@ fn load_defaults_and_overrides_are_typed_and_validated() {
         load(&[]),
         LoadArgs {
             mode: None,
-            engine: LoadEngine::Locust,
+            engine: CliLoadEngine::Locust,
             smoke: false,
             users: None,
             spawn_rate: None,
@@ -318,7 +318,7 @@ fn load_defaults_and_overrides_are_typed_and_validated() {
         ]),
         LoadArgs {
             mode: Some(CliStackMode::Dataplane),
-            engine: LoadEngine::Goose,
+            engine: CliLoadEngine::Goose,
             smoke: true,
             users: Some(25),
             spawn_rate: Some(2.5),

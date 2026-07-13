@@ -3,6 +3,5 @@
 pub mod app;
 pub mod cli;
 pub mod error;
-pub mod load;
 pub mod runtime;
 pub mod token;

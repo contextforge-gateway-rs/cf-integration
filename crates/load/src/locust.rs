@@ -3,111 +3,25 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use cf_integration_platform::StackMode;
 use cf_integration_platform::compose::ComposeProject;
-use cf_integration_platform::config::{AppConfig, SourcedValue, ValueOrigin};
+use cf_integration_platform::config::AppConfig;
 use cf_integration_platform::process::CommandSpec;
 
-use crate::cli::{LoadArgs, LoadEngine};
 use cf_integration_mcp::mcp::PROTOCOL_VERSION;
 
-const SMOKE_USERS: &str = "1";
-const SMOKE_SPAWN_RATE: &str = "1";
-const SMOKE_RUN_TIME: &str = "10s";
+use crate::LoadSettings;
+
 const LOCUST_ADAPTER_NAME: &str = "locustfile_mcp.py";
 const LOCUST_ADAPTER_CONTAINER_PATH: &str = "/mnt/locust-cf/locustfile_mcp.py";
 const REQUEST_TIMEOUT_DEFAULT_SECONDS: &str = "60";
 const REQUEST_TIMEOUT_ENV: &str = "LOCUST_REQUEST_TIMEOUT_SECONDS";
 const REQUEST_TIMEOUT_ERROR: &str =
     "LOCUST_REQUEST_TIMEOUT_SECONDS must be a finite number greater than zero";
-const RUN_TIME_ERROR: &str = "LOCUST_RUN_TIME must be a positive Locust duration using h, m, and s at most once in that order";
-
-/// Validated load settings after applying CLI, process, dotenv, and default precedence.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadSettings {
-    users: NonZeroUsize,
-    spawn_rate: f64,
-    run_time: String,
-}
-
-impl LoadSettings {
-    /// Resolves settings using CLI > process > dotenv/default precedence.
-    ///
-    /// Smoke mode replaces only dotenv and built-in values. Explicit process
-    /// values remain authoritative, including invalid empty values, which are
-    /// reported rather than silently replaced.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a zero or malformed user count, a non-finite or
-    /// non-positive spawn rate, or an invalid Locust run-time expression.
-    pub fn resolve(config: &AppConfig, arguments: &LoadArgs) -> Result<Self> {
-        let users = match arguments.users {
-            Some(users) => users,
-            None => parse_users(selected_value(
-                config.locust_users(),
-                arguments.smoke,
-                SMOKE_USERS,
-            ))?,
-        };
-        let users = NonZeroUsize::new(users)
-            .context("LOCUST_USERS must be an integer greater than zero")?;
-
-        let spawn_rate = match arguments.spawn_rate {
-            Some(spawn_rate) if spawn_rate.is_finite() && spawn_rate > 0.0 => spawn_rate,
-            Some(_) => bail!("LOCUST_SPAWN_RATE must be a finite number greater than zero"),
-            None => parse_spawn_rate(selected_value(
-                config.locust_spawn_rate(),
-                arguments.smoke,
-                SMOKE_SPAWN_RATE,
-            ))?,
-        };
-
-        let run_time = arguments.run_time.as_deref().map_or_else(
-            || {
-                selected_value(config.locust_run_time(), arguments.smoke, SMOKE_RUN_TIME)
-                    .to_str()
-                    .map(str::to_owned)
-                    .context("LOCUST_RUN_TIME must be valid UTF-8")
-            },
-            |run_time| Ok(run_time.to_owned()),
-        )?;
-        match arguments.engine {
-            LoadEngine::Locust => validate_locust_run_time(&run_time)?,
-            LoadEngine::Goose => validate_grouped_run_time(&run_time)?,
-        }
-
-        Ok(Self {
-            users,
-            spawn_rate,
-            run_time,
-        })
-    }
-
-    /// Returns the concurrent user count.
-    #[must_use]
-    pub fn users(&self) -> NonZeroUsize {
-        self.users
-    }
-
-    /// Returns the users spawned per second.
-    #[must_use]
-    pub fn spawn_rate(&self) -> f64 {
-        self.spawn_rate
-    }
-
-    /// Returns the validated Locust duration expression.
-    #[must_use]
-    pub fn run_time(&self) -> &str {
-        &self.run_time
-    }
-}
-
 /// Prepared Docker Compose Locust invocation and its host report directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocustCommand {
@@ -206,9 +120,9 @@ impl LocustCommand {
                     OsString::from("-f"),
                     OsString::from(LOCUST_ADAPTER_CONTAINER_PATH),
                     OsString::from("--host=http://nginx:80"),
-                    OsString::from(format!("--users={}", settings.users.get())),
-                    OsString::from(format!("--spawn-rate={}", settings.spawn_rate)),
-                    OsString::from(format!("--run-time={}", settings.run_time)),
+                    OsString::from(format!("--users={}", settings.users().get())),
+                    OsString::from(format!("--spawn-rate={}", settings.spawn_rate())),
+                    OsString::from(format!("--run-time={}", settings.run_time())),
                     OsString::from("--headless"),
                     OsString::from("--html=/mnt/reports/locust_report.html"),
                     OsString::from("--csv=/mnt/reports/locust"),
@@ -225,9 +139,9 @@ impl LocustCommand {
             .env("MCPGATEWAY_BEARER_TOKEN", bearer_token)
             .env("LOCUST_LOCUSTFILE", LOCUST_ADAPTER_NAME)
             .env("LOCUST_MODE", "headless")
-            .env("LOCUST_USERS", settings.users.get().to_string())
-            .env("LOCUST_SPAWN_RATE", settings.spawn_rate.to_string())
-            .env("LOCUST_RUN_TIME", settings.run_time.as_str())
+            .env("LOCUST_USERS", settings.users().get().to_string())
+            .env("LOCUST_SPAWN_RATE", settings.spawn_rate().to_string())
+            .env("LOCUST_RUN_TIME", settings.run_time())
             .env(REQUEST_TIMEOUT_ENV, request_timeout.to_string());
         match mode {
             StackMode::Dataplane => {
@@ -354,109 +268,6 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
-}
-
-fn selected_value<'a>(
-    configured: &'a SourcedValue,
-    smoke: bool,
-    smoke_default: &'static str,
-) -> &'a OsStr {
-    if smoke && configured.origin != ValueOrigin::Process {
-        OsStr::new(smoke_default)
-    } else {
-        &configured.value
-    }
-}
-
-fn parse_users(value: &OsStr) -> Result<usize> {
-    let value = value.to_str().context("LOCUST_USERS must be valid UTF-8")?;
-    let users = value
-        .parse::<usize>()
-        .context("LOCUST_USERS must be an integer greater than zero")?;
-    if users == 0 {
-        bail!("LOCUST_USERS must be an integer greater than zero");
-    }
-    Ok(users)
-}
-
-fn parse_spawn_rate(value: &OsStr) -> Result<f64> {
-    let value = value
-        .to_str()
-        .context("LOCUST_SPAWN_RATE must be valid UTF-8")?;
-    let spawn_rate = value
-        .parse::<f64>()
-        .context("LOCUST_SPAWN_RATE must be a finite number greater than zero")?;
-    if !spawn_rate.is_finite() || spawn_rate <= 0.0 {
-        bail!("LOCUST_SPAWN_RATE must be a finite number greater than zero");
-    }
-    Ok(spawn_rate)
-}
-
-fn validate_locust_run_time(value: &str) -> Result<()> {
-    let bytes = value.as_bytes();
-    let mut position = 0;
-    if bytes.is_empty() {
-        bail!(RUN_TIME_ERROR);
-    }
-    let mut previous_unit = None;
-    while position < bytes.len() {
-        let number_start = position;
-        while position < bytes.len() && bytes[position].is_ascii_digit() {
-            position += 1;
-        }
-        if number_start == position
-            || value[number_start..position]
-                .parse::<u64>()
-                .ok()
-                .is_none_or(|amount| amount == 0)
-        {
-            bail!(RUN_TIME_ERROR);
-        }
-        let unit = match bytes.get(position) {
-            Some(b'h') => 0,
-            Some(b'm') => 1,
-            Some(b's') => 2,
-            _ => {
-                bail!(RUN_TIME_ERROR);
-            }
-        };
-        if previous_unit.is_some_and(|previous| unit <= previous) {
-            bail!(RUN_TIME_ERROR);
-        }
-        previous_unit = Some(unit);
-        position += 1;
-    }
-    Ok(())
-}
-
-fn validate_grouped_run_time(value: &str) -> Result<()> {
-    let bytes = value.as_bytes();
-    let mut position = 0;
-    if bytes.is_empty() {
-        bail!("LOCUST_RUN_TIME must be one or more positive integer+unit groups");
-    }
-    while position < bytes.len() {
-        let number_start = position;
-        while position < bytes.len() && bytes[position].is_ascii_digit() {
-            position += 1;
-        }
-        if number_start == position
-            || value[number_start..position]
-                .parse::<u64>()
-                .ok()
-                .is_none_or(|amount| amount == 0)
-        {
-            bail!("LOCUST_RUN_TIME must be one or more positive integer+unit groups");
-        }
-        if bytes[position..].starts_with(b"ms") {
-            position += 2;
-        } else if matches!(bytes.get(position), Some(b's' | b'm' | b'h' | b'd')) {
-            position += 1;
-        } else {
-            bail!("LOCUST_RUN_TIME must be one or more positive integer+unit groups");
-        }
-    }
-    Ok(())
 }
 
 fn configured_text<'a>(config: &'a AppConfig, key: &str) -> Option<&'a str> {

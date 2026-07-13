@@ -13,12 +13,20 @@ fn python() -> &'static str {
 }
 
 fn scripts_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts")
+    workspace_root().join("scripts")
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("load crate should be nested under the workspace root")
+        .to_path_buf()
 }
 
 #[test]
 fn locust_adapter_and_compose_overlay_do_not_reference_the_removed_helper() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = workspace_root();
     let adapter = fs::read_to_string(root.join("scripts/locustfile_mcp.py"))
         .expect("Locust adapter should be readable");
     let compose = fs::read_to_string(root.join("docker/docker-compose.cf-integration.yaml"))

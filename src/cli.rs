@@ -231,7 +231,7 @@ pub struct LoadArgs {
 
     /// Load-test engine.
     #[arg(long, value_enum, default_value = "locust")]
-    pub engine: LoadEngine,
+    pub engine: CliLoadEngine,
 
     /// Use smoke-test settings.
     #[arg(long)]
@@ -252,11 +252,20 @@ pub struct LoadArgs {
 
 /// Load-test implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum LoadEngine {
+pub enum CliLoadEngine {
     /// Python Locust adapter.
     Locust,
     /// Native Rust Goose runner.
     Goose,
+}
+
+impl From<CliLoadEngine> for cf_integration_load::LoadEngine {
+    fn from(engine: CliLoadEngine) -> Self {
+        match engine {
+            CliLoadEngine::Locust => Self::Locust,
+            CliLoadEngine::Goose => Self::Goose,
+        }
+    }
 }
 
 /// Live-test options.
@@ -297,7 +306,7 @@ pub struct SuiteArgs {
 
     /// Load-test engine to include; repeat for multiple engines.
     #[arg(long, value_enum, action = ArgAction::Append)]
-    pub load: Vec<LoadEngine>,
+    pub load: Vec<CliLoadEngine>,
 
     /// Exclude plugin-dependent tests.
     #[arg(long)]
