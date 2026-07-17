@@ -55,7 +55,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let mut warnings = Vec::new();
         let result = manager.ensure(self.config.integration_dir(), request, &mut warnings);
         for warning in warnings {
-            eprintln!("{warning}");
+            eprintln!("{}", OutputStyle::stderr().warning(&warning));
         }
         Ok(result.map(|_| ())?)
     }

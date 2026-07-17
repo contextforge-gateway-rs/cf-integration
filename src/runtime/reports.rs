@@ -17,7 +17,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .unwrap_or_else(|| self.config.root().join("reports")),
         );
         let comparison = self.write_comparison_from_artifacts(&paths, None)?;
-        println!("Conformance comparison: {}", comparison.display());
+        println!(
+            "{} {}",
+            OutputStyle::stdout().info("Conformance comparison:"),
+            comparison.display()
+        );
         Ok(())
     }
 

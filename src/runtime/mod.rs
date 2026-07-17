@@ -37,6 +37,7 @@ use cf_integration_platform::stack::{
 };
 use cf_integration_platform::{PlatformError, StackMode};
 
+use crate::OutputStyle;
 use crate::app::{
     Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, selected_topologies,
     topology_selection,
@@ -165,6 +166,17 @@ fn required_text<'a>(value: &'a OsStr, name: &str) -> AppResult<&'a str> {
         .to_str()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppFailure::from(anyhow!("{name} must be nonempty UTF-8")))
+}
+
+fn finish_with_cleanup(primary: Option<AppFailure>, cleanup: AppResult<()>) -> AppResult<()> {
+    match (primary, cleanup) {
+        (None, Ok(())) => Ok(()),
+        (Some(primary), Ok(())) => Err(primary),
+        (None, Err(cleanup)) => Err(cleanup),
+        (Some(primary), Err(cleanup)) => Err(AppFailure::from(anyhow!(
+            "{primary}; additionally cleanup failed: {cleanup}"
+        ))),
+    }
 }
 
 async fn wait_for_http_endpoint(

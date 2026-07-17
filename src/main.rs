@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+use cf_integration::OutputStyle;
 use cf_integration::app::resolve_action;
 use cf_integration::cli::Cli;
 use cf_integration::error::AppFailure;
@@ -15,26 +16,38 @@ async fn main() -> ExitCode {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("failed to locate cf-integration executable: {error}");
+            eprintln!(
+                "{}",
+                OutputStyle::stderr().failure(&format!(
+                    "failed to locate cf-integration executable: {error}"
+                ))
+            );
             return ExitCode::FAILURE;
         }
     };
     let cwd = match std::env::current_dir() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("failed to determine current directory: {error}");
+            eprintln!(
+                "{}",
+                OutputStyle::stderr()
+                    .failure(&format!("failed to determine current directory: {error}"))
+            );
             return ExitCode::FAILURE;
         }
     };
     let loaded = match AppConfig::load(&environment, &executable, &cwd) {
         Ok(loaded) => loaded,
         Err(error) => {
-            eprintln!("{error:#}");
+            eprintln!("{}", OutputStyle::stderr().failure(&format!("{error:#}")));
             return ExitCode::FAILURE;
         }
     };
     for warning in &loaded.warnings {
-        eprintln!("warning: {warning}");
+        eprintln!(
+            "{}",
+            OutputStyle::stderr().warning(&format!("warning: {warning}"))
+        );
     }
 
     let effective_environment = loaded
@@ -51,7 +64,7 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("{}", OutputStyle::stderr().failure(&error.to_string()));
             exit_code(error.exit_code())
         }
     }

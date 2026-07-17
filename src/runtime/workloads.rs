@@ -21,65 +21,92 @@ return 0
 impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) async fn run_probe(&self, topology: StackMode) -> AppResult<()> {
         let server_id = self.default_server_id().to_owned();
-        self.prepare_test_target(topology, &server_id).await?;
-        let token = self.bearer_token(topology, &server_id)?;
-        let protocol_version = self
-            .environment_text("MCP_SPEC_VERSION")
-            .unwrap_or(PROTOCOL_VERSION)
-            .to_owned();
-        let config = ProbeConfig {
-            mode: gateway_topology(topology),
-            base_url: self.base_url()?.to_owned(),
-            server_id,
-            bearer_token: token,
-            config_timeout: Duration::from_secs(
-                self.environment_u64("CF_PROBE_CONFIG_TIMEOUT", 120)?,
-            ),
-            retry_interval: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(
-                self.environment_u64("CF_PROBE_REQUEST_TIMEOUT", 30)?,
-            ),
-            protocol_version,
-        };
-        let transport = ReqwestProbeTransport::new().map_err(AppFailure::from)?;
-        let stdout = std::io::stdout();
-        let mut output = stdout.lock();
-        run_probe(&transport, &config, &mut output)
-            .await
-            .map_err(AppFailure::from)
+        self.with_managed_test_target(topology, &server_id, || async {
+            let token = self.bearer_token(topology, &server_id)?;
+            let protocol_version = self
+                .environment_text("MCP_SPEC_VERSION")
+                .unwrap_or(PROTOCOL_VERSION)
+                .to_owned();
+            let config = ProbeConfig {
+                mode: gateway_topology(topology),
+                base_url: self.base_url()?.to_owned(),
+                server_id: server_id.clone(),
+                bearer_token: token,
+                config_timeout: Duration::from_secs(
+                    self.environment_u64("CF_PROBE_CONFIG_TIMEOUT", 120)?,
+                ),
+                retry_interval: Duration::from_secs(5),
+                request_timeout: Duration::from_secs(
+                    self.environment_u64("CF_PROBE_REQUEST_TIMEOUT", 30)?,
+                ),
+                protocol_version,
+            };
+            let transport = ReqwestProbeTransport::new().map_err(AppFailure::from)?;
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_probe(&transport, &config, &mut output)
+                .await
+                .map_err(AppFailure::from)
+        })
+        .await
     }
 
     pub(super) async fn run_load(&self, args: ResolvedLoadArgs) -> AppResult<()> {
         let server_id = self.default_server_id().to_owned();
-        self.prepare_test_target(args.topology, &server_id).await?;
-        let token = self.bearer_token(args.topology, &server_id)?;
-        let settings =
-            LoadSettings::resolve(&self.config, &args.request).map_err(AppFailure::from)?;
-        match args.request.engine {
-            LoadEngine::Locust => {
-                let command = LocustCommand::new(
-                    &self.config,
-                    args.topology,
-                    &settings,
-                    &token,
-                    (args.topology == StackMode::Dataplane).then_some(server_id.as_str()),
-                )
-                .map_err(AppFailure::from)?;
-                let process_result = self
-                    .runner
-                    .run(&self.compose_environment(
-                        command.command().clone(),
+        self.with_managed_test_target(args.topology, &server_id, || async {
+            let token = self.bearer_token(args.topology, &server_id)?;
+            let settings =
+                LoadSettings::resolve(&self.config, &args.request).map_err(AppFailure::from)?;
+            match args.request.engine {
+                LoadEngine::Locust => {
+                    let command = LocustCommand::new(
+                        &self.config,
                         args.topology,
-                        true,
-                    )?)
-                    .map_err(AppFailure::from);
-                finalize_locust_run(process_result, command.report_dir(), &token)
+                        &settings,
+                        &token,
+                        (args.topology == StackMode::Dataplane).then_some(server_id.as_str()),
+                    )
+                    .map_err(AppFailure::from)?;
+                    let process_result = self
+                        .runner
+                        .run(&self.compose_environment(
+                            command.command().clone(),
+                            args.topology,
+                            true,
+                        )?)
+                        .map_err(AppFailure::from);
+                    finalize_locust_run(process_result, command.report_dir(), &token)
+                }
+                LoadEngine::Goose => {
+                    self.run_goose(args.topology, &settings, &token, &server_id)
+                        .await
+                }
             }
-            LoadEngine::Goose => {
-                self.run_goose(args.topology, &settings, &token, &server_id)
-                    .await
-            }
-        }
+        })
+        .await
+    }
+
+    pub(super) async fn with_managed_test_target<F, Fut>(
+        &self,
+        topology: StackMode,
+        server_id: &str,
+        operation: F,
+    ) -> AppResult<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = AppResult<()>>,
+    {
+        let primary = match self.stack_up(topology, false).await {
+            Ok(()) => match self.prepare_test_target(topology, server_id).await {
+                Ok(()) => operation().await,
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        finish_with_cleanup(
+            primary.err(),
+            self.cleanup(topology_selection(topology), CleanupKind::Down),
+        )
     }
 
     pub(super) async fn prepare_test_target(
@@ -107,7 +134,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         })?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
         eprintln!(
-            "Waiting up to {timeout_seconds}s for a publisher snapshot containing server {server_id}."
+            "{}",
+            OutputStyle::stderr().info(&format!(
+                "Waiting up to {timeout_seconds}s for a publisher snapshot containing server {server_id}."
+            ))
         );
         loop {
             let command = CommandSpec::new("docker").args([
@@ -165,7 +195,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .await
             .map_err(|error| AppFailure::from(anyhow!(error)))?;
         println!(
-            "Goose reports: {} and {}",
+            "{} {} and {}",
+            OutputStyle::stdout().info("Goose reports:"),
             outcome.reports().html().display(),
             outcome.reports().json().display()
         );

@@ -24,13 +24,16 @@ under `.integration/` or `CF_INTEGRATION_DIR`.
   the Locust load engine
 
 The checked-in `rust-toolchain.toml` selects Rust 1.97.0 with rustfmt and
-Clippy. Build the locked workspace with:
+Clippy. Install the locked CLI from this checkout with:
 
 ```bash
 rustup toolchain install 1.97.0 --profile minimal -c clippy -c rustfmt
-cargo build --locked
-.integration/cargo-target/debug/cf-integration --help
+cargo install --path . --locked
+cf-integration --help
 ```
+
+Cargo places the executable in `$CARGO_HOME/bin` (normally `~/.cargo/bin`).
+Re-run the install command after updating the checkout.
 
 ## Workspace
 
@@ -65,17 +68,21 @@ selection: it exposes the three independently measured lanes directly.
 
 ## Quick start
 
-Start the dataplane topology and probe its public MCP route:
+Probe the dataplane public MCP route:
 
 ```bash
-cargo run --locked -- stack up --topology dataplane --fresh
-cargo run --locked -- probe --topology dataplane
+cf-integration probe --topology dataplane
 ```
 
 `stack up` synchronizes the required source checkouts, validates the Compose
 contract, resolves local builds or published images, starts the selected
 topology, and waits for its public endpoint. It preserves existing volumes by
 default. Use `--fresh` when state must be discarded.
+
+Probe, load, and Inspector commands start their selected stack, wait for the
+fixture to be ready, and stop the stack when the command succeeds or fails.
+Explicit `stack` commands remain available when a persistent environment is
+needed.
 
 The Fast Time backend is registered as virtual server
 `9779b6698cbd4b4995ee04a4fab38737`, so probe and load commands need no manual
@@ -108,13 +115,13 @@ Use `--help` at any level for the authoritative flags.
 ### Stack lifecycle
 
 ```bash
-cargo run --locked -- stack up --topology dataplane
-cargo run --locked -- stack up --topology dataplane --fresh
-cargo run --locked -- stack down --topology all
-cargo run --locked -- stack down --topology all --volumes
-cargo run --locked -- stack status --topology dataplane
-cargo run --locked -- stack logs --topology dataplane nginx cf-dataplane
-cargo run --locked -- stack config --topology dataplane
+cf-integration stack up --topology dataplane
+cf-integration stack up --topology dataplane --fresh
+cf-integration stack down --topology all
+cf-integration stack down --topology all --volumes
+cf-integration stack status --topology dataplane
+cf-integration stack logs --topology dataplane nginx cf-dataplane
+cf-integration stack config --topology dataplane
 ```
 
 `stack down --volumes` is the explicit destructive cleanup operation.
@@ -124,7 +131,7 @@ not need to reconstruct its Compose invocation.
 ### Probe
 
 ```bash
-cargo run --locked -- probe --topology dataplane
+cf-integration probe --topology dataplane
 ```
 
 The probe checks unauthenticated rejection, initialization,
@@ -137,12 +144,12 @@ The probe checks unauthenticated rejection, initialization,
 Both load engines exercise the same MCP lifecycle and remain first-class:
 
 ```bash
-cargo run --locked -- load --topology dataplane --engine locust --smoke
-cargo run --locked -- load --topology dataplane --engine goose --smoke
+cf-integration load --topology dataplane --engine locust --smoke
+cf-integration load --topology dataplane --engine goose --smoke
 
-cargo run --locked -- load --topology dataplane --engine locust \
+cf-integration load --topology dataplane --engine locust \
   --users 20 --spawn-rate 5 --run-time 2m
-cargo run --locked -- load --topology dataplane --engine goose \
+cf-integration load --topology dataplane --engine goose \
   --users 20 --spawn-rate 5 --run-time 2m
 ```
 
@@ -167,7 +174,7 @@ fixture is built from matching source revision
 The default command is intentionally complete and reproducible:
 
 ```bash
-cargo run --locked -- conformance run
+cf-integration conformance run
 ```
 
 It always:
@@ -191,7 +198,7 @@ The three lanes are:
 Select exact lanes by repeating `--lane`:
 
 ```bash
-cargo run --locked -- conformance run \
+cf-integration conformance run \
   --lane fixture-direct \
   --lane dataplane
 ```
@@ -199,16 +206,16 @@ cargo run --locked -- conformance run \
 Supported revisions are explicit and use the same pinned runner and fixture:
 
 ```bash
-cargo run --locked -- conformance run --spec-version 2025-11-25
-cargo run --locked -- conformance run --spec-version 2025-06-18
+cf-integration conformance run --spec-version 2025-11-25
+cf-integration conformance run --spec-version 2025-06-18
 ```
 
 Artifacts default below `CF_INTEGRATION_DIR`. Use `--results-dir` to place them
 elsewhere. Regenerate only the official comparison report with:
 
 ```bash
-cargo run --locked -- conformance report
-cargo run --locked -- conformance report \
+cf-integration conformance report
+cf-integration conformance report \
   --results-dir /path/to/results \
   --output-dir /path/to/reports
 ```
@@ -223,15 +230,15 @@ of process arguments. Automatic fixture provisioning requires a loopback
 Debug commands are useful for manual diagnosis but are not compliance gates.
 
 ```bash
-cargo run --locked -- debug inspect \
+cf-integration debug inspect \
   --topology dataplane \
   --method tools/list
 
-cargo run --locked -- debug token \
+cf-integration debug token \
   --kind scoped \
   --server-id <virtual-server-id>
 
-cargo run --locked -- debug token --kind admin
+cf-integration debug token --kind admin
 ```
 
 Inspector is pinned to `@modelcontextprotocol/inspector@0.22.0` and uses the

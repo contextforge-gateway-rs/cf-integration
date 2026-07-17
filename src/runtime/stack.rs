@@ -64,7 +64,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             && !build
             && self.integration_freshness()? == StackFreshness::Current
         {
-            println!("Integration stack already current; skipping Docker Compose up.");
+            println!(
+                "{}",
+                OutputStyle::stdout()
+                    .success("Integration stack already current; skipping Docker Compose up.")
+            );
             return self.wait_for_public_endpoint(mode).await;
         }
 
@@ -98,11 +102,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .run(&self.compose_environment(command.command().clone(), mode, true)?)?;
         self.wait_for_public_endpoint(mode).await?;
         println!(
-            "{} stack started.",
-            match mode {
-                StackMode::Controlplane => "Control-plane",
-                StackMode::Dataplane => "Dataplane integration",
-            }
+            "{}",
+            OutputStyle::stdout().success(&format!(
+                "{} stack started.",
+                match mode {
+                    StackMode::Controlplane => "Control-plane",
+                    StackMode::Dataplane => "Dataplane integration",
+                }
+            ))
         );
         Ok(())
     }
@@ -120,9 +127,12 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         .endpoint()
         .clone();
         eprintln!(
-            "Waiting up to {}s for the public {} MCP endpoint.",
-            STACK_READY_TIMEOUT.as_secs(),
-            stack_mode_label(mode)
+            "{}",
+            OutputStyle::stderr().info(&format!(
+                "Waiting up to {}s for the public {} MCP endpoint.",
+                STACK_READY_TIMEOUT.as_secs(),
+                stack_mode_label(mode)
+            ))
         );
         wait_for_http_endpoint(&endpoint, mode, STACK_READY_TIMEOUT).await
     }
@@ -369,7 +379,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             },
         );
         for reason in decision.reasons {
-            println!("CF_COMPOSE_BUILD: {reason}");
+            println!(
+                "{}",
+                OutputStyle::stdout().info(&format!("CF_COMPOSE_BUILD: {reason}"))
+            );
         }
         Ok(decision.build)
     }
@@ -446,11 +459,20 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     .lines()
                     .any(|value| value.ends_with(&format!("@{digest}")))
             }) {
-                println!("{label} image digest unchanged: {digest}");
+                println!(
+                    "{}",
+                    OutputStyle::stdout()
+                        .success(&format!("{label} image digest unchanged: {digest}"))
+                );
                 return Ok(());
             }
         } else if local_exists {
-            println!("{label} remote digest unavailable; using local image.");
+            println!(
+                "{}",
+                OutputStyle::stdout().warning(&format!(
+                    "{label} remote digest unavailable; using local image."
+                ))
+            );
             return Ok(());
         }
 

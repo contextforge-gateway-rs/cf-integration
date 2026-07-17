@@ -24,31 +24,37 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         method: &str,
         server_id: Option<&str>,
     ) -> AppResult<()> {
-        self.require_mode_sources(mode)?;
-        let server_id = server_id.unwrap_or_else(|| self.default_server_id());
-        self.prepare_test_target(mode, server_id).await?;
-        let token = self.bearer_token(mode, server_id)?;
-        let endpoint =
-            GatewayClient::new(gateway_topology(mode), self.base_url()?, server_id, &token)
-                .context("failed to construct the Inspector gateway endpoint")
-                .map_err(AppFailure::from)?
-                .endpoint()
-                .clone();
-        let proxy = AuthProxy::start(endpoint, &token)
-            .await
-            .context("failed to start the Inspector authentication proxy")
-            .map_err(AppFailure::from)?;
-        let command = allowlisted_npx_environment(
-            inspector_command(proxy.url().as_str(), method).cwd(self.config.root()),
-        );
-        let process_result = self.runner.run_async(&command).await;
-        let shutdown_result = proxy
-            .shutdown()
-            .await
-            .context("failed to stop the Inspector authentication proxy")
-            .map_err(AppFailure::from);
-        process_result?;
-        shutdown_result
+        let server_id = server_id
+            .unwrap_or_else(|| self.default_server_id())
+            .to_owned();
+        self.with_managed_test_target(mode, &server_id, || async {
+            let token = self.bearer_token(mode, &server_id)?;
+            let endpoint =
+                GatewayClient::new(gateway_topology(mode), self.base_url()?, &server_id, &token)
+                    .context("failed to construct the Inspector gateway endpoint")
+                    .map_err(AppFailure::from)?
+                    .endpoint()
+                    .clone();
+            let proxy = AuthProxy::start(endpoint, &token)
+                .await
+                .context("failed to start the Inspector authentication proxy")
+                .map_err(AppFailure::from)?;
+            let command = allowlisted_npx_environment(
+                inspector_command(proxy.url().as_str(), method).cwd(self.config.root()),
+            );
+            let process_result = self
+                .runner
+                .run_async(&command)
+                .await
+                .map_err(AppFailure::from);
+            let shutdown_result = proxy
+                .shutdown()
+                .await
+                .context("failed to stop the Inspector authentication proxy")
+                .map_err(AppFailure::from);
+            finish_with_cleanup(process_result.err(), shutdown_result)
+        })
+        .await
     }
 }
 
