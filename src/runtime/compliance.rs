@@ -2,6 +2,7 @@
 
 use super::*;
 use std::fmt::Write as _;
+use std::io::IsTerminal as _;
 use std::time::Instant;
 
 use cf_integration_compliance::conformance::{DEFAULT_CONFORMANCE_SUITE, ScenarioOutcome};
@@ -454,9 +455,15 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             )
             .cwd(self.config.root()),
         );
+        let color = conformance_color_enabled();
         println!(
             "{}",
-            render_conformance_lane_header(run.target, expected_scenarios.len(), run.spec_version)
+            render_conformance_lane_header(
+                run.target,
+                expected_scenarios.len(),
+                run.spec_version,
+                color,
+            )
         );
         let started = Instant::now();
         let process_result = self
@@ -484,12 +491,63 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         )?;
         println!(
             "{}",
-            render_conformance_lane_results(run.target, &results, started.elapsed())
+            render_conformance_lane_results(run.target, &results, started.elapsed(), color)
         );
-        println!("   Artifacts {}", lane_paths.root.display());
-        println!(" Full output {}", lane_paths.runner_log.display());
+        println!(
+            "{} {}",
+            ansi_style("   Artifacts", ANSI_CYAN, color),
+            lane_paths.root.display()
+        );
+        println!(
+            "{} {}",
+            ansi_style(" Full output", ANSI_CYAN, color),
+            lane_paths.runner_log.display()
+        );
         process_result?;
         Ok(())
+    }
+}
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_BOLD_CYAN: &str = "\x1b[1;36m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_MAGENTA: &str = "\x1b[35m";
+const ANSI_BOLD_GREEN: &str = "\x1b[1;32m";
+const ANSI_BOLD_RED: &str = "\x1b[1;31m";
+const ANSI_BOLD_MAGENTA: &str = "\x1b[1;35m";
+
+fn conformance_color_enabled() -> bool {
+    let color_override = std::env::var_os("CARGO_TERM_COLOR");
+    resolve_conformance_color(
+        std::io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        color_override.as_deref(),
+    )
+}
+
+fn resolve_conformance_color(
+    stdout_is_terminal: bool,
+    no_color: bool,
+    cargo_term_color: Option<&OsStr>,
+) -> bool {
+    if no_color {
+        return false;
+    }
+    match cargo_term_color.and_then(OsStr::to_str) {
+        Some("always") => true,
+        Some("never") => false,
+        _ => stdout_is_terminal,
+    }
+}
+
+fn ansi_style(text: &str, style: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{style}{text}{ANSI_RESET}")
+    } else {
+        text.to_owned()
     }
 }
 
@@ -497,9 +555,16 @@ fn render_conformance_lane_header(
     target: ConformanceTarget,
     scenario_count: usize,
     spec_version: &str,
+    color: bool,
 ) -> String {
+    let divider = ansi_style("────────────", ANSI_CYAN, color);
+    let lane = ansi_style(
+        &format!(" MCP conformance lane: {target}"),
+        ANSI_BOLD_CYAN,
+        color,
+    );
     format!(
-        "────────────\n MCP conformance lane: {target}\n    Starting {scenario_count} scenarios with {} (spec {spec_version})",
+        "{divider}\n{lane}\n    Starting {scenario_count} scenarios with {} (spec {spec_version})",
         cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
     )
 }
@@ -508,6 +573,7 @@ fn render_conformance_lane_results(
     target: ConformanceTarget,
     results: &ConformanceResults,
     elapsed: Duration,
+    color: bool,
 ) -> String {
     let total = results.scenarios.len();
     let mut passed = 0;
@@ -517,35 +583,45 @@ fn render_conformance_lane_results(
     let mut output = String::new();
 
     for (index, result) in results.scenarios.values().enumerate() {
-        let status = match result.outcome_with_trusted_fixture(true) {
+        let (status, status_color) = match result.outcome_with_trusted_fixture(true) {
             ScenarioOutcome::Compliant => {
                 passed += 1;
-                "PASS"
+                ("PASS", ANSI_GREEN)
             }
             ScenarioOutcome::NonCompliant | ScenarioOutcome::FixtureFailure => {
                 failed += 1;
-                "FAIL"
+                ("FAIL", ANSI_RED)
             }
             ScenarioOutcome::NotApplicable => {
                 skipped += 1;
-                "SKIP"
+                ("SKIP", ANSI_YELLOW)
             }
             ScenarioOutcome::Ambiguous | ScenarioOutcome::Missing => {
                 ambiguous += 1;
-                "UNKNOWN"
+                ("UNKNOWN", ANSI_MAGENTA)
             }
         };
+        let status = ansi_style(&format!("{status:>12}"), status_color, color);
         let _ = writeln!(
             output,
-            "{status:>12} ({}/{total}) {}",
+            "{status} ({}/{total}) {}",
             index + 1,
             result.scenario
         );
     }
 
+    let divider = ansi_style("────────────", ANSI_CYAN, color);
+    let summary_style = if failed > 0 {
+        ANSI_BOLD_RED
+    } else if ambiguous > 0 {
+        ANSI_BOLD_MAGENTA
+    } else {
+        ANSI_BOLD_GREEN
+    };
+    let summary = ansi_style("Summary", summary_style, color);
     let _ = write!(
         output,
-        "────────────\n     Summary [{:>8.3}s] {total} scenarios run for {target}: {passed} passed, {failed} failed, {skipped} skipped, {ambiguous} unknown",
+        "{divider}\n     {summary} [{:>8.3}s] {total} scenarios run for {target}: {passed} passed, {failed} failed, {skipped} skipped, {ambiguous} unknown",
         elapsed.as_secs_f64()
     );
     output
@@ -682,6 +758,23 @@ mod tests {
         }
     }
 
+    fn mixed_conformance_results() -> ConformanceResults {
+        ConformanceResults {
+            scenarios: [
+                (
+                    "passing".to_owned(),
+                    conformance_result("passing", CheckStatus::Success),
+                ),
+                (
+                    "failing".to_owned(),
+                    conformance_result("failing", CheckStatus::Failure),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
     #[test]
     fn lane_selection_uses_only_required_stack_topologies() {
         assert_eq!(
@@ -753,32 +846,20 @@ mod tests {
     #[test]
     fn conformance_lane_header_names_the_lane_oracle_and_specification() {
         assert_eq!(
-            render_conformance_lane_header(ConformanceTarget::Fixture, 40, "2026-07-28"),
+            render_conformance_lane_header(ConformanceTarget::Fixture, 40, "2026-07-28", false),
             "────────────\n MCP conformance lane: fixture direct\n    Starting 40 scenarios with @modelcontextprotocol/conformance@0.2.0-alpha.9 (spec 2026-07-28)"
         );
     }
 
     #[test]
     fn conformance_lane_results_use_one_nextest_style_line_per_scenario() {
-        let results = ConformanceResults {
-            scenarios: [
-                (
-                    "passing".to_owned(),
-                    conformance_result("passing", CheckStatus::Success),
-                ),
-                (
-                    "failing".to_owned(),
-                    conformance_result("failing", CheckStatus::Failure),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
+        let results = mixed_conformance_results();
 
         let rendered = render_conformance_lane_results(
             ConformanceTarget::Dataplane,
             &results,
             Duration::from_millis(1_250),
+            false,
         );
 
         assert_eq!(
@@ -791,5 +872,44 @@ mod tests {
         );
         assert!(!rendered.contains("Checks:"));
         assert!(!rendered.contains("Running scenario"));
+    }
+
+    #[test]
+    fn conformance_color_policy_honors_terminal_cargo_and_no_color_settings() {
+        assert!(resolve_conformance_color(true, false, None));
+        assert!(!resolve_conformance_color(false, false, None));
+        assert!(resolve_conformance_color(
+            false,
+            false,
+            Some(OsStr::new("always"))
+        ));
+        assert!(!resolve_conformance_color(
+            true,
+            false,
+            Some(OsStr::new("never"))
+        ));
+        assert!(!resolve_conformance_color(
+            true,
+            true,
+            Some(OsStr::new("always"))
+        ));
+    }
+
+    #[test]
+    fn colored_conformance_output_styles_lane_statuses_and_failed_summary() {
+        let header =
+            render_conformance_lane_header(ConformanceTarget::Dataplane, 2, "2026-07-28", true);
+        let results = render_conformance_lane_results(
+            ConformanceTarget::Dataplane,
+            &mixed_conformance_results(),
+            Duration::from_millis(1_250),
+            true,
+        );
+
+        assert!(header.contains("\x1b[36m────────────\x1b[0m"));
+        assert!(header.contains("\x1b[1;36m MCP conformance lane: dataplane\x1b[0m"));
+        assert!(results.contains("\x1b[31m        FAIL\x1b[0m (1/2) failing"));
+        assert!(results.contains("\x1b[32m        PASS\x1b[0m (2/2) passing"));
+        assert!(results.contains("     \x1b[1;31mSummary\x1b[0m [   1.250s]"));
     }
 }
