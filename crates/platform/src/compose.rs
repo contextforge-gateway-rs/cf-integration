@@ -125,10 +125,7 @@ impl ComposeProject {
         for profile in &self.profiles {
             command = command.arg("--profile").arg(profile.clone());
         }
-        // Compose 5.1.0 can deadlock while finalizing its interactive TTY
-        // renderer after up/down has otherwise completed. Plain progress also
-        // keeps every harness-owned Compose invocation deterministic.
-        command.args(arguments).env("COMPOSE_PROGRESS", "plain")
+        command.args(arguments)
     }
 }
 

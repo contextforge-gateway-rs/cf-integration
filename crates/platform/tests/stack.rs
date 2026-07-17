@@ -181,11 +181,12 @@ fn cleanup_status_logs_and_config_use_typed_compose_commands() {
         &args(down.clone()),
         &["down", "--remove-orphans"]
     ));
-    assert_eq!(
-        down.command()
+    assert!(
+        !down
+            .command()
             .environment()
-            .get(OsStr::new("COMPOSE_PROGRESS")),
-        Some(&OsString::from("plain"))
+            .contains_key(OsStr::new("COMPOSE_PROGRESS")),
+        "Compose must select interactive or plain progress from its actual terminal"
     );
     assert!(ends_with(
         &args(StackCommandPlan::cleanup(
@@ -361,7 +362,7 @@ fn revision_checks_are_conditional_on_image_source() {
 }
 
 #[test]
-fn stack_up_is_noninteractive_and_does_not_embed_secrets_or_shell_fragments() {
+fn stack_up_preserves_compose_auto_progress_without_shell_fragments() {
     let plan = StackCommandPlan::up(
         project(StackMode::Dataplane),
         StackMode::Dataplane,
@@ -371,12 +372,7 @@ fn stack_up_is_noninteractive_and_does_not_embed_secrets_or_shell_fragments() {
     );
     let command = plan.command();
     assert_eq!(command.program(), OsStr::new("docker"));
-    assert_eq!(
-        command.environment(),
-        &[(OsString::from("COMPOSE_PROGRESS"), OsString::from("plain"))]
-            .into_iter()
-            .collect()
-    );
+    assert!(command.environment().is_empty());
     assert!(
         command
             .arguments()

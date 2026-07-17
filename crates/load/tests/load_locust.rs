@@ -203,7 +203,6 @@ fn dataplane_locust_command_has_exact_compose_shape_and_environment() {
     let expected_environment = HashMap::from([
         ("CF_INTEGRATION_DIR", integration_dir.as_os_str()),
         ("CF_INTEGRATION_ROOT", root.path().as_os_str()),
-        ("COMPOSE_PROGRESS", OsStr::new("plain")),
         ("LOCUST_LOCUSTFILE", OsStr::new("locustfile_mcp.py")),
         ("LOCUST_MODE", OsStr::new("headless")),
         ("LOCUST_REQUEST_TIMEOUT_SECONDS", OsStr::new("60")),
@@ -221,7 +220,13 @@ fn dataplane_locust_command_has_exact_compose_shape_and_environment() {
             "environment mismatch for {key}"
         );
     }
-    assert_eq!(run.command().environment().len(), 12);
+    assert_eq!(run.command().environment().len(), 11);
+    assert!(
+        !run.command()
+            .environment()
+            .contains_key(OsStr::new("COMPOSE_PROGRESS")),
+        "Locust Compose runs must retain terminal-aware progress"
+    );
 }
 
 #[test]
