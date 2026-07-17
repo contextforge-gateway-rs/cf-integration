@@ -183,6 +183,19 @@ pub trait ProcessRunner {
         })
     }
 
+    /// Runs asynchronously with both output streams redirected to one log file.
+    ///
+    /// The default preserves cancellation behavior for fake runners without
+    /// owned OS children; system-backed runners persist the output.
+    fn run_async_cancellable_to_log<'a>(
+        &'a self,
+        spec: &'a CommandSpec,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+        _log_path: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
+        self.run_async_cancellable(spec, cancellation)
+    }
+
     /// Captures standard output while inheriting standard error.
     fn capture_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, PlatformError>;
 
@@ -238,6 +251,47 @@ impl ProcessRunner for SystemProcessRunner {
             command
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .with_context(|| operation_context("spawn", spec))?;
+            tokio::select! {
+                status = child.wait() => {
+                    let status = status.with_context(|| operation_context("wait for", spec))?;
+                    require_success(spec, status)
+                }
+                () = wait_for_cancellation(&mut cancellation) => {
+                    let _ = child.start_kill();
+                    child
+                        .wait()
+                        .await
+                        .with_context(|| operation_context("reap cancelled", spec))?;
+                    Err(cancelled_failure(spec))
+                }
+            }
+        })
+    }
+
+    fn run_async_cancellable_to_log<'a>(
+        &'a self,
+        spec: &'a CommandSpec,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+        log_path: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PlatformError>> + 'a>> {
+        Box::pin(async move {
+            let log = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(log_path)
+                .with_context(|| log_context("open", log_path, spec))?;
+            let stderr_log = log
+                .try_clone()
+                .with_context(|| log_context("clone handle for", log_path, spec))?;
+            let mut command = tokio::process::Command::from(command(spec));
+            command
+                .stdout(Stdio::from(log))
+                .stderr(Stdio::from(stderr_log))
                 .kill_on_drop(true);
             let mut child = command
                 .spawn()

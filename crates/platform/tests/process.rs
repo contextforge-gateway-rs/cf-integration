@@ -315,6 +315,30 @@ fn capture_stdout_returns_exact_bytes_while_stderr_is_inherited() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancellable_log_runner_records_both_streams_and_replaces_stale_output() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let script = executable_script(
+        &directory,
+        "logged-async.sh",
+        "printf 'stdout-line\\n'; printf 'stderr-line\\n' >&2",
+    );
+    let log_path = directory.path().join("process.log");
+    fs::write(&log_path, b"stale output\n").expect("stale log should be written");
+    let (_cancellation_sender, cancellation_receiver) = tokio::sync::watch::channel(false);
+
+    SystemProcessRunner
+        .run_async_cancellable_to_log(&CommandSpec::new(script), cancellation_receiver, &log_path)
+        .await
+        .expect("logged child should succeed");
+
+    assert_eq!(
+        fs::read(&log_path).expect("process log should be readable"),
+        b"stdout-line\nstderr-line\n"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn capture_output_returns_exact_stdout_and_stderr_bytes() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");

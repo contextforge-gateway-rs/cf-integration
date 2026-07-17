@@ -1,7 +1,10 @@
 //! Official conformance orchestration.
 
 use super::*;
-use cf_integration_compliance::conformance::DEFAULT_CONFORMANCE_SUITE;
+use std::fmt::Write as _;
+use std::time::Instant;
+
+use cf_integration_compliance::conformance::{DEFAULT_CONFORMANCE_SUITE, ScenarioOutcome};
 
 impl<R: ProcessRunner> RuntimeExecutor<R> {
     fn require_loopback_fixture_base_url(&self) -> AppResult<()> {
@@ -407,8 +410,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         run: &ConformanceTargetRun<'_>,
         paths: &CompliancePaths,
     ) -> AppResult<()> {
-        expected_server_scenarios(DEFAULT_CONFORMANCE_SUITE, run.spec_version)
-            .map_err(AppFailure::from)?;
+        let expected_scenarios =
+            expected_server_scenarios(DEFAULT_CONFORMANCE_SUITE, run.spec_version)
+                .map_err(AppFailure::from)?;
         let lane_paths = paths.conformance_lane(run.target);
         remove_file_if_exists(&lane_paths.completion)?;
         recreate_directory(&lane_paths.official_results)?;
@@ -450,9 +454,18 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             )
             .cwd(self.config.root()),
         );
+        println!(
+            "{}",
+            render_conformance_lane_header(run.target, expected_scenarios.len(), run.spec_version)
+        );
+        let started = Instant::now();
         let process_result = self
             .runner
-            .run_async_cancellable(&command, run.cancellation.clone())
+            .run_async_cancellable_to_log(
+                &command,
+                run.cancellation.clone(),
+                &lane_paths.runner_log,
+            )
             .await
             .map_err(AppFailure::from);
 
@@ -469,14 +482,73 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             run.spec_version,
             &lane_paths.completion,
         )?;
-        process_result?;
         println!(
-            "Official conformance artifacts ({}): {}",
-            run.target,
-            lane_paths.root.display()
+            "{}",
+            render_conformance_lane_results(run.target, &results, started.elapsed())
         );
+        println!("   Artifacts {}", lane_paths.root.display());
+        println!(" Full output {}", lane_paths.runner_log.display());
+        process_result?;
         Ok(())
     }
+}
+
+fn render_conformance_lane_header(
+    target: ConformanceTarget,
+    scenario_count: usize,
+    spec_version: &str,
+) -> String {
+    format!(
+        "────────────\n MCP conformance lane: {target}\n    Starting {scenario_count} scenarios with {} (spec {spec_version})",
+        cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
+    )
+}
+
+fn render_conformance_lane_results(
+    target: ConformanceTarget,
+    results: &ConformanceResults,
+    elapsed: Duration,
+) -> String {
+    let total = results.scenarios.len();
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    let mut ambiguous = 0;
+    let mut output = String::new();
+
+    for (index, result) in results.scenarios.values().enumerate() {
+        let status = match result.outcome_with_trusted_fixture(true) {
+            ScenarioOutcome::Compliant => {
+                passed += 1;
+                "PASS"
+            }
+            ScenarioOutcome::NonCompliant | ScenarioOutcome::FixtureFailure => {
+                failed += 1;
+                "FAIL"
+            }
+            ScenarioOutcome::NotApplicable => {
+                skipped += 1;
+                "SKIP"
+            }
+            ScenarioOutcome::Ambiguous | ScenarioOutcome::Missing => {
+                ambiguous += 1;
+                "UNKNOWN"
+            }
+        };
+        let _ = writeln!(
+            output,
+            "{status:>12} ({}/{total}) {}",
+            index + 1,
+            result.scenario
+        );
+    }
+
+    let _ = write!(
+        output,
+        "────────────\n     Summary [{:>8.3}s] {total} scenarios run for {target}: {passed} passed, {failed} failed, {skipped} skipped, {ambiguous} unknown",
+        elapsed.as_secs_f64()
+    );
+    output
 }
 
 fn conformance_topologies(lanes: &[ConformanceTarget]) -> Vec<StackMode> {
@@ -586,6 +658,29 @@ fn finish_with_cleanup(primary: Option<AppFailure>, cleanup: AppResult<()>) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cf_integration_compliance::conformance::{
+        CheckStatus, ConformanceCheck, ConformanceScenarioResult,
+    };
+
+    fn conformance_result(scenario: &str, status: CheckStatus) -> ConformanceScenarioResult {
+        ConformanceScenarioResult {
+            scenario: scenario.to_owned(),
+            checks: vec![ConformanceCheck {
+                id: format!("{scenario}-check"),
+                name: None,
+                description: None,
+                status,
+                timestamp: None,
+                spec_references: Vec::new(),
+                error_message: None,
+                details: None,
+                metadata: None,
+                logs: None,
+                extensions: Default::default(),
+            }],
+            source: PathBuf::from(format!("server-{scenario}/checks.json")),
+        }
+    }
 
     #[test]
     fn lane_selection_uses_only_required_stack_topologies() {
@@ -653,5 +748,48 @@ mod tests {
 
         assert!(error.contains("API cleanup failed"));
         assert!(error.contains("service cleanup failed"));
+    }
+
+    #[test]
+    fn conformance_lane_header_names_the_lane_oracle_and_specification() {
+        assert_eq!(
+            render_conformance_lane_header(ConformanceTarget::Fixture, 40, "2026-07-28"),
+            "────────────\n MCP conformance lane: fixture direct\n    Starting 40 scenarios with @modelcontextprotocol/conformance@0.2.0-alpha.9 (spec 2026-07-28)"
+        );
+    }
+
+    #[test]
+    fn conformance_lane_results_use_one_nextest_style_line_per_scenario() {
+        let results = ConformanceResults {
+            scenarios: [
+                (
+                    "passing".to_owned(),
+                    conformance_result("passing", CheckStatus::Success),
+                ),
+                (
+                    "failing".to_owned(),
+                    conformance_result("failing", CheckStatus::Failure),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let rendered = render_conformance_lane_results(
+            ConformanceTarget::Dataplane,
+            &results,
+            Duration::from_millis(1_250),
+        );
+
+        assert_eq!(
+            rendered,
+            "        FAIL (1/2) failing\n        PASS (2/2) passing\n────────────\n     Summary [   1.250s] 2 scenarios run for dataplane: 1 passed, 1 failed, 0 skipped, 0 unknown"
+        );
+        assert_eq!(
+            rendered.lines().filter(|line| line.contains(" (")).count(),
+            2
+        );
+        assert!(!rendered.contains("Checks:"));
+        assert!(!rendered.contains("Running scenario"));
     }
 }

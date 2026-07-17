@@ -147,6 +147,7 @@ impl CompliancePaths {
         let root = self.conformance_root.join(conformance_target_slug(target));
         ConformanceLanePaths {
             official_results: root.join("official"),
+            runner_log: root.join("runner.log"),
             expected_failures: root.join("expected-failures.yml"),
             metadata: root.join("metadata.json"),
             completion: root.join("complete"),
@@ -170,6 +171,7 @@ impl CompliancePaths {
 pub(super) struct ConformanceLanePaths {
     pub(super) root: PathBuf,
     pub(super) official_results: PathBuf,
+    pub(super) runner_log: PathBuf,
     pub(super) expected_failures: PathBuf,
     pub(super) metadata: PathBuf,
     pub(super) completion: PathBuf,
