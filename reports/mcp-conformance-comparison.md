@@ -9,22 +9,22 @@
 
 | Target | Compliant scenarios | Failed scenarios | Failed checks | Fixture failures | Not applicable | Ambiguous | Missing |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Fixture direct | 31 | 1 | 1 | 0 | 0 | 0 | 0 |
-| Control plane | 23 | 9 | 9 | 0 | 0 | 0 | 0 |
+| Fixture direct | 32 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Control plane | 22 | 10 | 10 | 0 | 0 | 0 | 0 |
 | Dataplane | 6 | 26 | 26 | 0 | 0 | 0 | 0 |
 
 ## Comparison summary
 
 | Classification | Scenarios |
 |---|---:|
-| all compliant | 6 |
+| all compliant | 5 |
 | fixture-only failure | 0 |
-| control-plane only failure | 0 |
+| control-plane only failure | 1 |
 | dataplane only failure | 17 |
 | fixture + control-plane failure | 0 |
 | fixture + dataplane failure | 0 |
-| both gateways only failure | 8 |
-| shared failure | 1 |
+| both gateways only failure | 9 |
+| shared failure | 0 |
 | fixture failure | 0 |
 | not applicable | 0 |
 | ambiguous | 0 |
@@ -36,7 +36,7 @@
 | completion-complete | compliant | failure | failure | both gateways only failure | [MCP-Completion](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/completion) |
 | dns-rebinding-protection | compliant | failure | failure | both gateways only failure | [MCP-DNS-Rebinding-Protection](https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise)<br>[MCP-Transport-Security](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning) |
 | elicitation-sep1034-defaults | compliant | failure | failure | both gateways only failure | [SEP-1034](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1034) |
-| elicitation-sep1330-enums | failure | failure | failure | shared failure | [SEP-1330](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1330) |
+| elicitation-sep1330-enums | compliant | failure | failure | both gateways only failure | [SEP-1330](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1330) |
 | json-schema-2020-12 | compliant | compliant | failure | dataplane only failure | [SEP-1613](https://github.com/modelcontextprotocol/specification/pull/655)<br>[SEP-2106](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2106) |
 | logging-set-level | compliant | compliant | failure | dataplane only failure | [MCP-Logging](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/logging) |
 | ping | compliant | compliant | compliant | all compliant | [MCP-Ping](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/ping) |
@@ -52,7 +52,7 @@
 | resources-templates-read | compliant | failure | failure | both gateways only failure | [MCP-Resources-Templates](https://modelcontextprotocol.io/specification/2025-06-18/server/resources#resource-templates) |
 | resources-unsubscribe | compliant | compliant | failure | dataplane only failure | [MCP-Resources-Subscribe](https://modelcontextprotocol.io/specification/2025-06-18/schema#unsubscriberequest)<br>[MCP-Resources-Subscribe](https://modelcontextprotocol.io/specification/2025-06-18/server/resources#resource-subscriptions) |
 | server-initialize | compliant | compliant | compliant | all compliant | [MCP-Initialize](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#initialization)<br>[MCP-Session-Management](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management) |
-| server-sse-multiple-streams | compliant | compliant | compliant | all compliant | [SEP-1699](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699) |
+| server-sse-multiple-streams | compliant | failure | compliant | control-plane only failure | [SEP-1699](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699) |
 | server-sse-polling | compliant | compliant | compliant | all compliant | [SEP-1699](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699) |
 | tools-call-audio | compliant | compliant | failure | dataplane only failure | [MCP-Tools-Call](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools) |
 | tools-call-elicitation | compliant | failure | failure | both gateways only failure | [MCP-Elicitation](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/elicitation) |
