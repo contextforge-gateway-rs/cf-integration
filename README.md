@@ -1,214 +1,291 @@
 # cf-integration
 
-Reusable integration harness for wiring `cf-controlplane` to the Rust `cf-dataplane`.
+Make- and script-based integration harness for `cf-controlplane` and
+`cf-dataplane`.
 
-Nginx routes only `/servers/{virtual_host_id}/mcp` to `cf-dataplane` as `/contextforge-rs/servers/{virtual_host_id}/mcp`. Raw `/mcp` and all UI/API traffic stay on `cf-controlplane`.
+The public routing contract is fixed:
 
-The stack is the stock upstream `docker-compose.yml` (including its Fast Time image, registrations, and fast-test fixtures) with exactly two intentional differences: the nginx routing split above, and `DATAPLANE_PUBLISHER=true` on the gateway so virtual server configs reach `cf-dataplane` via Redis. Any test failure should therefore be attributable to `cf-dataplane` behavior, not stack configuration drift.
+- `/servers/{virtual_host_id}/mcp` routes through `cf-dataplane` as
+  `/contextforge-rs/servers/{virtual_host_id}/mcp`.
+- Raw `/mcp`, UI traffic, and API traffic stay on `cf-controlplane`.
 
-## Quick Start
+The repository contains no compiled CLI. Make provides the public command
+surface; Bash owns orchestration, and small standard-library Python programs
+handle JWTs, MCP HTTP, credential-safe proxying, validation, and reporting.
+Generated checkouts, build output, workload artifacts, and runtime state stay
+under `.integration/` or `CF_INTEGRATION_DIR`. The generated conformance
+comparison defaults to the tracked `reports/` directory.
 
-```bash
-scripts/cf-integration.sh up
-```
+## Requirements
 
-The script checks out `cf-controlplane` under `.integration/mcp-context-forge`, fresh-bootstraps the compose projects (`reset`, including volumes, for a clean database), uses the upstream local build image for `cf-controlplane`, pulls the published `cf-dataplane` image, and starts the control-plane compose stack with the dataplane/nginx overlay. The default control-plane image is rebuilt automatically when its revision label does not match the checked-out commit. Published image pulls are digest-aware: the script pulls only when the remote digest is missing locally or has changed.
+- GNU Make
+- Bash 4 or newer
+- Python 3.10 or newer
+- Docker Engine with Docker Compose v2
+- Git and curl
+- Node.js 22.7.5 or newer with `npx` for conformance and Inspector
+- The control-plane development prerequisites (`uv`, pytest, Make, and
+  Playwright where required) for upstream live tests
 
-Local configuration is read from `.env` when present. Copy `.env.example` to `.env` and edit it for branch/image choices; `.env` is git-ignored and shell variables override it.
-
-Stack-starting commands fresh-bootstrap by default, including `up`, `up controlplane`, `test-all-up*`, and `controlplane-test-all`. A repeated `up` skips `docker compose up` when the running integration stack already matches the requested control-plane checkout and image tags. Set `CF_FRESH_STACK=false` when you intentionally want to keep existing database state while changing or restarting the stack.
-
-Fast Time runs the upstream default image in dual-transport mode (`/http` streamable HTTP + `/sse`), and the stock upstream registration jobs register both gateways and their fixed virtual servers unchanged. The dataplane will not implement SSE upstreams (the transport is deprecated and is removed in the 2026-07-28 MCP protocol update): the control-plane publisher exports streamable-HTTP backends only, SSE-backed virtual servers are therefore absent from dataplane config, and nginx replays their `/servers/{id}/mcp` requests on the control plane — SSE stays fully functional through the control-plane path. Requires a control-plane image with the streamable-only publisher change; older images publish SSE backends and the dataplane answers them with empty tool lists instead of falling back.
-
-Open `http://localhost:8080/admin` and log in with:
-
-```text
-admin@example.com / changeme
-```
-
-The overlay enables `DATAPLANE_PUBLISHER`, so `cf-controlplane` publishes virtual server configs to Redis for `cf-dataplane`. The publisher runs every 60 seconds.
-
-The Fast Time backend is registered automatically as virtual server `9779b6698cbd4b4995ee04a4fab38737`, so `probe`, `smoke`, and `locust` work with no manual UI step.
-
-## Probe
-
-Verify the public nginx -> `cf-dataplane` route end to end (401 negative, `initialize`, session reuse, `tools/list`, `tools/call`):
+## Quick start
 
 ```bash
-scripts/cf-integration.sh probe
+cp .env.example .env
+make help
+make up TOPOLOGY=dataplane
 ```
 
-## Locust
-
-Run the harness Locust file (`scripts/locustfile_cf_dataplane.py`, streamable-HTTP aware) against the public nginx URL:
+Open <http://localhost:8080/admin> and log in with the upstream development
+credentials (`admin@example.com` / `changeme`). Stop both projects with:
 
 ```bash
-scripts/cf-integration.sh smoke    # 1 user, 10s
-scripts/cf-integration.sh locust   # full load run
+make down TOPOLOGY=all
 ```
 
-Both default to the auto-registered Fast Time virtual server; set `MCP_VIRTUAL_SERVER_ID=<id>` to target a UI-created one.
+Local configuration is read from `.env`. Copy `.env.example` to `.env`; values
+passed to Make or exported by the caller override the file.
 
-Load settings:
+`make up` clones or updates the required source checkouts automatically.
+`make checkout` is available when you want to prepare them without starting
+Docker services.
+
+## Make command surface
+
+Run `make help` for the authoritative list.
+
+| Goal | Command |
+| --- | --- |
+| Start a stack | `make up TOPOLOGY=dataplane` |
+| Stop all stacks | `make down` |
+| Stop stacks and delete volumes | `make reset` |
+| Check the public MCP route | `make probe TOPOLOGY=dataplane` |
+| Run a short load smoke test | `make smoke TOPOLOGY=dataplane` |
+| Run upstream live tests | `make live-all TOPOLOGY=dataplane` |
+| Run official conformance | `make conformance` |
+| Inspect an MCP method | `make inspect METHOD=tools/list` |
+| Verify the harness | `make test` |
+
+`probe`, `load`, `smoke`, `live*`, `conformance`, and `inspect` are managed
+workflows: they start the required topology and stop it during cleanup, even
+when the workload fails. Use `make up`, `make status`, `make logs`, and
+`make down` for a stack you want to keep running while debugging manually.
+
+### Migrating from the removed CLI
+
+<!-- markdownlint-disable MD013 -->
+
+| Previous command | Make replacement |
+| --- | --- |
+| `cf-integration stack up --topology dataplane` | `make up TOPOLOGY=dataplane` |
+| `cf-integration stack up --topology controlplane --fresh` | `make up TOPOLOGY=controlplane FRESH=1` |
+| `cf-integration stack down --topology all --volumes` | `make reset` |
+| `cf-integration stack status --topology dataplane` | `make status TOPOLOGY=dataplane` |
+| `cf-integration stack logs --topology dataplane nginx` | `make logs TOPOLOGY=dataplane SERVICES=nginx` |
+| `cf-integration stack config --topology dataplane` | `make config TOPOLOGY=dataplane` |
+| `cf-integration probe --topology dataplane` | `make probe TOPOLOGY=dataplane` |
+| `cf-integration load --topology dataplane --smoke` | `make smoke TOPOLOGY=dataplane` |
+| `cf-integration load --users 20 --spawn-rate 5 --run-time 2m` | `make load USERS=20 SPAWN_RATE=5 RUN_TIME=2m` |
+| `cf-integration live --group rbac` | `make live-rbac` |
+| `cf-integration conformance run --lane dataplane` | `make conformance LANES=dataplane` |
+| `cf-integration conformance report` | `make conformance-report` |
+| `cf-integration debug inspect --method tools/list` | `make inspect METHOD=tools/list` |
+| `cf-integration debug token --kind scoped --server-id ID` | `make token TOKEN_KIND=scoped SERVER_ID=ID` |
+
+<!-- markdownlint-enable MD013 -->
+
+The removed Rust-only Goose load engine has no replacement. `make load` and
+`make smoke` use the existing Locust workload for both topologies.
+
+### Stack lifecycle
 
 ```bash
-LOCUST_USERS=20 LOCUST_SPAWN_RATE=5 LOCUST_RUN_TIME=2m \
-MCP_TOOL_NAMES=<comma-separated-listed-tool-names> \
-scripts/cf-integration.sh locust
+make checkout
+make up TOPOLOGY=dataplane
+make up TOPOLOGY=controlplane FRESH=1
+make status TOPOLOGY=dataplane
+make logs TOPOLOGY=dataplane SERVICES="nginx cf-dataplane"
+make config TOPOLOGY=dataplane
+make down
+make reset
 ```
 
-Locust HTML/CSV output is written under `.integration/mcp-context-forge/reports/`. Curated run reports live in `reports/` in this repo, named `YYYY-MM-DD-<topic>.md`.
+`FRESH=1` removes the selected topology's volumes before startup. `make reset`
+stops both Compose projects and removes their volumes. Other stack commands
+preserve volumes.
 
-## Live Tests
+The default topology is `CF_MCP_STACK_MODE`, then `dataplane`. The two
+topologies share host ports, so the harness refuses to start one while the
+other is running.
 
-Run control-plane live test targets against the same running stack:
+### Probe and load
 
 ```bash
-scripts/cf-integration.sh live-mcp
-scripts/cf-integration.sh live-rbac
-scripts/cf-integration.sh live-protocol
-scripts/cf-integration.sh live-all
+make probe TOPOLOGY=dataplane
+make smoke TOPOLOGY=dataplane
+make load TOPOLOGY=dataplane USERS=20 SPAWN_RATE=5 RUN_TIME=2m
 ```
 
-Run everything in one shot with neutral lane sections, nextest-style per-test result rows, and full output captured to a timestamped log file (default `.integration/test-logs/`, override with `CF_TEST_LOG_DIR`):
+Probe and load targets start the selected stack, wait for its public MCP route,
+run the workload, and stop the stack even when the workload fails.
+
+The probe checks unauthenticated rejection, initialization,
+`notifications/initialized`, session reuse, `tools/list`, and one allowlisted
+fixture tool call. Locust uses `scripts/locustfile_mcp.py` for both topologies.
+Reports are written below `.integration/reports/load/` and scanned for bearer
+credential leakage before the target returns.
+
+The Fast Time backend defaults to virtual server
+`9779b6698cbd4b4995ee04a4fab38737`; set `MCP_SERVER_ID` to target another
+server.
+
+### Upstream live tests
 
 ```bash
-scripts/cf-integration.sh test-all
+make live-mcp TOPOLOGY=dataplane
+make live-rbac TOPOLOGY=dataplane
+make live-protocol TOPOLOGY=dataplane
+make live-all TOPOLOGY=dataplane
+
+# Equivalent generic form
+make live TOPOLOGY=dataplane GROUP=mcp
 ```
 
-`CF_TEST_ALL_LOCUST=true` appends the full Locust load run (default 100 users, 5m; `LOCUST_*` variables apply) as a final lane.
+The `mcp` and `all` groups start the upstream profile-gated
+`fast_test_server`, run its registration job synchronously, and wait for its
+fixed virtual server to appear in the dataplane publisher snapshot. The base
+stack remains free of Fast Test containers for unrelated workflows.
 
-To start the stack and run the same report lanes in one command. These
-commands use the same fresh-bootstrap path as `up` so runs are reproducible —
-long-lived state has produced failures that do not exist on clean deployments;
-set `CF_FRESH_STACK=false` to keep existing state, or run
-`scripts/cf-integration.sh reset` manually:
+### Official MCP conformance
+
+The official client is pinned to
+`@modelcontextprotocol/conformance@0.2.0-alpha.9`. Its TypeScript fixture is
+built from source revision `794dcab99ed1ef2b89607be9999574140ea5c96e`.
 
 ```bash
-scripts/cf-integration.sh test-all-up            # no full locust lane
-scripts/cf-integration.sh test-all-up-load       # includes full locust lane
-scripts/cf-integration.sh test-all-up-no-plugins # also deselects tests/live_gateway/plugins
+# All three independently measured lanes
+make conformance
+
+# Exact lanes and client/server protocol eras
+make conformance \
+  LANES="fixture-direct dataplane" \
+  CLIENT_VERSION=2025-11-25 \
+  SERVER_ERA=legacy
+
+# Rebuild Markdown from existing artifacts
+make conformance-report
 ```
 
-These commands stream stack startup output, then print colored section headers
-and every recorded pytest result row to the terminal while writing full
-pytest/locust output to the timestamped log.
+Supported client versions are `2025-06-18`, `2025-11-25`, and `2026-07-28`.
+Server eras are `legacy`, `modern`, and `dual`. The fixture-direct lane is an
+oracle baseline; controlplane and dataplane lanes provision the same fixed
+fixture through the gateway. Routed runner traffic uses a random-path loopback
+proxy that injects authentication without putting the bearer token in the
+child process arguments. Dataplane conformance also rejects responses marked
+as control-plane fallback.
 
-`live-mcp` is the green lane for this harness: `up` starts the upstream fast-test fixture services, so the full MCP protocol E2E suite (including `TestToolCalls`) passes. The stack matches upstream, so remaining failures in the other lanes measure `cf-dataplane` feature gaps (for example, tokens minted without a `scopes` claim are accepted by `cf-controlplane` but rejected with 401 by `cf-dataplane`); see `reports/` for the current classification.
+Artifacts default below `.integration/conformance/`; the comparison is written
+to `reports/mcp-conformance-comparison.md`. Override these with `RESULTS_DIR`
+and `OUTPUT_DIR`. The checked-in comparison records the latest retained
+`2025-11-25` dual-era run; new runs use the selected `CLIENT_VERSION` and
+`SERVER_ERA` values.
 
-## Control-Plane Baseline
-
-Run the stock upstream `cf-controlplane` testing stack without the `cf-dataplane` service, nginx route override, or `DATAPLANE_PUBLISHER` overlay:
+### Debug utilities
 
 ```bash
-scripts/cf-integration.sh controlplane-test-all
+make inspect TOPOLOGY=dataplane METHOD=tools/list
+make token TOKEN_KIND=scoped SERVER_ID=<virtual-server-id>
+make token TOKEN_KIND=admin
 ```
 
-This uses a separate compose project (`CF_CONTROLPLANE_PROJECT`, default `cf-controlplane-only`) but the same host ports as the dataplane stack. `controlplane-test-all` fresh-bootstraps first, starts the stock testing stack, runs non-UI live gateway checks without SSO/playwright, then runs upstream `locustfile.py` with the non-UI Fast Time/Fast Test/health class subset. Output is logged under `.integration/test-logs/`.
-
-Useful individual commands:
-
-```bash
-scripts/cf-integration.sh up controlplane
-scripts/cf-integration.sh controlplane-live-core
-scripts/cf-integration.sh controlplane-live-all
-scripts/cf-integration.sh controlplane-locust
-scripts/cf-integration.sh down
-```
-
-Set `CONTROLPLANE_ENABLE_SSO=true` only when explicitly validating SSO-dependent tests.
-Set `CONTROLPLANE_LOCUST_CLASSES=all` to run the full upstream Locust class mix, including admin/UI/mutating surfaces.
+Inspector is pinned to `@modelcontextprotocol/inspector@0.22.0` and uses the
+same authentication proxy as conformance.
 
 ## Configuration
 
-Useful overrides:
+Common settings:
 
 ```bash
-# Put these in .env, or export them in the shell.
-CF_CONTROLPLANE_REPO=<control-plane-git-url>
+CF_MCP_STACK_MODE=dataplane
+CF_INTEGRATION_DIR=.integration
+
+CF_CONTROLPLANE_REPO=https://github.com/IBM/mcp-context-forge.git
 CF_CONTROLPLANE_REF=main
-CF_CONTROLPLANE_IMAGE=mcpgateway/mcpgateway:latest
 CF_CONTROLPLANE_VERSION=latest
+
 CF_DATAPLANE_REPO=https://github.com/contextforge-gateway-rs/contextforge-gateway-rs.git
 CF_DATAPLANE_REF=
-CF_DATAPLANE_DIR=.integration/contextforge-gateway-rs
-CF_DATAPLANE_LOCAL_IMAGE=contextforge-gateway-rs/contextforge-gateway-rs:local
-CF_DATAPLANE_IMAGE=ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:<tag>
 CF_DATAPLANE_VERSION=0.1.0
 CF_DATAPLANE_PLATFORM=auto
+
 CF_COMPOSE_BUILD=auto
-CF_INTEGRATION_DIR=.integration
+CF_FAST_TIME_EXPECTED_IMAGE=ghcr.io/ibm/cfex-mcp-fast-time-server:latest
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
-CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS=2
-CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0
-NGINX_PORT=8080
+
+MCP_CLI_BASE_URL=http://127.0.0.1:8080
+MCP_SPEC_VERSION=2025-11-25
+MCP_PROTOCOL_VERSION=2025-11-25
+JWT_SECRET_KEY=my-test-key-but-now-longer-than-32-bytes
+MCP_JWT_SUBJECT=admin@example.com
 ```
 
-`CF_COMPOSE_BUILD` defaults to `auto`: when using the default local control-plane image tag, the script compares the image's `org.opencontainers.image.revision` label with the checked-out `CF_CONTROLPLANE_REF` commit and passes `--build` when the image is missing or stale. If `CF_DATAPLANE_REF` is set, the same revision-label check is applied to the local dataplane image. Harness-built images are stamped with checkout revision and ref so the next run can skip the build, and repeated `up` can skip compose entirely when the running stack already matches. Set `CF_COMPOSE_BUILD=false` to force image reuse, or `CF_COMPOSE_BUILD=true` to always build. Explicit `CF_CONTROLPLANE_IMAGE` or `IMAGE_LOCAL` overrides disable control-plane auto-build unless `CF_COMPOSE_BUILD=true` is also set.
+Published dataplane images are the default. Set `CF_DATAPLANE_REF` to build a
+local source checkout explicitly. `CF_COMPOSE_BUILD=auto` rebuilds local images
+when their revision label differs from the checkout; `true` always builds and
+`false` never builds.
 
-The upstream gateway sizing knobs (`GATEWAY_REPLICAS`, `GATEWAY_CPU_LIMIT`, `GATEWAY_CPU_RESERVATION`, `GATEWAY_MEM_LIMIT`, `GATEWAY_MEM_RESERVATION`, `GUNICORN_WORKERS`) are defaulted to fit the local Docker engine (upstream assumes a large CI host); override them to match upstream sizing on bigger hardware.
-
-If `CF_CONTROLPLANE_IMAGE` is not set, the script uses the upstream local build tag:
-
-```text
-mcpgateway/mcpgateway:${CF_CONTROLPLANE_VERSION:-latest}
-```
-
-To use a published control-plane image instead, set `CF_CONTROLPLANE_IMAGE=ghcr.io/ibm/mcp-context-forge:<tag>`. Use a tag that matches `CF_CONTROLPLANE_REF`; the published `latest` tag can lag `main`.
-
-If `CF_DATAPLANE_IMAGE` is not set, the script uses:
-
-```text
-ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:${CF_DATAPLANE_VERSION:-0.1.0}
-```
-
-GHCR currently publishes only `0.1.0` for the dataplane; there is no `latest` tag.
-
-To test a dataplane branch instead of the published image, set `CF_DATAPLANE_REF`:
+Make variables take precedence for a single invocation:
 
 ```bash
-CF_DATAPLANE_REF=user/luca/cp-parity-tool-names ./scripts/cf-integration.sh up
+make up TOPOLOGY=dataplane FRESH=1
+make conformance LANES="fixture-direct dataplane" CLIENT_VERSION=2025-11-25
 ```
 
-When `CF_DATAPLANE_REF` is set and `CF_DATAPLANE_IMAGE` is unset, the script checks out `CF_DATAPLANE_REPO` under `CF_DATAPLANE_DIR`, builds `CF_DATAPLANE_LOCAL_IMAGE`, stamps the image with `org.opencontainers.image.ref.name` and `org.opencontainers.image.revision`, and prints both the checkout and image revision in the `up` summary. `CF_DATAPLANE_PLATFORM=auto` uses `linux/amd64` for published images and the Docker server platform for local source builds; set an explicit platform to override that.
+Use `.env` for persistent local choices such as repository refs, image tags,
+ports, and load defaults. Keep secrets and machine-specific overrides out of
+version control.
 
-Config propagation defaults are tuned for functional runs: the overlay sets the
-control-plane publisher snapshot interval to 2s
-(`CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS`, requires a control-plane image with
-configurable publisher interval; older images ignore it and publish every 60s)
-and disables the dataplane per-subject config cache
-(`CF_DATAPLANE_USER_CONFIG_CACHE_EXPIRY_SECONDS=0`, whose sliding TTL can pin
-stale configs under steady traffic). For load benchmarks set them back to the
-upstream defaults (60 and 60).
+Never commit `.env` or generated bearer tokens.
 
-## Commands
+## Troubleshooting
+
+- If startup reports that the other topology owns the shared host ports, run
+  `make down` and retry.
+- If checkout preparation reports uncommitted changes, commit or stash those
+  changes in the named checkout under `.integration/`; the harness will not
+  overwrite them.
+- Use `make config TOPOLOGY=dataplane` to inspect the fully merged Compose
+  model before startup.
+- Use `make status TOPOLOGY=dataplane` and
+  `make logs TOPOLOGY=dataplane SERVICES="nginx cf-dataplane gateway"` to
+  diagnose a running stack.
+- Use `make reset` only when persistent volumes may be stale; it deletes data
+  for both harness Compose projects.
+
+## Verification
+
+Run the non-mutating harness tests with:
 
 ```bash
-scripts/cf-integration.sh checkout
-scripts/cf-integration.sh up
-scripts/cf-integration.sh up controlplane
-scripts/cf-integration.sh ps
-scripts/cf-integration.sh logs nginx cf-dataplane cf-controlplane
-scripts/cf-integration.sh config
-scripts/cf-integration.sh token
-scripts/cf-integration.sh probe
-scripts/cf-integration.sh test-all-up
-scripts/cf-integration.sh test-all-up-load
-scripts/cf-integration.sh test-all-up-no-plugins
-scripts/cf-integration.sh down
+make test
 ```
 
-## Layout
+They cover the Make command surface, JWT claims, route construction,
+authentication injection and dataplane identity enforcement, Compose contract
+validation, conformance comparison generation, and the absence of a compiled
+workspace.
+
+## Repository layout
 
 ```text
-docker/docker-compose.cf-dataplane.yaml      cf-dataplane service and nginx override
-docker/docker-compose.cf-integration.yaml    fixture service and Locust overrides
-docker/nginx.cf-dataplane.conf               public routing split
-scripts/cf-integration.sh                    orchestration wrapper
-scripts/cf_pytest_result_recorder.py         pytest result recorder for test-all display
-scripts/cf-jwt.py                            local HS256 JWT helper (CLI + importable make_token)
-scripts/cf-probe.py                          end-to-end dataplane route probe
-scripts/locustfile_cf_dataplane.py           harness Locust file for the dataplane route
-scripts/mcp_http.py                          shared MCP streamable-HTTP helpers
-reports/                                     curated run reports (YYYY-MM-DD-<topic>.md)
+Makefile                                  public command surface
+scripts/cf-integration.sh                 stack and workflow orchestration
+scripts/cf_probe.py                       MCP route probe
+scripts/cf_jwt.py                         local token generation
+scripts/auth_proxy.py                     credential-injection proxy
+scripts/conformance.py                    fixture provisioning, runner, report
+scripts/locustfile_mcp.py                 Locust MCP workload
+docker/                                   Compose overlays and nginx routing
+reports/                                  tracked comparison reports
+tests/                                    non-mutating Python tests
+.integration/                             ignored generated state
 ```
