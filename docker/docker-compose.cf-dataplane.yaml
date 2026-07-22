@@ -4,7 +4,7 @@
 #   export CF_INTEGRATION_ROOT="$PWD"
 #   export CF_DATAPLANE_IMAGE="ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0"
 #   export CF_DATAPLANE_PLATFORM="linux/amd64"
-#   # Or let `cf-integration stack up --mode dataplane` resolve `auto`.
+#   # Or let `make up TOPOLOGY=dataplane` resolve `auto`.
 #   docker compose \
 #     -f /path/to/cf-controlplane/docker-compose.yml \
 #     -f "$CF_INTEGRATION_ROOT/docker/docker-compose.cf-dataplane.yaml" \
