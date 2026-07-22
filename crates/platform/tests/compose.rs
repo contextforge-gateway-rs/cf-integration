@@ -41,7 +41,7 @@ fn messages(config: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn run_host_patch(source: &str) -> (std::process::ExitStatus, String) {
+fn run_fixture_patch(source: &str) -> (std::process::ExitStatus, String) {
     let directory = tempfile::tempdir().expect("create patch test directory");
     let target = directory.path().join("everything-server.ts");
     fs::write(&target, source).expect("write patch test input");
@@ -71,6 +71,8 @@ fn readme_documents_the_official_conformance_fixture_contract() {
         "passes an empty expected-failure file",
         "records raw failures without suppression",
         "same official fixture",
+        "--server-era dual",
+        "fixture-direct lane is the expected incompatible baseline",
     ] {
         assert!(normalized.contains(fact), "README must document: {fact}");
     }
@@ -177,7 +179,7 @@ fn conformance_fixture_is_an_explicit_overlay_and_profile() {
 }
 
 #[test]
-fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
+fn conformance_container_inputs_pin_the_runner_revision_and_protocol_fixture() {
     let root = workspace_root();
     let dockerfile = fs::read_to_string(root.join("docker/mcp-conformance-server.Dockerfile"))
         .expect("read conformance Dockerfile");
@@ -208,14 +210,8 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
         "git diff --exit-code -- . ':(exclude)examples/servers/typescript/everything-server.ts'"
     ));
     assert!(
-        dockerfile
-            .contains("git diff --numstat -- examples/servers/typescript/everything-server.ts")
+        dockerfile.contains("git diff --check -- examples/servers/typescript/everything-server.ts")
     );
-    assert!(
-        dockerfile
-            .contains("awk 'NF == 3 && $1 == 1 && $2 == 1 { count++ } END { print count + 0 }'")
-    );
-    assert!(dockerfile.contains("END { print count + 0 }')\" = 1"));
     assert!(dockerfile.contains(
         "grep -Fxc \"const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });\" examples/servers/typescript/everything-server.ts"
     ));
@@ -229,6 +225,9 @@ fn conformance_container_inputs_pin_the_runner_revision_and_patch_only_hosts() {
     assert!(patch.contains(replacement));
     assert!(patch.contains("replacementCount !== 1"));
     assert!(patch.contains("process.argv[2]"));
+    assert!(patch.contains("MCP_CONFORMANCE_SERVER_ERA"));
+    assert!(patch.contains("isModernEraRequest"));
+    assert!(patch.contains("UnsupportedProtocolVersionError"));
 
     let actual_compose: serde_yaml::Value =
         serde_yaml::from_str(&compose).expect("parse conformance Compose overlay");
@@ -247,6 +246,7 @@ services:
     restart: "no"
     environment:
       PORT: "3000"
+      MCP_CONFORMANCE_SERVER_ERA: ${CF_CONFORMANCE_SERVER_ERA:-dual}
     ports:
       - "127.0.0.1::3000"
     networks:
@@ -268,16 +268,34 @@ services:
 }
 
 #[test]
-fn conformance_host_patch_is_fail_closed_and_rewrites_exactly_one_target() {
+fn conformance_fixture_patch_is_fail_closed_and_adds_server_era_routing() {
     let old = "const app = createMcpExpressApp();";
     let replacement = "const app = createMcpExpressApp({ allowedHosts: ['mcp_conformance_server', 'localhost', '127.0.0.1', '::1'] });";
+    let versions = r#"const LEGACY_SESSION_PROTOCOL_VERSIONS = [
+  '2024-11-05',
+  '2025-03-26',
+  '2025-06-18',
+  '2025-11-25'
+];"#;
+    let classification = r#"  const isLegacySessionEraRequest =
+    meta === undefined &&
+    reqVersion !== undefined &&
+    LEGACY_SESSION_PROTOCOL_VERSIONS.includes(reqVersion);
 
-    let (status, patched) = run_host_patch(&format!("before\n{old}\nafter\n"));
+  if (!sessionId && (reqVersion || meta) && !isLegacySessionEraRequest) {"#;
+    let source = format!("before\n{old}\n{versions}\n{classification}\nafter\n");
+
+    let (status, patched) = run_fixture_patch(&source);
     assert!(status.success());
-    assert_eq!(patched, format!("before\n{replacement}\nafter\n"));
+    assert!(patched.contains(replacement));
+    assert!(patched.contains("process.env.MCP_CONFORMANCE_SERVER_ERA ?? 'dual'"));
+    assert!(patched.contains("CONFORMANCE_SERVER_ERA === 'legacy' && isModernEraRequest"));
+    assert!(patched.contains("CONFORMANCE_SERVER_ERA === 'modern'"));
+    assert!(!patched.contains(old));
 
-    for unchanged in ["no patch target\n".to_owned(), format!("{old}\n{old}\n")] {
-        let (status, contents) = run_host_patch(&unchanged);
+    for missing in [old, versions, classification] {
+        let unchanged = source.replacen(missing, "missing patch target", 1);
+        let (status, contents) = run_fixture_patch(&unchanged);
         assert!(!status.success());
         assert_eq!(contents, unchanged);
     }

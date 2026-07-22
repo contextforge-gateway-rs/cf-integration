@@ -87,6 +87,8 @@ pub enum Command {
     Probe(TopologyArgs),
     /// Run an MCP load test.
     Load(LoadArgs),
+    /// Run upstream live gateway tests.
+    Live(LiveArgs),
     /// Run and report official MCP conformance.
     Conformance(ConformanceArgs),
     /// Run manual debugging utilities.
@@ -235,6 +237,31 @@ impl From<CliLoadEngine> for cf_integration_load::LoadEngine {
     }
 }
 
+/// Upstream live-test options.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct LiveArgs {
+    /// Stack topology; defaults to CF_MCP_STACK_MODE, then dataplane.
+    #[arg(long, value_enum)]
+    pub topology: Option<CliTopology>,
+
+    /// Upstream live-test group.
+    #[arg(long, value_enum, default_value = "all")]
+    pub group: LiveGroup,
+}
+
+/// Upstream live-test group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LiveGroup {
+    /// MCP route tests backed by Fast Time and Fast Test.
+    Mcp,
+    /// Authorization and multi-transport tests.
+    Rbac,
+    /// Protocol-specific gateway tests.
+    Protocol,
+    /// Every upstream live gateway test.
+    All,
+}
+
 /// Conformance command selection.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct ConformanceArgs {
@@ -259,9 +286,18 @@ pub struct ConformanceRunArgs {
     #[arg(long, value_enum, action = ArgAction::Append)]
     pub lane: Vec<CliConformanceLane>,
 
-    /// MCP revision exercised by the official runner and fixture.
-    #[arg(long, value_enum, default_value = DEFAULT_MCP_SPEC_VERSION)]
+    /// MCP revision used by the official client.
+    #[arg(
+        long = "client-version",
+        visible_alias = "spec-version",
+        value_enum,
+        default_value = DEFAULT_MCP_SPEC_VERSION
+    )]
     pub spec_version: CliConformanceVersion,
+
+    /// Protocol era exposed by the upstream fixture server.
+    #[arg(long, value_enum, default_value = "dual")]
+    pub server_era: CliConformanceServerEra,
 
     /// Result artifact root; defaults below CF_INTEGRATION_DIR.
     #[arg(long)]
@@ -311,6 +347,29 @@ impl CliConformanceVersion {
             Self::June2025 => LEGACY_MCP_SPEC_VERSION,
             Self::November2025 => STABLE_MCP_SPEC_VERSION,
             Self::July2026 => DEFAULT_MCP_SPEC_VERSION,
+        }
+    }
+}
+
+/// Protocol behavior exposed by the pinned upstream fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliConformanceServerEra {
+    /// Accept both initialization-based and per-request clients.
+    Dual,
+    /// Accept only initialization-based clients.
+    Legacy,
+    /// Accept only per-request clients.
+    Modern,
+}
+
+impl From<CliConformanceServerEra>
+    for cf_integration_compliance::conformance::ConformanceServerEra
+{
+    fn from(era: CliConformanceServerEra) -> Self {
+        match era {
+            CliConformanceServerEra::Dual => Self::Dual,
+            CliConformanceServerEra::Legacy => Self::Legacy,
+            CliConformanceServerEra::Modern => Self::Modern,
         }
     }
 }

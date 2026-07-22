@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use cf_integration::app::{
     Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, resolve_action,
 };
-use cf_integration::cli::{Cli, TokenKind, TopologySelection};
-use cf_integration_compliance::conformance::ConformanceTarget;
+use cf_integration::cli::{Cli, LiveGroup, TokenKind, TopologySelection};
+use cf_integration_compliance::conformance::{ConformanceServerEra, ConformanceTarget};
 use cf_integration_load::{LoadEngine, LoadRequest};
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
@@ -115,6 +115,20 @@ fn load_preserves_both_engines_and_explicit_settings() {
 }
 
 #[test]
+fn live_resolves_topology_and_group() {
+    assert_eq!(
+        action(
+            &["cf-integration", "live", "--group", "mcp"],
+            &[("CF_MCP_STACK_MODE", "controlplane")],
+        ),
+        Action::Live {
+            topology: StackMode::Controlplane,
+            group: LiveGroup::Mcp,
+        }
+    );
+}
+
+#[test]
 fn conformance_defaults_to_all_three_ordered_lanes() {
     assert_eq!(
         action(&["cf-integration", "conformance", "run"], &[]),
@@ -125,6 +139,7 @@ fn conformance_defaults_to_all_three_ordered_lanes() {
                 ConformanceTarget::Dataplane,
             ],
             spec_version: "2026-07-28".to_owned(),
+            server_era: ConformanceServerEra::Dual,
             results_dir: None,
         })
     );
@@ -146,6 +161,8 @@ fn conformance_lanes_are_deduplicated_and_normalized() {
                 "dataplane",
                 "--spec-version",
                 "2025-06-18",
+                "--server-era",
+                "modern",
                 "--results-dir",
                 "results",
             ],
@@ -154,6 +171,7 @@ fn conformance_lanes_are_deduplicated_and_normalized() {
         Action::Conformance(ConformanceAction::Run {
             lanes: vec![ConformanceTarget::Fixture, ConformanceTarget::Dataplane],
             spec_version: "2025-06-18".to_owned(),
+            server_era: ConformanceServerEra::Modern,
             results_dir: Some(PathBuf::from("results")),
         })
     );

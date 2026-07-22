@@ -5,14 +5,14 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use cf_integration_compliance::conformance::ConformanceTarget;
+use cf_integration_compliance::conformance::{ConformanceServerEra, ConformanceTarget};
 use cf_integration_load::LoadRequest;
 use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 
 use crate::cli::{
-    Cli, CliTopology, Command, ConformanceCommand, DebugCommand, StackCommand, TokenKind,
-    TopologySelection,
+    Cli, CliTopology, Command, ConformanceCommand, DebugCommand, LiveGroup, StackCommand,
+    TokenKind, TopologySelection,
 };
 const STACK_MODE_ENV: &str = "CF_MCP_STACK_MODE";
 
@@ -22,6 +22,10 @@ pub enum Action {
     Stack(StackAction),
     Probe(StackMode),
     Load(ResolvedLoadArgs),
+    Live {
+        topology: StackMode,
+        group: LiveGroup,
+    },
     Conformance(ConformanceAction),
     Debug(DebugAction),
 }
@@ -58,6 +62,7 @@ pub enum ConformanceAction {
     Run {
         lanes: Vec<ConformanceTarget>,
         spec_version: String,
+        server_era: ConformanceServerEra,
         results_dir: Option<PathBuf>,
     },
     Report {
@@ -100,10 +105,15 @@ pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
                 run_time: args.run_time,
             },
         })),
+        Command::Live(args) => Ok(Action::Live {
+            topology: resolve_topology(args.topology, environment)?,
+            group: args.group,
+        }),
         Command::Conformance(args) => Ok(Action::Conformance(match args.command {
             ConformanceCommand::Run(args) => ConformanceAction::Run {
                 lanes: resolve_lanes(args.lane.into_iter().map(Into::into)),
                 spec_version: args.spec_version.spec_version().to_owned(),
+                server_era: args.server_era.into(),
                 results_dir: args.results_dir,
             },
             ConformanceCommand::Report(args) => ConformanceAction::Report {

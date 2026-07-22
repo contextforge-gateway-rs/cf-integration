@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use cf_integration_compliance::conformance::{
     CheckStatus, ComparisonClassification, ComparisonFixtureTrust, ComparisonReport,
     ConformanceCheck, ConformanceFixtureMetadata, ConformanceResults, ConformanceRunMetadata,
-    ConformanceScenarioResult, DEFAULT_CONFORMANCE_SUITE, DEFAULT_MCP_SPEC_VERSION,
-    OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome, SpecReference,
-    classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
+    ConformanceScenarioResult, ConformanceServerEra, DEFAULT_CONFORMANCE_SUITE,
+    DEFAULT_MCP_SPEC_VERSION, OFFICIAL_CONFORMANCE_PACKAGE, ScenarioComparison, ScenarioOutcome,
+    SpecReference, classify_outcomes, compare_result_sets, compare_result_sets_with_fixture_trust,
     expected_server_scenarios, is_trusted_official_fixture, load_server_results,
     official_server_command, render_comparison_markdown, validate_server_scenario_set,
     write_comparison_report,
@@ -86,6 +86,7 @@ fn metadata_roundtrips_exact_fixture_provenance() {
         oracle: OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
         target: "control-plane".to_owned(),
         spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
+        server_era: ConformanceServerEra::Legacy,
         suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
         fixture: Some(fixture_metadata()),
     };
@@ -95,7 +96,21 @@ fn metadata_roundtrips_exact_fixture_provenance() {
         serde_json::from_slice(&serialized).expect("metadata should deserialize");
 
     assert_eq!(roundtrip, metadata);
+    assert_eq!(roundtrip.server_era, ConformanceServerEra::Legacy);
     assert!(is_trusted_official_fixture(roundtrip.fixture.as_ref()));
+}
+
+#[test]
+fn historical_metadata_defaults_to_dual_server_era() {
+    let metadata: ConformanceRunMetadata = serde_json::from_value(serde_json::json!({
+        "oracle": OFFICIAL_CONFORMANCE_PACKAGE,
+        "target": "fixture direct",
+        "spec_version": "2025-11-25",
+        "suite": "all"
+    }))
+    .expect("historical metadata should remain readable");
+
+    assert_eq!(metadata.server_era, ConformanceServerEra::Dual);
 }
 
 #[test]
@@ -385,6 +400,7 @@ fn report_renders_raw_counts_and_no_expected_failure_column() {
     };
     let report = ComparisonReport {
         spec_version: DEFAULT_MCP_SPEC_VERSION.to_owned(),
+        server_era: ConformanceServerEra::Modern,
         suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
         fixture: Some(fixture_metadata()),
         scenarios: vec![scenario],
@@ -392,6 +408,8 @@ fn report_renders_raw_counts_and_no_expected_failure_column() {
 
     let markdown = render_comparison_markdown(&report);
 
+    assert!(markdown.contains("- Client specification: `2026-07-28`"));
+    assert!(markdown.contains("- Upstream server era: `modern`"));
     assert!(markdown.contains("| Control plane | 0 | 1 | 27 |"));
     assert!(markdown.contains("| Dataplane | 0 | 1 | 28 |"));
     assert!(markdown.contains("server\\|stateless"));

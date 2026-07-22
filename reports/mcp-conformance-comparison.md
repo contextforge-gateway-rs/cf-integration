@@ -1,7 +1,8 @@
 # MCP Conformance Comparison
 
 - Official oracle: `@modelcontextprotocol/conformance@0.2.0-alpha.9`
-- Specification: `2025-11-25`
+- Client specification: `2025-11-25`
+- Upstream server era: `dual`
 - Suite: `all`
 - Fixture source: `https://github.com/modelcontextprotocol/conformance` at `794dcab99ed1ef2b89607be9999574140ea5c96e`
 

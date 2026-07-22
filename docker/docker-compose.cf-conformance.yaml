@@ -11,6 +11,7 @@ services:
     restart: "no"
     environment:
       PORT: "3000"
+      MCP_CONFORMANCE_SERVER_ERA: ${CF_CONFORMANCE_SERVER_ERA:-dual}
     ports:
       - "127.0.0.1::3000"
     networks:

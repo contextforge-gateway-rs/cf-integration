@@ -28,7 +28,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) fn write_comparison_from_artifacts(
         &self,
         paths: &CompliancePaths,
-        expected_run: Option<(&str, &str)>,
+        expected_run: Option<(&str, ConformanceServerEra, &str)>,
     ) -> AppResult<PathBuf> {
         let fixture = self.load_conformance_artifact(paths, ConformanceTarget::Fixture)?;
         let controlplane =
@@ -81,6 +81,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             &output,
             &ComparisonReport {
                 spec_version: metadata.spec_version.clone(),
+                server_era: metadata.server_era,
                 suite: metadata.suite.clone(),
                 fixture: metadata.fixture.clone(),
                 scenarios,
@@ -275,7 +276,7 @@ fn compatible_metadata<'a>(
     fixture: Option<&'a ConformanceRunMetadata>,
     controlplane: Option<&'a ConformanceRunMetadata>,
     dataplane: Option<&'a ConformanceRunMetadata>,
-    expected_run: Option<(&str, &str)>,
+    expected_run: Option<(&str, ConformanceServerEra, &str)>,
 ) -> AppResult<&'a ConformanceRunMetadata> {
     let metadata = fixture.or(controlplane).or(dataplane).ok_or_else(|| {
         AppFailure::from(anyhow!(
@@ -289,6 +290,7 @@ fn compatible_metadata<'a>(
             )));
         }
         if candidate.spec_version != metadata.spec_version
+            || candidate.server_era != metadata.server_era
             || candidate.suite != metadata.suite
             || candidate.oracle != metadata.oracle
         {
@@ -297,11 +299,13 @@ fn compatible_metadata<'a>(
             )));
         }
     }
-    if let Some((spec_version, suite)) = expected_run
-        && (metadata.spec_version != spec_version || metadata.suite != suite)
+    if let Some((spec_version, server_era, suite)) = expected_run
+        && (metadata.spec_version != spec_version
+            || metadata.server_era != server_era
+            || metadata.suite != suite)
     {
         return Err(AppFailure::from(anyhow!(
-            "conformance artifacts do not match requested spec version {spec_version:?} and suite {suite:?}"
+            "conformance artifacts do not match requested client spec version {spec_version:?}, server era {server_era:?}, and suite {suite:?}"
         )));
     }
     Ok(metadata)
@@ -346,6 +350,7 @@ mod tests {
             oracle: OFFICIAL_CONFORMANCE_PACKAGE.to_owned(),
             target: target.label().to_owned(),
             spec_version: "2026-07-28".to_owned(),
+            server_era: ConformanceServerEra::Dual,
             suite: "all".to_owned(),
             fixture: Some(ConformanceFixtureMetadata {
                 repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
@@ -408,7 +413,7 @@ mod tests {
             Some(&fixture),
             None,
             Some(&dataplane),
-            Some(("2026-07-28", "all")),
+            Some(("2026-07-28", ConformanceServerEra::Dual, "all")),
         )
         .expect("selected lanes should be compatible");
 
@@ -431,5 +436,18 @@ mod tests {
 
         assert!(error.contains("provenance mismatch"));
         assert!(!error.contains("different"));
+    }
+
+    #[test]
+    fn mismatched_server_eras_prevent_cross_lane_comparison() {
+        let fixture = metadata(ConformanceTarget::Fixture);
+        let mut dataplane = metadata(ConformanceTarget::Dataplane);
+        dataplane.server_era = ConformanceServerEra::Legacy;
+
+        let error = compatible_metadata(Some(&fixture), None, Some(&dataplane), None)
+            .expect_err("different server eras must not be compared")
+            .to_string();
+
+        assert!(error.contains("incompatible runs"));
     }
 }

@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use cf_integration_compliance::conformance::{DEFAULT_CONFORMANCE_SUITE, ScenarioOutcome};
 
+const CONFORMANCE_SERVER_ERA_ENV: &str = "CF_CONFORMANCE_SERVER_ERA";
+
 impl<R: ProcessRunner> RuntimeExecutor<R> {
     fn require_loopback_fixture_base_url(&self) -> AppResult<()> {
         let base_url = self.base_url()?;
@@ -31,10 +33,16 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .with_conformance_fixture(self.config.root())
     }
 
-    async fn start_conformance_service(&self, topology: StackMode) -> AppResult<()> {
+    async fn start_conformance_service(
+        &self,
+        topology: StackMode,
+        server_era: ConformanceServerEra,
+    ) -> AppResult<()> {
         let project = self.conformance_compose_project(topology);
         let build = project.command(["build", OFFICIAL_CONFORMANCE_SERVICE]);
-        let build = self.compose_environment(build, topology, true)?;
+        let build = self
+            .compose_environment(build, topology, true)?
+            .env(CONFORMANCE_SERVER_ERA_ENV, server_era.label());
         self.runner.run_async(&build).await?;
 
         let up = project.command([
@@ -44,7 +52,9 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             "gateway",
             OFFICIAL_CONFORMANCE_SERVICE,
         ]);
-        let up = self.compose_environment(up, topology, true)?;
+        let up = self
+            .compose_environment(up, topology, true)?
+            .env(CONFORMANCE_SERVER_ERA_ENV, server_era.label());
         Ok(self.runner.run_async(&up).await?)
     }
 
@@ -78,9 +88,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             ConformanceAction::Run {
                 lanes,
                 spec_version,
+                server_era,
                 results_dir,
             } => {
-                self.run_conformance(&lanes, &spec_version, results_dir.as_deref())
+                self.run_conformance(&lanes, &spec_version, server_era, results_dir.as_deref())
                     .await
             }
             ConformanceAction::Report {
@@ -94,9 +105,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         &self,
         lanes: &[ConformanceTarget],
         spec_version: &str,
+        server_era: ConformanceServerEra,
         results_dir: Option<&Path>,
     ) -> AppResult<()> {
-        self.run_conformance_with_interrupt(lanes, spec_version, results_dir, async {
+        self.run_conformance_with_interrupt(lanes, spec_version, server_era, results_dir, async {
             if tokio::signal::ctrl_c().await.is_err() {
                 std::future::pending::<()>().await;
             }
@@ -108,6 +120,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         &self,
         lanes: &[ConformanceTarget],
         spec_version: &str,
+        server_era: ConformanceServerEra,
         results_dir: Option<&Path>,
         interrupt: I,
     ) -> AppResult<()>
@@ -148,7 +161,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
 
             if topology_failure.is_none() {
                 let (start_result, start_interrupted) = finish_phase_after_interrupt(
-                    self.start_conformance_service(topology),
+                    self.start_conformance_service(topology, server_era),
                     interrupt.as_mut(),
                 )
                 .await;
@@ -156,53 +169,20 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 match start_result {
                     Ok(()) => {
                         service_started = true;
-                        match self
-                            .conformance_fixture_endpoint(topology)
-                            .and_then(|endpoint| {
-                                fixture_endpoint = Some(endpoint);
-                                self.admin_token().and_then(|token| {
-                                    ConformanceFixtureClient::builder(self.base_url()?, token)
-                                        .build()
-                                        .map_err(AppFailure::from)
-                                })
-                            }) {
-                            Ok(client) => {
-                                let (provision_result, provision_interrupted) =
-                                    finish_phase_after_interrupt(
-                                        client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL),
-                                        interrupt.as_mut(),
-                                    )
-                                    .await;
-                                interrupted |= provision_interrupted;
-                                match provision_result {
-                                    Ok(fixture) => {
-                                        fixture_metadata = Some(ConformanceFixtureMetadata {
-                                            repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
-                                            revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
-                                            server_id: fixture.server_id.clone(),
-                                        });
-                                        if interrupted {
-                                            topology_failure =
-                                                Some(interrupted_conformance_failure());
-                                        } else if topology == StackMode::Dataplane
-                                            && let Err(error) = self
-                                                .wait_for_publisher_snapshot(&fixture.server_id)
-                                                .await
-                                        {
-                                            topology_failure = Some(error);
-                                        }
-                                        fixture_state = Some((client, fixture));
-                                    }
-                                    Err(error) => {
-                                        topology_failure = Some(if interrupted {
-                                            interrupted_conformance_failure()
-                                        } else {
-                                            AppFailure::from(error)
-                                        });
-                                    }
+                        if interrupted {
+                            topology_failure = Some(interrupted_conformance_failure());
+                        } else {
+                            match self.conformance_fixture_endpoint(topology) {
+                                Ok(endpoint) => {
+                                    fixture_endpoint = Some(endpoint);
+                                    fixture_metadata = Some(ConformanceFixtureMetadata {
+                                        repository: OFFICIAL_CONFORMANCE_REPOSITORY.to_owned(),
+                                        revision: OFFICIAL_CONFORMANCE_REVISION.to_owned(),
+                                        server_id: OFFICIAL_CONFORMANCE_SERVER_ID.to_owned(),
+                                    });
                                 }
+                                Err(error) => topology_failure = Some(error),
                             }
-                            Err(error) => topology_failure = Some(error),
                         }
                     }
                     Err(error) => {
@@ -215,54 +195,113 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 }
             }
 
-            if topology_failure.is_none() {
+            if topology_failure.is_none() && run_direct && !direct_complete {
+                let run_inputs = fixture_endpoint.as_ref().zip(fixture_metadata.as_ref());
+                match run_inputs {
+                    Some((endpoint, metadata)) => {
+                        let run = DirectConformanceRun {
+                            endpoint,
+                            spec_version,
+                            server_era,
+                            fixture: metadata,
+                            cancellation: cancellation_receiver.clone(),
+                        };
+                        let direct = self.run_official_conformance_direct(&run, &paths);
+                        tokio::pin!(direct);
+                        tokio::select! {
+                            result = &mut direct => {
+                                direct_complete = true;
+                                if let Err(error) = result {
+                                    let failure = format!("fixture direct: {error}");
+                                    eprintln!(
+                                        "{}",
+                                        OutputStyle::stderr().failure(
+                                            &format!("Conformance failure: {failure}")
+                                        )
+                                    );
+                                    failures.push(failure);
+                                }
+                            }
+                            () = interrupt.as_mut() => {
+                                interrupted = true;
+                                cancellation_sender.send_replace(true);
+                                let _ = direct.await;
+                                direct_complete = true;
+                                topology_failure = Some(interrupted_conformance_failure());
+                            }
+                        }
+                    }
+                    None => {
+                        topology_failure = Some(AppFailure::from(anyhow!(
+                            "successful fixture startup did not retain its direct endpoint"
+                        )));
+                    }
+                }
+            }
+
+            if topology_failure.is_none() && run_routed {
+                match self.admin_token().and_then(|token| {
+                    ConformanceFixtureClient::builder(self.base_url()?, token)
+                        .build()
+                        .map_err(AppFailure::from)
+                }) {
+                    Ok(client) => {
+                        let (provision_result, provision_interrupted) =
+                            finish_phase_after_interrupt(
+                                client.provision(OFFICIAL_CONFORMANCE_BACKEND_URL),
+                                interrupt.as_mut(),
+                            )
+                            .await;
+                        interrupted |= provision_interrupted;
+                        match provision_result {
+                            Ok(fixture) => {
+                                if interrupted {
+                                    topology_failure = Some(interrupted_conformance_failure());
+                                } else if topology == StackMode::Dataplane
+                                    && let Err(error) =
+                                        self.wait_for_publisher_snapshot(&fixture.server_id).await
+                                {
+                                    topology_failure = Some(error);
+                                }
+                                fixture_state = Some((client, fixture));
+                            }
+                            Err(error) => {
+                                topology_failure = Some(if interrupted {
+                                    interrupted_conformance_failure()
+                                } else {
+                                    AppFailure::from(error)
+                                });
+                            }
+                        }
+                    }
+                    Err(error) => topology_failure = Some(error),
+                }
+            }
+
+            if topology_failure.is_none() && run_routed {
                 let run_inputs = fixture_state
                     .as_ref()
                     .map(|(_, fixture)| fixture)
-                    .zip(fixture_endpoint.as_ref())
                     .zip(fixture_metadata.as_ref());
                 match run_inputs {
-                    Some(((fixture, endpoint), metadata)) => {
+                    Some((fixture, metadata)) => {
                         match self.generated_bearer_token(topology, &fixture.server_id) {
                             Ok(token) => {
                                 let tests = async {
-                                    let mut failure = None;
-                                    if run_direct && !direct_complete {
-                                        if let Err(error) = self
-                                            .run_official_conformance_direct(
-                                                &DirectConformanceRun {
-                                                    endpoint,
-                                                    spec_version,
-                                                    fixture: metadata,
-                                                    cancellation: cancellation_receiver.clone(),
-                                                },
-                                                &paths,
-                                            )
-                                            .await
-                                        {
-                                            failure = Some(error);
-                                        }
-                                        direct_complete = true;
-                                    }
-                                    if run_routed
-                                        && let Err(error) = self
-                                            .run_official_conformance_mode(
-                                                &OfficialConformanceRun {
-                                                    topology,
-                                                    server_id: &fixture.server_id,
-                                                    token: &token,
-                                                    spec_version,
-                                                    fixture: metadata,
-                                                    cancellation: cancellation_receiver.clone(),
-                                                },
-                                                &paths,
-                                            )
-                                            .await
-                                        && failure.is_none()
-                                    {
-                                        failure = Some(error);
-                                    }
-                                    failure
+                                    self.run_official_conformance_mode(
+                                        &OfficialConformanceRun {
+                                            topology,
+                                            server_id: &fixture.server_id,
+                                            token: &token,
+                                            spec_version,
+                                            server_era,
+                                            fixture: metadata,
+                                            cancellation: cancellation_receiver.clone(),
+                                        },
+                                        &paths,
+                                    )
+                                    .await
+                                    .err()
                                 };
                                 tokio::pin!(tests);
                                 tokio::select! {
@@ -327,7 +366,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         if !interrupted {
             match self.write_comparison_from_artifacts(
                 &paths,
-                Some((spec_version, DEFAULT_CONFORMANCE_SUITE)),
+                Some((spec_version, server_era, DEFAULT_CONFORMANCE_SUITE)),
             ) {
                 Ok(path) => println!(
                     "{} {}",
@@ -383,6 +422,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     target,
                     endpoint: proxy.url(),
                     spec_version: run.spec_version,
+                    server_era: run.server_era,
                     fixture: run.fixture,
                     cancellation: run.cancellation.clone(),
                 },
@@ -407,6 +447,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 target: ConformanceTarget::Fixture,
                 endpoint: run.endpoint,
                 spec_version: run.spec_version,
+                server_era: run.server_era,
                 fixture: run.fixture,
                 cancellation: run.cancellation.clone(),
             },
@@ -449,6 +490,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     .to_owned(),
                 target: run.target.label().to_owned(),
                 spec_version: run.spec_version.to_owned(),
+                server_era: run.server_era,
                 suite: DEFAULT_CONFORMANCE_SUITE.to_owned(),
                 fixture: Some(run.fixture.clone()),
             },
@@ -471,6 +513,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 run.target,
                 expected_scenarios.len(),
                 run.spec_version,
+                run.server_era,
                 style,
             )
         );
@@ -521,12 +564,13 @@ fn render_conformance_lane_header(
     target: ConformanceTarget,
     scenario_count: usize,
     spec_version: &str,
+    server_era: ConformanceServerEra,
     style: OutputStyle,
 ) -> String {
     let divider = style.info("────────────");
     let lane = style.heading(&format!(" MCP conformance lane: {target}"));
     format!(
-        "{divider}\n{lane}\n    Starting {scenario_count} scenarios with {} (spec {spec_version})",
+        "{divider}\n{lane}\n    Starting {scenario_count} scenarios with {} (client {spec_version}, server {server_era})",
         cf_integration_compliance::conformance::OFFICIAL_CONFORMANCE_PACKAGE
     )
 }
@@ -632,6 +676,7 @@ struct OfficialConformanceRun<'a> {
     server_id: &'a str,
     token: &'a str,
     spec_version: &'a str,
+    server_era: ConformanceServerEra,
     fixture: &'a ConformanceFixtureMetadata,
     cancellation: tokio::sync::watch::Receiver<bool>,
 }
@@ -639,6 +684,7 @@ struct OfficialConformanceRun<'a> {
 struct DirectConformanceRun<'a> {
     endpoint: &'a url::Url,
     spec_version: &'a str,
+    server_era: ConformanceServerEra,
     fixture: &'a ConformanceFixtureMetadata,
     cancellation: tokio::sync::watch::Receiver<bool>,
 }
@@ -647,6 +693,7 @@ struct ConformanceTargetRun<'a> {
     target: ConformanceTarget,
     endpoint: &'a url::Url,
     spec_version: &'a str,
+    server_era: ConformanceServerEra,
     fixture: &'a ConformanceFixtureMetadata,
     cancellation: tokio::sync::watch::Receiver<bool>,
 }
@@ -799,9 +846,10 @@ mod tests {
                 ConformanceTarget::Fixture,
                 40,
                 "2026-07-28",
+                ConformanceServerEra::Legacy,
                 OutputStyle::plain(),
             ),
-            "────────────\n MCP conformance lane: fixture direct\n    Starting 40 scenarios with @modelcontextprotocol/conformance@0.2.0-alpha.9 (spec 2026-07-28)"
+            "────────────\n MCP conformance lane: fixture direct\n    Starting 40 scenarios with @modelcontextprotocol/conformance@0.2.0-alpha.9 (client 2026-07-28, server legacy)"
         );
     }
 
@@ -834,6 +882,7 @@ mod tests {
             ConformanceTarget::Dataplane,
             2,
             "2026-07-28",
+            ConformanceServerEra::Modern,
             OutputStyle::colored(),
         );
         let results = render_conformance_lane_results(

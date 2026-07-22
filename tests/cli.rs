@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 
 use cf_integration::cli::{
-    Cli, CliConformanceLane, CliConformanceVersion, CliLoadEngine, CliTopology, Command,
-    ConformanceArgs, ConformanceCommand, DebugArgs, DebugCommand, LoadArgs, StackArgs,
-    StackCommand, TokenKind, TopologySelection,
+    Cli, CliConformanceLane, CliConformanceServerEra, CliConformanceVersion, CliLoadEngine,
+    CliTopology, Command, ConformanceArgs, ConformanceCommand, DebugArgs, DebugCommand, LiveGroup,
+    LoadArgs, StackArgs, StackCommand, TokenKind, TopologySelection,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -43,7 +43,7 @@ fn subcommands(path: &[&str]) -> Vec<String> {
 fn command_tree_contains_only_distinct_public_workflows() {
     assert_eq!(
         subcommands(&[]),
-        ["stack", "probe", "load", "conformance", "debug"]
+        ["stack", "probe", "load", "live", "conformance", "debug"]
     );
     assert_eq!(
         subcommands(&["stack"]),
@@ -162,6 +162,37 @@ fn load_keeps_locust_and_goose_with_validated_settings() {
 }
 
 #[test]
+fn live_defaults_to_all_and_accepts_the_main_harness_groups() {
+    let Command::Live(defaults) = parse(&["cf-integration", "live"]).command else {
+        panic!("expected live workflow")
+    };
+    assert_eq!(defaults.topology, None);
+    assert_eq!(defaults.group, LiveGroup::All);
+
+    for (name, expected) in [
+        ("mcp", LiveGroup::Mcp),
+        ("rbac", LiveGroup::Rbac),
+        ("protocol", LiveGroup::Protocol),
+        ("all", LiveGroup::All),
+    ] {
+        let Command::Live(args) = parse(&[
+            "cf-integration",
+            "live",
+            "--topology",
+            "dataplane",
+            "--group",
+            name,
+        ])
+        .command
+        else {
+            panic!("expected live workflow")
+        };
+        assert_eq!(args.topology, Some(CliTopology::Dataplane));
+        assert_eq!(args.group, expected);
+    }
+}
+
+#[test]
 fn conformance_defaults_to_all_lanes_and_july_revision_at_resolution_time() {
     let Command::Conformance(ConformanceArgs {
         command: ConformanceCommand::Run(args),
@@ -171,6 +202,7 @@ fn conformance_defaults_to_all_lanes_and_july_revision_at_resolution_time() {
     };
     assert!(args.lane.is_empty());
     assert_eq!(args.spec_version, CliConformanceVersion::July2026);
+    assert_eq!(args.server_era, CliConformanceServerEra::Dual);
     assert!(args.results_dir.is_none());
 }
 
@@ -186,8 +218,10 @@ fn conformance_accepts_repeatable_exact_lanes_and_supported_revisions() {
         "fixture-direct",
         "--lane",
         "dataplane",
-        "--spec-version",
+        "--client-version",
         "2025-11-25",
+        "--server-era",
+        "legacy",
     ])
     .command
     else {
@@ -201,6 +235,25 @@ fn conformance_accepts_repeatable_exact_lanes_and_supported_revisions() {
         ]
     );
     assert_eq!(args.spec_version, CliConformanceVersion::November2025);
+    assert_eq!(args.server_era, CliConformanceServerEra::Legacy);
+    let Command::Conformance(ConformanceArgs {
+        command: ConformanceCommand::Run(compatibility_args),
+    }) = parse(&[
+        "cf-integration",
+        "conformance",
+        "run",
+        "--spec-version",
+        "2025-11-25",
+    ])
+    .command
+    else {
+        panic!("expected conformance run")
+    };
+    assert_eq!(
+        compatibility_args.spec_version,
+        CliConformanceVersion::November2025
+    );
+    assert_eq!(compatibility_args.server_era, CliConformanceServerEra::Dual);
     rejected(&["cf-integration", "conformance", "run", "--suite", "active"]);
     rejected(&[
         "cf-integration",

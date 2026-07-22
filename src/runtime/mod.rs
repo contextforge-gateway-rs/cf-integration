@@ -10,13 +10,14 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use cf_integration_compliance::conformance::{
     ComparisonFixtureTrust, ComparisonReport, ConformanceFixtureMetadata, ConformanceResults,
-    ConformanceRunMetadata, ConformanceTarget, compare_result_sets_with_fixture_trust,
-    expected_server_scenarios, is_trusted_official_fixture, load_server_results,
-    official_server_command, validate_server_scenario_set, write_comparison_report,
+    ConformanceRunMetadata, ConformanceServerEra, ConformanceTarget,
+    compare_result_sets_with_fixture_trust, expected_server_scenarios, is_trusted_official_fixture,
+    load_server_results, official_server_command, validate_server_scenario_set,
+    write_comparison_report,
 };
 use cf_integration_compliance::conformance_fixture::{
     ConformanceFixtureClient, OFFICIAL_CONFORMANCE_BACKEND_URL, OFFICIAL_CONFORMANCE_REPOSITORY,
-    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVICE,
+    OFFICIAL_CONFORMANCE_REVISION, OFFICIAL_CONFORMANCE_SERVER_ID, OFFICIAL_CONFORMANCE_SERVICE,
 };
 use cf_integration_load::{
     GooseLoadConfig, LoadEngine, LoadSettings, LocustCommand, audit_locust_reports,
@@ -42,7 +43,7 @@ use crate::app::{
     Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, selected_topologies,
     topology_selection,
 };
-use crate::cli::{TokenKind as CliTokenKind, TopologySelection};
+use crate::cli::{LiveGroup, TokenKind as CliTokenKind, TopologySelection};
 use crate::error::AppFailure;
 use crate::token::{TokenKind, make_token};
 
@@ -54,6 +55,7 @@ const STACK_READY_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 mod compliance;
 mod inspect;
+mod live;
 mod reports;
 mod sources;
 mod stack;
@@ -89,6 +91,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             Action::Stack(action) => self.execute_stack(action).await,
             Action::Probe(topology) => self.run_probe(topology).await,
             Action::Load(args) => self.run_load(args).await,
+            Action::Live { topology, group } => self.run_live(topology, group).await,
             Action::Conformance(action) => self.execute_conformance(action).await,
             Action::Debug(DebugAction::Token { kind, server_id }) => {
                 self.print_token(kind, server_id)

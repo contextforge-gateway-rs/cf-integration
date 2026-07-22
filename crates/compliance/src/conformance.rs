@@ -42,13 +42,47 @@ pub struct ConformanceRunMetadata {
     pub oracle: String,
     /// Stack label exercised by this artifact.
     pub target: String,
-    /// MCP specification revision.
+    /// MCP specification revision used by the official client.
     pub spec_version: String,
+    /// Protocol era exposed by the upstream fixture server.
+    #[serde(default)]
+    pub server_era: ConformanceServerEra,
     /// Official scenario suite label.
     pub suite: String,
     /// Backing fixture provenance, absent on historical or caller-managed runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixture: Option<ConformanceFixtureMetadata>,
+}
+
+/// Protocol behavior exposed by the pinned upstream fixture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConformanceServerEra {
+    /// Serve both initialization-based and per-request protocol behavior.
+    #[default]
+    Dual,
+    /// Serve only initialization-based protocol behavior.
+    Legacy,
+    /// Serve only per-request protocol behavior.
+    Modern,
+}
+
+impl ConformanceServerEra {
+    /// Stable CLI, environment, metadata, and report label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Dual => "dual",
+            Self::Legacy => "legacy",
+            Self::Modern => "modern",
+        }
+    }
+}
+
+impl fmt::Display for ConformanceServerEra {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
 }
 
 /// Endpoint topology exercised by one official server-conformance run.
@@ -928,8 +962,10 @@ fn reference_key(reference: &SpecReference) -> String {
 /// Inputs for a deterministic Markdown comparison report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComparisonReport {
-    /// MCP specification version exercised by all result sets.
+    /// MCP specification version used by the official client in all result sets.
     pub spec_version: String,
+    /// Protocol era exposed by the upstream fixture in all result sets.
+    pub server_era: ConformanceServerEra,
     /// Official scenario suite exercised by all result sets.
     pub suite: String,
     /// Exact official fixture provenance when recorded by the run.
@@ -944,9 +980,10 @@ pub fn render_comparison_markdown(report: &ComparisonReport) -> String {
     let mut output = String::new();
     output.push_str("# MCP Conformance Comparison\n\n");
     output.push_str(&format!(
-        "- Official oracle: `{}`\n- Specification: `{}`\n- Suite: `{}`\n",
+        "- Official oracle: `{}`\n- Client specification: `{}`\n- Upstream server era: `{}`\n- Suite: `{}`\n",
         OFFICIAL_CONFORMANCE_PACKAGE,
         markdown_code(&report.spec_version),
+        report.server_era,
         markdown_code(&report.suite)
     ));
     if let Some(fixture) = report.fixture.as_ref() {

@@ -22,6 +22,8 @@ under `.integration/` or `CF_INTEGRATION_DIR`.
 - Node.js 22.7.5 or newer with `npx`
 - Python and Locust dependencies from the control-plane checkout when using
   the Locust load engine
+- The control-plane development prerequisites (`uv`, pytest, Make, and
+  Playwright where required) when running upstream live tests
 
 The checked-in `rust-toolchain.toml` selects Rust 1.97.0 with rustfmt and
 Clippy. Install the locked CLI from this checkout with:
@@ -49,7 +51,8 @@ The workspace has one application package and four internal libraries:
 - `cf-integration-load`: Locust and Goose load engines
 
 The official TypeScript fixture is exclusively for conformance. Fast Time
-remains the ordinary probe and load fixture.
+remains the ordinary probe and load fixture; upstream live MCP tests also start
+and register the profile-gated Fast Test server on demand.
 
 ## Topologies
 
@@ -79,10 +82,10 @@ contract, resolves local builds or published images, starts the selected
 topology, and waits for its public endpoint. It preserves existing volumes by
 default. Use `--fresh` when state must be discarded.
 
-Probe, load, and Inspector commands start their selected stack, wait for the
-fixture to be ready, and stop the stack when the command succeeds or fails.
-Explicit `stack` commands remain available when a persistent environment is
-needed.
+Probe, load, live-test, and Inspector commands start their selected stack, wait
+for the fixture to be ready, and stop the stack when the command succeeds or
+fails. Explicit `stack` commands remain available when a persistent environment
+is needed.
 
 The Fast Time backend is registered as virtual server
 `9779b6698cbd4b4995ee04a4fab38737`, so probe and load commands need no manual
@@ -102,6 +105,7 @@ cf-integration
 │   └── config
 ├── probe
 ├── load
+├── live
 ├── conformance
 │   ├── run
 │   └── report
@@ -164,6 +168,22 @@ runner. Both initialize real MCP sessions, send
 safe fixture tools, exercise ping, and audit generated artifacts for credential
 leakage.
 
+### Upstream live tests
+
+Run the control-plane repository's live gateway tests against either topology:
+
+```bash
+cf-integration live --topology dataplane --group mcp
+cf-integration live --topology dataplane --group rbac
+cf-integration live --topology dataplane --group protocol
+cf-integration live --topology dataplane --group all
+```
+
+The `mcp` and `all` groups start the upstream profile-gated `fast_test_server`,
+run its one-shot registration job, and, for the dataplane topology, wait until
+the publisher snapshot contains its fixed virtual server before launching the
+tests. The base stack remains unchanged when other workflows run.
+
 ## Official MCP conformance
 
 The official runner is pinned to
@@ -189,6 +209,44 @@ It always:
 - removes temporary API resources, fixture services, and stacks;
 - writes a comparison report even when a lane reports protocol failures.
 
+The official runner's client version and the upstream fixture's server era are
+independent. `--client-version` is the primary option; `--spec-version` remains
+supported as an alias. The fixture defaults to `--server-era dual`, preserving the
+existing behavior where it selects the matching lifecycle from the incoming
+request.
+
+Run the same-era baselines explicitly:
+
+```bash
+cf-integration conformance run \
+  --client-version 2026-07-28 \
+  --server-era modern
+cf-integration conformance run \
+  --client-version 2025-11-25 \
+  --server-era legacy
+```
+
+Run the two cross-era paths:
+
+```bash
+# Modern client-facing traffic against a legacy-only upstream.
+cf-integration conformance run \
+  --client-version 2026-07-28 \
+  --server-era legacy
+
+# Legacy client-facing traffic against a modern-only upstream.
+cf-integration conformance run \
+  --client-version 2025-11-25 \
+  --server-era modern
+```
+
+In a cross-era run, the fixture-direct lane is the expected incompatible
+baseline. A routed lane that passes where fixture-direct fails demonstrates
+that the gateway adapted the lifecycle across the boundary; the comparison
+report records both axes. The official runner emits the selected client era
+strictly. It does not itself test a general-purpose SDK client's automatic
+dual-era fallback.
+
 The three lanes are:
 
 1. official oracle directly to the official TypeScript fixture;
@@ -203,7 +261,8 @@ cf-integration conformance run \
   --lane dataplane
 ```
 
-Supported revisions are explicit and use the same pinned runner and fixture:
+Supported client revisions are explicit and use the same pinned runner and
+fixture:
 
 ```bash
 cf-integration conformance run --spec-version 2025-11-25
