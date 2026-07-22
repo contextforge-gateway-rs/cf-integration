@@ -25,7 +25,12 @@ SERVER_ID ?=
 	conformance-report inspect token test
 
 help: ## Show the Make command surface.
+	@printf 'Usage: make <target> [VARIABLE=value ...]\n\nTargets:\n'
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@printf '\nCommon variables:\n'
+	@printf '  TOPOLOGY=dataplane|controlplane   LANES="fixture-direct controlplane dataplane"\n'
+	@printf '  FRESH=1  VOLUMES=1  SERVICES="..."  USERS=N  SPAWN_RATE=N  RUN_TIME=2m\n'
+	@printf '  GROUP=mcp|rbac|protocol|all  CLIENT_VERSION=YYYY-MM-DD  SERVER_ERA=dual|legacy|modern\n'
 
 checkout: ## Clone or update configured control-plane/dataplane checkouts.
 	@$(HARNESS) checkout

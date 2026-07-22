@@ -12,8 +12,9 @@ The public routing contract is fixed:
 The repository contains no compiled CLI. Make provides the public command
 surface; Bash owns orchestration, and small standard-library Python programs
 handle JWTs, MCP HTTP, credential-safe proxying, validation, and reporting.
-Generated checkout, build, report, and runtime state stays under `.integration/`
-or `CF_INTEGRATION_DIR`.
+Generated checkouts, build output, workload artifacts, and runtime state stay
+under `.integration/` or `CF_INTEGRATION_DIR`. The generated conformance
+comparison defaults to the tracked `reports/` directory.
 
 ## Requirements
 
@@ -29,6 +30,7 @@ or `CF_INTEGRATION_DIR`.
 ## Quick start
 
 ```bash
+cp .env.example .env
 make help
 make up TOPOLOGY=dataplane
 ```
@@ -43,9 +45,56 @@ make down TOPOLOGY=all
 Local configuration is read from `.env`. Copy `.env.example` to `.env`; values
 passed to Make or exported by the caller override the file.
 
+`make up` clones or updates the required source checkouts automatically.
+`make checkout` is available when you want to prepare them without starting
+Docker services.
+
 ## Make command surface
 
 Run `make help` for the authoritative list.
+
+| Goal | Command |
+| --- | --- |
+| Start a stack | `make up TOPOLOGY=dataplane` |
+| Stop all stacks | `make down` |
+| Stop stacks and delete volumes | `make reset` |
+| Check the public MCP route | `make probe TOPOLOGY=dataplane` |
+| Run a short load smoke test | `make smoke TOPOLOGY=dataplane` |
+| Run upstream live tests | `make live-all TOPOLOGY=dataplane` |
+| Run official conformance | `make conformance` |
+| Inspect an MCP method | `make inspect METHOD=tools/list` |
+| Verify the harness | `make test` |
+
+`probe`, `load`, `smoke`, `live*`, `conformance`, and `inspect` are managed
+workflows: they start the required topology and stop it during cleanup, even
+when the workload fails. Use `make up`, `make status`, `make logs`, and
+`make down` for a stack you want to keep running while debugging manually.
+
+### Migrating from the removed CLI
+
+<!-- markdownlint-disable MD013 -->
+
+| Previous command | Make replacement |
+| --- | --- |
+| `cf-integration stack up --topology dataplane` | `make up TOPOLOGY=dataplane` |
+| `cf-integration stack up --topology controlplane --fresh` | `make up TOPOLOGY=controlplane FRESH=1` |
+| `cf-integration stack down --topology all --volumes` | `make reset` |
+| `cf-integration stack status --topology dataplane` | `make status TOPOLOGY=dataplane` |
+| `cf-integration stack logs --topology dataplane nginx` | `make logs TOPOLOGY=dataplane SERVICES=nginx` |
+| `cf-integration stack config --topology dataplane` | `make config TOPOLOGY=dataplane` |
+| `cf-integration probe --topology dataplane` | `make probe TOPOLOGY=dataplane` |
+| `cf-integration load --topology dataplane --smoke` | `make smoke TOPOLOGY=dataplane` |
+| `cf-integration load --users 20 --spawn-rate 5 --run-time 2m` | `make load USERS=20 SPAWN_RATE=5 RUN_TIME=2m` |
+| `cf-integration live --group rbac` | `make live-rbac` |
+| `cf-integration conformance run --lane dataplane` | `make conformance LANES=dataplane` |
+| `cf-integration conformance report` | `make conformance-report` |
+| `cf-integration debug inspect --method tools/list` | `make inspect METHOD=tools/list` |
+| `cf-integration debug token --kind scoped --server-id ID` | `make token TOKEN_KIND=scoped SERVER_ID=ID` |
+
+<!-- markdownlint-enable MD013 -->
+
+The removed Rust-only Goose load engine has no replacement. `make load` and
+`make smoke` use the existing Locust workload for both topologies.
 
 ### Stack lifecycle
 
@@ -56,7 +105,7 @@ make up TOPOLOGY=controlplane FRESH=1
 make status TOPOLOGY=dataplane
 make logs TOPOLOGY=dataplane SERVICES="nginx cf-dataplane"
 make config TOPOLOGY=dataplane
-make down TOPOLOGY=all
+make down
 make reset
 ```
 
@@ -136,7 +185,9 @@ as control-plane fallback.
 
 Artifacts default below `.integration/conformance/`; the comparison is written
 to `reports/mcp-conformance-comparison.md`. Override these with `RESULTS_DIR`
-and `OUTPUT_DIR`.
+and `OUTPUT_DIR`. The checked-in comparison records the latest retained
+`2025-11-25` dual-era run; new runs use the selected `CLIENT_VERSION` and
+`SERVER_ERA` values.
 
 ### Debug utilities
 
@@ -182,7 +233,33 @@ local source checkout explicitly. `CF_COMPOSE_BUILD=auto` rebuilds local images
 when their revision label differs from the checkout; `true` always builds and
 `false` never builds.
 
+Make variables take precedence for a single invocation:
+
+```bash
+make up TOPOLOGY=dataplane FRESH=1
+make conformance LANES="fixture-direct dataplane" CLIENT_VERSION=2025-11-25
+```
+
+Use `.env` for persistent local choices such as repository refs, image tags,
+ports, and load defaults. Keep secrets and machine-specific overrides out of
+version control.
+
 Never commit `.env` or generated bearer tokens.
+
+## Troubleshooting
+
+- If startup reports that the other topology owns the shared host ports, run
+  `make down` and retry.
+- If checkout preparation reports uncommitted changes, commit or stash those
+  changes in the named checkout under `.integration/`; the harness will not
+  overwrite them.
+- Use `make config TOPOLOGY=dataplane` to inspect the fully merged Compose
+  model before startup.
+- Use `make status TOPOLOGY=dataplane` and
+  `make logs TOPOLOGY=dataplane SERVICES="nginx cf-dataplane gateway"` to
+  diagnose a running stack.
+- Use `make reset` only when persistent volumes may be stale; it deletes data
+  for both harness Compose projects.
 
 ## Verification
 
