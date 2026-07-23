@@ -3,50 +3,9 @@
 # Combine with cf-controlplane docker-compose.yml and docker-compose.cf-dataplane.yaml.
 
 services:
-  # Use concise names in container viewers. This also replaces the
-  # name=ubi10/ubi-minimal label inherited by Red Hat UBI images.
-  gateway:
-    labels:
-      name: cf-controlplane
-
-  migration:
-    labels:
-      name: cf-migration
-
-  register_fast_time:
-    labels:
-      name: cf-register-fast-time
-
-  fast_time_server:
-    image: ${FAST_TIME_IMAGE:-ghcr.io/ibm/cfex-mcp-fast-time-server:latest}
-    labels:
-      name: cf-fast-time-server
-    # The current Rust image configures its listener and logging through
-    # BIND_ADDRESS and RUST_LOG. Clear the obsolete Go CLI arguments inherited
-    # from the control-plane Compose file.
-    command: []
-
-  nginx:
-    labels:
-      name: cf-nginx
-
-  postgres:
-    labels:
-      name: cf-postgres
-
-  pgbouncer:
-    labels:
-      name: cf-pgbouncer
-
-  redis:
-    labels:
-      name: cf-redis
-
   # Fast Time registration is stock upstream; the dataplane waits for it so
   # the publisher has the fixed virtual server to publish.
-  cf-dataplane:
-    labels:
-      name: cf-dataplane
+  dataplane:
     depends_on:
       redis:
         condition: service_started
@@ -54,8 +13,6 @@ services:
         condition: service_completed_successfully
 
   locust:
-    labels:
-      name: cf-locust
     volumes:
       # Harness locustfile with streamable-HTTP content negotiation; the
       # upstream locustfile_mcp_protocol.py sends Accept: application/json

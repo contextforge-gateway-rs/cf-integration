@@ -172,7 +172,7 @@ fn dataplane_locust_command_has_exact_compose_shape_and_environment() {
         [
             OsString::from("compose"),
             OsString::from("-p"),
-            OsString::from("cf-integration"),
+            OsString::from("cf"),
             OsString::from("-f"),
             integration_dir
                 .join("mcp-context-forge/docker-compose.yml")

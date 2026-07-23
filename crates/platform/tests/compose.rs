@@ -18,8 +18,12 @@ const EXPECTED_IMAGE: &str = "ghcr.io/ibm/cfex-mcp-fast-time-server:latest";
 fn valid_config() -> serde_json::Value {
     json!({
         "services": {
-            "fast_time_server": {"image": EXPECTED_IMAGE},
+            "fast_time_server": {
+                "image": EXPECTED_IMAGE,
+                "labels": {"name": "cf-fast-time-server"}
+            },
             "register_fast_time": {
+                "labels": {"name": "cf-register-fast-time"},
                 "command": [
                     "wait for http://fast_time_server:9080/health",
                     "register http://fast_time_server:9080/mcp"
@@ -27,9 +31,13 @@ fn valid_config() -> serde_json::Value {
             },
             "fast_test_server": {
                 "image": "example/modern:latest",
+                "labels": {"name": "cf-fast-test-server"},
                 "profiles": ["testing"]
             },
-            "register_fast_test": {"profiles": ["testing"]}
+            "register_fast_test": {
+                "labels": {"name": "cf-register-fast-test"},
+                "profiles": ["testing"]
+            }
         }
     })
 }
@@ -83,7 +91,7 @@ fn dataplane_compose_files_are_in_override_order() {
     let project = ComposeProject::dataplane(
         Path::new("/repo"),
         Path::new("/checkout"),
-        OsString::from("cf-integration"),
+        OsString::from("cf"),
         false,
     );
 
@@ -102,7 +110,7 @@ fn dataplane_compose_files_are_in_override_order() {
         [
             "compose",
             "-p",
-            "cf-integration",
+            "cf",
             "-f",
             "/checkout/docker-compose.yml",
             "-f",
@@ -120,12 +128,13 @@ fn dataplane_compose_files_are_in_override_order() {
 }
 
 #[test]
-fn integration_overlay_clears_obsolete_fast_time_arguments() {
-    let compose =
-        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-integration.yaml"))
-            .expect("read integration Compose overlay");
+fn shared_metadata_overlay_clears_obsolete_fast_time_arguments() {
+    let compose = fs::read_to_string(
+        workspace_root().join("docker/docker-compose.cf-controlplane-build-labels.yaml"),
+    )
+    .expect("read shared control-plane metadata overlay");
     let overlay: serde_yaml::Value =
-        serde_yaml::from_str(&compose).expect("parse integration Compose overlay");
+        serde_yaml::from_str(&compose).expect("parse shared control-plane metadata overlay");
 
     assert_eq!(
         overlay["services"]["fast_time_server"]["command"],
@@ -134,12 +143,23 @@ fn integration_overlay_clears_obsolete_fast_time_arguments() {
 }
 
 #[test]
-fn integration_overlay_assigns_short_container_display_names() {
-    let compose =
-        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-integration.yaml"))
-            .expect("read integration Compose overlay");
-    let overlay: serde_yaml::Value =
-        serde_yaml::from_str(&compose).expect("parse integration Compose overlay");
+fn compose_overlays_assign_short_container_display_names() {
+    let shared = fs::read_to_string(
+        workspace_root().join("docker/docker-compose.cf-controlplane-build-labels.yaml"),
+    )
+    .expect("read shared control-plane metadata overlay");
+    let shared: serde_yaml::Value =
+        serde_yaml::from_str(&shared).expect("parse shared control-plane metadata overlay");
+    let dataplane =
+        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-dataplane.yaml"))
+            .expect("read dataplane Compose overlay");
+    let dataplane: serde_yaml::Value =
+        serde_yaml::from_str(&dataplane).expect("parse dataplane Compose overlay");
+    let conformance =
+        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-conformance.yaml"))
+            .expect("read conformance Compose overlay");
+    let conformance: serde_yaml::Value =
+        serde_yaml::from_str(&conformance).expect("parse conformance Compose overlay");
 
     for (service, expected_name) in [
         ("gateway", "cf-controlplane"),
@@ -150,15 +170,31 @@ fn integration_overlay_assigns_short_container_display_names() {
         ("postgres", "cf-postgres"),
         ("pgbouncer", "cf-pgbouncer"),
         ("redis", "cf-redis"),
-        ("cf-dataplane", "cf-dataplane"),
         ("locust", "cf-locust"),
+        ("locust_worker", "cf-locust-worker"),
+        ("locust_token", "cf-locust-token"),
+        ("fast_test_server", "cf-fast-test-server"),
+        ("register_fast_test", "cf-register-fast-test"),
+        ("a2a_echo_agent", "cf-a2a-echo-agent"),
+        ("a2a_echo_agent_v0_3_0", "cf-a2a-echo-agent-v0-3-0"),
+        ("register_a2a_echo", "cf-register-a2a-echo"),
+        ("mcp_inspector", "cf-mcp-inspector"),
+        ("keycloak", "cf-keycloak"),
     ] {
         assert_eq!(
-            overlay["services"][service]["labels"]["name"].as_str(),
+            shared["services"][service]["labels"]["name"].as_str(),
             Some(expected_name),
             "{service} must expose a concise container display name"
         );
     }
+    assert_eq!(
+        dataplane["services"]["dataplane"]["labels"]["name"].as_str(),
+        Some("cf-dataplane")
+    );
+    assert_eq!(
+        conformance["services"]["mcp_conformance_server"]["labels"]["name"].as_str(),
+        Some("cf-conformance-server")
+    );
 }
 
 #[test]
@@ -282,6 +318,8 @@ services:
   mcp_conformance_server:
     profiles: ["conformance"]
     image: cf-integration/mcp-conformance-server:0.2.0-alpha.9
+    labels:
+      name: cf-conformance-server
     build:
       context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
       dockerfile: docker/mcp-conformance-server.Dockerfile
@@ -397,6 +435,24 @@ fn contract_reports_missing_or_wrong_fast_time_image() {
 }
 
 #[test]
+fn contract_reports_incorrect_container_display_names() {
+    let mut config = valid_config();
+    config["services"]["register_fast_time"]["labels"]["name"] = json!("wrong");
+    config["services"]["fast_time_server"]
+        .as_object_mut()
+        .expect("service object")
+        .remove("labels");
+
+    assert_eq!(
+        messages(&config),
+        [
+            "register_fast_time display name is \"wrong\"; expected \"cf-register-fast-time\"",
+            "fast_time_server display name is \"\"; expected \"cf-fast-time-server\"",
+        ]
+    );
+}
+
+#[test]
 fn fast_test_services_must_stay_behind_profiles() {
     let mut config = valid_config();
     config["services"]["fast_test_server"]
@@ -466,8 +522,14 @@ fn malformed_rendered_config_returns_stable_diagnostics_instead_of_panicking() {
 fn multiple_violations_have_stable_contract_order() {
     let config = json!({
         "services": {
-            "register_fast_time": {"command": []},
-            "fast_test_server": {"image": "ghcr.io/ibm/fast-time-server:old"}
+            "register_fast_time": {
+                "command": [],
+                "labels": {"name": "cf-register-fast-time"}
+            },
+            "fast_test_server": {
+                "image": "ghcr.io/ibm/fast-time-server:old",
+                "labels": {"name": "cf-fast-test-server"}
+            }
         }
     });
 

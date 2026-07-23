@@ -349,9 +349,10 @@ fn explicit_empty_process_images_use_fallbacks_but_remain_explicit() {
 
     assert_eq!(
         loaded.config.controlplane_image().resolved(),
-        OsStr::new("mcpgateway/mcpgateway:test")
+        OsStr::new("ghcr.io/ibm/mcp-context-forge:test")
     );
     assert!(loaded.config.controlplane_image().is_explicitly_set());
+    assert!(loaded.config.controlplane_image().is_prebuilt());
     assert_eq!(
         loaded.config.dataplane_image().resolved(),
         OsStr::new("contextforge-gateway-rs/contextforge-gateway-rs:local")

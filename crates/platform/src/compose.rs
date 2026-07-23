@@ -15,6 +15,30 @@ const LEGACY_IMAGE_PREFIXES: &[&str] = &[
     "mcpgateway/fast-test-server@",
 ];
 
+/// Compose service keys and their public container display names.
+pub const SERVICE_DISPLAY_NAMES: &[(&str, &str)] = &[
+    ("gateway", "cf-controlplane"),
+    ("migration", "cf-migration"),
+    ("register_fast_time", "cf-register-fast-time"),
+    ("fast_time_server", "cf-fast-time-server"),
+    ("nginx", "cf-nginx"),
+    ("postgres", "cf-postgres"),
+    ("pgbouncer", "cf-pgbouncer"),
+    ("redis", "cf-redis"),
+    ("dataplane", "cf-dataplane"),
+    ("locust", "cf-locust"),
+    ("locust_worker", "cf-locust-worker"),
+    ("locust_token", "cf-locust-token"),
+    ("fast_test_server", "cf-fast-test-server"),
+    ("register_fast_test", "cf-register-fast-test"),
+    ("a2a_echo_agent", "cf-a2a-echo-agent"),
+    ("a2a_echo_agent_v0_3_0", "cf-a2a-echo-agent-v0-3-0"),
+    ("register_a2a_echo", "cf-register-a2a-echo"),
+    ("mcp_inspector", "cf-mcp-inspector"),
+    ("keycloak", "cf-keycloak"),
+    ("mcp_conformance_server", "cf-conformance-server"),
+];
+
 /// Immutable Compose project invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeProject {
@@ -152,6 +176,22 @@ pub fn validate_integration_contract(
         return vec![violation("rendered Compose config has no services object")];
     };
     let mut violations = Vec::new();
+
+    for &(service_name, expected_name) in SERVICE_DISPLAY_NAMES {
+        let Some(service) = services.get(service_name) else {
+            continue;
+        };
+        let actual_name = service
+            .get("labels")
+            .and_then(|labels| labels.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if actual_name != expected_name {
+            violations.push(violation(format!(
+                "{service_name} display name is {actual_name:?}; expected {expected_name:?}"
+            )));
+        }
+    }
 
     match services.get("fast_time_server") {
         None => violations.push(violation(

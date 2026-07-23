@@ -3,14 +3,17 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use uuid::Uuid;
 
 const ROOT_OVERRIDE: &str = "CF_INTEGRATION_ROOT";
 const COMPOSE_FILE: &str = "docker/docker-compose.cf-integration.yaml";
+const LOCAL_SECRETS_FILE: &str = "secrets.env";
 const REDACTED: &str = "<redacted>";
 
 /// Environment values supplied without mutating the process environment.
@@ -48,6 +51,7 @@ pub struct LoadedEnvironment {
 pub struct ImageSetting {
     resolved: OsString,
     explicitly_set: bool,
+    prebuilt: bool,
 }
 
 impl ImageSetting {
@@ -61,6 +65,12 @@ impl ImageSetting {
     #[must_use]
     pub fn is_explicitly_set(&self) -> bool {
         self.explicitly_set
+    }
+
+    /// Returns whether the selected image should be pulled instead of auto-built.
+    #[must_use]
+    pub fn is_prebuilt(&self) -> bool {
+        self.prebuilt
     }
 }
 
@@ -79,6 +89,7 @@ pub struct AppConfig {
     pub(crate) integration_project: SourcedValue,
     pub(crate) controlplane_project: SourcedValue,
     pub(crate) jwt_secret_key: SourcedValue,
+    pub(crate) auth_encryption_secret: SourcedValue,
     pub(crate) jwt_subject: SourcedValue,
     controlplane_image: ImageSetting,
     dataplane_image: ImageSetting,
@@ -130,6 +141,7 @@ impl fmt::Debug for ImageSetting {
             .debug_struct("ImageSetting")
             .field("resolved", &REDACTED)
             .field("explicitly_set", &self.explicitly_set)
+            .field("prebuilt", &self.prebuilt)
             .finish()
     }
 }
@@ -209,8 +221,11 @@ impl AppConfig {
             "CF_CONTROLPLANE_REPO",
             OsString::from("https://github.com/IBM/mcp-context-forge.git"),
         );
-        let controlplane_ref =
-            shell_value(&environment, "CF_CONTROLPLANE_REF", OsString::from("main"));
+        let controlplane_ref = shell_value(
+            &environment,
+            "CF_CONTROLPLANE_REF",
+            OsString::from("v1.0.6"),
+        );
         let dataplane_repo = shell_value(
             &environment,
             "CF_DATAPLANE_REPO",
@@ -219,21 +234,40 @@ impl AppConfig {
             ),
         );
         let dataplane_ref = shell_value(&environment, "CF_DATAPLANE_REF", OsString::new());
-        let integration_project = shell_value(
-            &environment,
-            "CF_INTEGRATION_PROJECT",
-            OsString::from("cf-integration"),
-        );
+        let integration_project =
+            shell_value(&environment, "CF_INTEGRATION_PROJECT", OsString::from("cf"));
         let controlplane_project = shell_value(
             &environment,
             "CF_CONTROLPLANE_PROJECT",
             OsString::from("cf-controlplane-only"),
         );
-        let jwt_secret_key = shell_value(
-            &environment,
-            "JWT_SECRET_KEY",
-            OsString::from("my-test-key-but-now-longer-than-32-bytes"),
-        );
+        let local_secrets = if first_nonempty(&environment, "JWT_SECRET_KEY").is_none()
+            || first_nonempty(&environment, "AUTH_ENCRYPTION_SECRET").is_none()
+        {
+            Some(load_or_create_local_secrets(Path::new(
+                &integration_dir.value,
+            ))?)
+        } else {
+            None
+        };
+        let jwt_secret_key = match first_nonempty(&environment, "JWT_SECRET_KEY") {
+            Some(value) => value.clone(),
+            None => default_value(
+                &local_secrets
+                    .as_ref()
+                    .context("local secrets were not loaded for JWT_SECRET_KEY")?
+                    .jwt_secret_key,
+            ),
+        };
+        let auth_encryption_secret = match first_nonempty(&environment, "AUTH_ENCRYPTION_SECRET") {
+            Some(value) => value.clone(),
+            None => default_value(
+                &local_secrets
+                    .as_ref()
+                    .context("local secrets were not loaded for AUTH_ENCRYPTION_SECRET")?
+                    .auth_encryption_secret,
+            ),
+        };
         let jwt_subject = shell_value(
             &environment,
             "MCP_JWT_SUBJECT",
@@ -279,6 +313,7 @@ impl AppConfig {
                 integration_project,
                 controlplane_project,
                 jwt_secret_key,
+                auth_encryption_secret,
                 jwt_subject,
                 controlplane_image,
                 dataplane_image,
@@ -362,6 +397,12 @@ impl AppConfig {
     #[must_use]
     pub fn jwt_secret_key(&self) -> &SourcedValue {
         &self.jwt_secret_key
+    }
+
+    /// Returns the control-plane credential-encryption secret setting.
+    #[must_use]
+    pub fn auth_encryption_secret(&self) -> &SourcedValue {
+        &self.auth_encryption_secret
     }
 
     /// Returns the JWT subject setting.
@@ -505,12 +546,13 @@ fn controlplane_image(environment: &LoadedEnvironment) -> ImageSetting {
                 "CF_CONTROLPLANE_VERSION",
                 OsString::from("latest"),
             );
-            prefixed_value("mcpgateway/mcpgateway:", &version.value)
+            prefixed_value("ghcr.io/ibm/mcp-context-forge:", &version.value)
         });
 
     ImageSetting {
         resolved,
         explicitly_set,
+        prebuilt: true,
     }
 }
 
@@ -536,6 +578,101 @@ fn dataplane_image(environment: &LoadedEnvironment, dataplane_ref: &SourcedValue
     ImageSetting {
         resolved,
         explicitly_set,
+        prebuilt: explicitly_set || dataplane_ref.value.is_empty(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalSecrets {
+    jwt_secret_key: String,
+    auth_encryption_secret: String,
+}
+
+fn load_or_create_local_secrets(integration_dir: &Path) -> Result<LocalSecrets> {
+    let path = integration_dir.join(LOCAL_SECRETS_FILE);
+    match fs::read_to_string(&path) {
+        Ok(contents) => return parse_local_secrets(&path, &contents),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read local secrets file {}", path.display()));
+        }
+    }
+
+    fs::create_dir_all(integration_dir).with_context(|| {
+        format!(
+            "failed to create integration directory {}",
+            integration_dir.display()
+        )
+    })?;
+    let generated = LocalSecrets {
+        jwt_secret_key: random_secret(),
+        auth_encryption_secret: random_secret(),
+    };
+    let contents = format!(
+        "JWT_SECRET_KEY={}\nAUTH_ENCRYPTION_SECRET={}\n",
+        generated.jwt_secret_key, generated.auth_encryption_secret
+    );
+    match create_private_file(&path) {
+        Ok(mut file) => {
+            file.write_all(contents.as_bytes()).with_context(|| {
+                format!("failed to write local secrets file {}", path.display())
+            })?;
+            Ok(generated)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read local secrets file {}", path.display()))?;
+            parse_local_secrets(&path, &contents)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to create local secrets file {}", path.display())),
+    }
+}
+
+fn random_secret() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+fn parse_local_secrets(path: &Path, contents: &str) -> Result<LocalSecrets> {
+    let mut jwt_secret_key = None;
+    let mut auth_encryption_secret = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("JWT_SECRET_KEY=") {
+            jwt_secret_key = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("AUTH_ENCRYPTION_SECRET=") {
+            auth_encryption_secret = Some(value.to_owned());
+        }
+    }
+    match (jwt_secret_key, auth_encryption_secret) {
+        (Some(jwt_secret_key), Some(auth_encryption_secret))
+            if jwt_secret_key.len() >= 32 && auth_encryption_secret.len() >= 32 =>
+        {
+            Ok(LocalSecrets {
+                jwt_secret_key,
+                auth_encryption_secret,
+            })
+        }
+        _ => bail!(
+            "invalid local secrets file {}; remove it and rerun the command",
+            path.display()
+        ),
     }
 }
 
@@ -786,7 +923,7 @@ mod tests {
         );
         assert_sourced(
             &config.controlplane_ref,
-            OsStr::new("main"),
+            OsStr::new("v1.0.6"),
             ValueOrigin::Default,
         );
         assert_sourced(
@@ -804,7 +941,7 @@ mod tests {
         assert_sourced(&config.dataplane_ref, OsStr::new(""), ValueOrigin::Default);
         assert_sourced(
             &config.integration_project,
-            OsStr::new("cf-integration"),
+            OsStr::new("cf"),
             ValueOrigin::Default,
         );
         assert_sourced(
@@ -812,11 +949,10 @@ mod tests {
             OsStr::new("cf-controlplane-only"),
             ValueOrigin::Default,
         );
-        assert_sourced(
-            &config.jwt_secret_key,
-            OsStr::new("my-test-key-but-now-longer-than-32-bytes"),
-            ValueOrigin::Default,
-        );
+        assert_eq!(config.jwt_secret_key.origin, ValueOrigin::Default);
+        assert_eq!(config.jwt_secret_key.value.len(), 64);
+        assert_eq!(config.auth_encryption_secret.origin, ValueOrigin::Default);
+        assert_eq!(config.auth_encryption_secret.value.len(), 64);
         assert_sourced(
             &config.jwt_subject,
             OsStr::new("admin@example.com"),
@@ -824,9 +960,10 @@ mod tests {
         );
         assert_eq!(
             config.controlplane_image.resolved,
-            OsStr::new("mcpgateway/mcpgateway:latest")
+            OsStr::new("ghcr.io/ibm/mcp-context-forge:latest")
         );
         assert!(!config.controlplane_image.explicitly_set);
+        assert!(config.controlplane_image.prebuilt);
         assert_eq!(
             config.dataplane_image.resolved,
             OsStr::new("ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0")
@@ -912,7 +1049,7 @@ mod tests {
         );
         assert_sourced(
             &config.controlplane_ref,
-            OsStr::new("main"),
+            OsStr::new("v1.0.6"),
             ValueOrigin::Default,
         );
         assert_sourced(
@@ -933,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn controlplane_image_uses_primary_then_image_local_then_version_default() {
+    fn controlplane_image_uses_primary_then_image_local_then_official_version_default() {
         let root = repository_root();
         let primary = environment(&[
             ("CF_CONTROLPLANE_IMAGE", "primary/image:tag"),
@@ -959,9 +1096,53 @@ mod tests {
         assert!(local_config.controlplane_image.explicitly_set);
         assert_eq!(
             empty_config.controlplane_image.resolved,
-            OsStr::new("mcpgateway/mcpgateway:edge")
+            OsStr::new("ghcr.io/ibm/mcp-context-forge:edge")
         );
         assert!(empty_config.controlplane_image.explicitly_set);
+        assert!(empty_config.controlplane_image.prebuilt);
+    }
+
+    #[test]
+    fn generated_local_secrets_are_stable_across_config_loads() {
+        let root = repository_root();
+
+        let first = load_app_config(root.path(), &Environment::new()).config;
+        let second = load_app_config(root.path(), &Environment::new()).config;
+
+        assert_eq!(first.jwt_secret_key, second.jwt_secret_key);
+        assert_eq!(first.auth_encryption_secret, second.auth_encryption_secret);
+        assert_eq!(first.jwt_secret_key.value.len(), 64);
+        assert_eq!(first.auth_encryption_secret.value.len(), 64);
+        assert!(root.path().join(".integration/secrets.env").is_file());
+    }
+
+    #[test]
+    fn configured_secrets_override_generated_local_secrets() {
+        let root = repository_root();
+        let process = environment(&[
+            (
+                "JWT_SECRET_KEY",
+                "configured-jwt-secret-12345678901234567890",
+            ),
+            (
+                "AUTH_ENCRYPTION_SECRET",
+                "configured-auth-secret-1234567890123456789",
+            ),
+        ]);
+
+        let config = load_app_config(root.path(), &process).config;
+
+        assert_sourced(
+            &config.jwt_secret_key,
+            OsStr::new("configured-jwt-secret-12345678901234567890"),
+            ValueOrigin::Process,
+        );
+        assert_sourced(
+            &config.auth_encryption_secret,
+            OsStr::new("configured-auth-secret-1234567890123456789"),
+            ValueOrigin::Process,
+        );
+        assert!(!root.path().join(".integration/secrets.env").exists());
     }
 
     #[test]

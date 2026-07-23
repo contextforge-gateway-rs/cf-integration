@@ -28,12 +28,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         Ok(())
     }
 
-    fn conformance_compose_project(&self, topology: StackMode) -> ComposeProject {
-        self.compose_project(topology)
-            .with_conformance_fixture(self.config.root())
-    }
-
-    async fn start_conformance_service(
+    pub(super) async fn start_conformance_service(
         &self,
         topology: StackMode,
         server_era: ConformanceServerEra,
@@ -45,20 +40,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .env(CONFORMANCE_SERVER_ERA_ENV, server_era.label());
         self.runner.run_async(&build).await?;
 
-        let up = project.command([
-            "up",
-            "-d",
-            "--wait",
-            "gateway",
-            OFFICIAL_CONFORMANCE_SERVICE,
-        ]);
+        let up = project.command(["up", "-d", "--wait", OFFICIAL_CONFORMANCE_SERVICE]);
         let up = self
             .compose_environment(up, topology, true)?
             .env(CONFORMANCE_SERVER_ERA_ENV, server_era.label());
         Ok(self.runner.run_async(&up).await?)
     }
 
-    fn conformance_fixture_endpoint(&self, topology: StackMode) -> AppResult<url::Url> {
+    pub(super) fn conformance_fixture_endpoint(&self, topology: StackMode) -> AppResult<url::Url> {
         let command = self.conformance_compose_project(topology).command([
             "port",
             OFFICIAL_CONFORMANCE_SERVICE,

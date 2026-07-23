@@ -1,7 +1,7 @@
 # Build metadata overlay for cf-dataplane images built by the harness.
 
 services:
-  cf-dataplane:
+  dataplane:
     build:
       context: ${CF_DATAPLANE_DIR:?Set CF_DATAPLANE_DIR to the cf-dataplane checkout}
       dockerfile: docker/dev.Dockerfile

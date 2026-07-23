@@ -6,7 +6,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::StackMode;
-use crate::compose::ComposeProject;
+use crate::compose::{ComposeProject, SERVICE_DISPLAY_NAMES};
 use crate::process::CommandSpec;
 
 /// User-selected Compose image build policy.
@@ -52,7 +52,7 @@ impl std::error::Error for BuildModeParseError {}
 /// Runtime facts needed to resolve automatic image builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildInputs {
-    pub controlplane_image_explicit: bool,
+    pub controlplane_image_prebuilt: bool,
     pub controlplane_image_present: bool,
     pub controlplane_checkout_revision: Option<String>,
     pub controlplane_image_revision: Option<String>,
@@ -88,8 +88,8 @@ pub fn resolve_build(mode: BuildMode, inputs: &BuildInputs) -> BuildDecision {
 
 fn resolve_auto_build(inputs: &BuildInputs) -> BuildDecision {
     let mut reasons = Vec::new();
-    if inputs.controlplane_image_explicit {
-        reasons.push("explicit cf-controlplane image set".to_owned());
+    if inputs.controlplane_image_prebuilt {
+        reasons.push("prebuilt cf-controlplane image selected".to_owned());
     } else if !inputs.controlplane_image_present {
         reasons.push("cf-controlplane image missing".to_owned());
     } else if !matching_revision(
@@ -99,7 +99,7 @@ fn resolve_auto_build(inputs: &BuildInputs) -> BuildDecision {
         reasons.push("cf-controlplane image revision is stale".to_owned());
     }
 
-    let controlplane_build = !inputs.controlplane_image_explicit
+    let controlplane_build = !inputs.controlplane_image_prebuilt
         && (!inputs.controlplane_image_present
             || !matching_revision(
                 inputs.controlplane_checkout_revision.as_deref(),
@@ -251,13 +251,7 @@ impl StackCommandPlan {
         I: IntoIterator<Item = OsString>,
     {
         let mut arguments = vec![OsString::from("logs"), OsString::from("-f")];
-        arguments.extend(services.into_iter().map(|service| {
-            if service == "cf-controlplane" {
-                OsString::from("gateway")
-            } else {
-                service
-            }
-        }));
+        arguments.extend(services.into_iter().map(compose_service_name));
         Self {
             command: project.command(arguments),
         }
@@ -292,6 +286,18 @@ impl StackCommandPlan {
     }
 }
 
+fn compose_service_name(service: OsString) -> OsString {
+    let Some(display_name) = service.to_str() else {
+        return service;
+    };
+    SERVICE_DISPLAY_NAMES
+        .iter()
+        .find_map(|&(compose_name, public_name)| {
+            (display_name == public_name).then(|| OsString::from(compose_name))
+        })
+        .unwrap_or(service)
+}
+
 /// Captured runtime state for one Compose service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSnapshot {
@@ -308,7 +314,7 @@ pub struct FreshnessSnapshot {
     pub services: BTreeMap<String, ServiceSnapshot>,
     pub controlplane_checkout_revision: Option<String>,
     pub dataplane_checkout_revision: Option<String>,
-    pub controlplane_image_explicit: bool,
+    pub controlplane_image_prebuilt: bool,
     pub dataplane_source_enabled: bool,
     pub expected_controlplane_image: String,
     pub expected_dataplane_image: String,
@@ -330,7 +336,7 @@ impl FreshnessSnapshot {
     pub fn evaluate(&self) -> StackFreshness {
         for service in [
             "gateway",
-            "cf-dataplane",
+            "dataplane",
             "nginx",
             "postgres",
             "pgbouncer",
@@ -364,7 +370,7 @@ impl FreshnessSnapshot {
                 "cf-controlplane",
             ),
             (
-                "cf-dataplane",
+                "dataplane",
                 self.expected_dataplane_image.as_str(),
                 "cf-dataplane",
             ),
@@ -389,7 +395,7 @@ impl FreshnessSnapshot {
             }
         }
 
-        if !self.controlplane_image_explicit
+        if !self.controlplane_image_prebuilt
             && !service_revision_matches(
                 &self.services,
                 "gateway",
@@ -401,7 +407,7 @@ impl FreshnessSnapshot {
         if self.dataplane_source_enabled
             && !service_revision_matches(
                 &self.services,
-                "cf-dataplane",
+                "dataplane",
                 self.dataplane_checkout_revision.as_deref(),
             )
         {

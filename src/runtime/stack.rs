@@ -5,7 +5,17 @@ use super::*;
 impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) async fn execute_stack(&self, action: StackAction) -> AppResult<()> {
         match action {
-            StackAction::Up { topology, fresh } => self.stack_up(topology, fresh).await,
+            StackAction::Up { topology, fresh } => {
+                self.stack_up(topology, fresh).await?;
+                eprintln!(
+                    "{}",
+                    OutputStyle::stderr().info("Starting the pinned MCP conformance server.")
+                );
+                self.start_conformance_service(topology, ConformanceServerEra::default())
+                    .await?;
+                let conformance_endpoint = self.conformance_fixture_endpoint(topology)?;
+                self.print_stack_endpoints(topology, &conformance_endpoint)
+            }
             StackAction::Down { topology, volumes } => self.cleanup(
                 topology,
                 if volumes {
@@ -16,7 +26,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             ),
             StackAction::Status(mode) => {
                 self.require_mode_sources(mode)?;
-                let command = StackCommandPlan::status(self.compose_project(mode));
+                let command = StackCommandPlan::status(self.conformance_compose_project(mode));
                 Ok(self.runner.run(&self.compose_environment(
                     command.command().clone(),
                     mode,
@@ -28,7 +38,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 services,
             } => {
                 self.require_mode_sources(mode)?;
-                let command = StackCommandPlan::logs(self.compose_project(mode), services);
+                let command =
+                    StackCommandPlan::logs(self.conformance_compose_project(mode), services);
                 Ok(self.runner.run(&self.compose_environment(
                     command.command().clone(),
                     mode,
@@ -40,7 +51,8 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 if mode == StackMode::Dataplane {
                     self.validate_compose_contract()?;
                 }
-                let command = StackCommandPlan::config(self.compose_project(mode), mode);
+                let command =
+                    StackCommandPlan::config(self.conformance_compose_project(mode), mode);
                 Ok(self.runner.run(&self.compose_environment(
                     command.command().clone(),
                     mode,
@@ -115,17 +127,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     async fn wait_for_public_endpoint(&self, mode: StackMode) -> AppResult<()> {
-        let endpoint = GatewayClient::builder(
-            gateway_topology(mode),
-            self.base_url()?,
-            self.default_server_id(),
-            "readiness-probe",
-        )
-        .build()
-        .context("failed to construct the public MCP readiness endpoint")
-        .map_err(AppFailure::from)?
-        .endpoint()
-        .clone();
+        let endpoint = self.public_mcp_endpoint(mode)?;
         eprintln!(
             "{}",
             OutputStyle::stderr().info(&format!(
@@ -135,6 +137,33 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             ))
         );
         wait_for_http_endpoint(&endpoint, mode, STACK_READY_TIMEOUT).await
+    }
+
+    fn public_mcp_endpoint(&self, mode: StackMode) -> AppResult<url::Url> {
+        GatewayClient::builder(
+            gateway_topology(mode),
+            self.base_url()?,
+            self.default_server_id(),
+            "readiness-probe",
+        )
+        .build()
+        .context("failed to construct the public MCP endpoint")
+        .map_err(AppFailure::from)
+        .map(|client| client.endpoint().clone())
+    }
+
+    fn print_stack_endpoints(
+        &self,
+        mode: StackMode,
+        conformance_endpoint: &url::Url,
+    ) -> AppResult<()> {
+        let summary = format_stack_endpoint_summary(
+            self.base_url()?,
+            &self.public_mcp_endpoint(mode)?,
+            conformance_endpoint,
+        );
+        println!("{}", OutputStyle::stdout().info(&summary));
+        Ok(())
     }
 
     pub(super) fn compose_project(&self, mode: StackMode) -> ComposeProject {
@@ -152,6 +181,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 self.environment_flag("CONTROLPLANE_ENABLE_SSO", false),
             ),
         }
+    }
+
+    pub(super) fn conformance_compose_project(&self, mode: StackMode) -> ComposeProject {
+        self.compose_project(mode)
+            .with_conformance_fixture(self.config.root())
     }
 
     pub(super) fn compose_environment(
@@ -196,6 +230,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             )
             .env("CF_DATAPLANE_PLATFORM", self.dataplane_platform()?)
             .env("JWT_SECRET_KEY", self.config.jwt_secret_key().value.clone())
+            .env(
+                "AUTH_ENCRYPTION_SECRET",
+                self.config.auth_encryption_secret().value.clone(),
+            )
             .env("MCP_CLI_BASE_URL", self.config.base_url().value.clone())
             .env(
                 "PLATFORM_ADMIN_EMAIL",
@@ -367,7 +405,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let decision = resolve_build(
             mode_setting,
             &BuildInputs {
-                controlplane_image_explicit: self.config.controlplane_image().is_explicitly_set(),
+                controlplane_image_prebuilt: self.config.controlplane_image().is_prebuilt(),
                 controlplane_image_present,
                 controlplane_checkout_revision,
                 controlplane_image_revision,
@@ -402,7 +440,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 
     fn pull_images(&self, mode: StackMode) -> AppResult<()> {
-        if self.config.controlplane_image().is_explicitly_set() {
+        if self.config.controlplane_image().is_prebuilt() {
             self.pull_if_changed(
                 "cf-controlplane",
                 self.config.controlplane_image().resolved(),
@@ -495,7 +533,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         let mut services = std::collections::BTreeMap::new();
         for service in [
             "gateway",
-            "cf-dataplane",
+            "dataplane",
             "nginx",
             "postgres",
             "pgbouncer",
@@ -517,7 +555,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .git_optional(self.config.controlplane_dir(), ["rev-parse", "HEAD"]),
             dataplane_checkout_revision: self
                 .git_optional(self.config.dataplane_dir(), ["rev-parse", "HEAD"]),
-            controlplane_image_explicit: self.config.controlplane_image().is_explicitly_set(),
+            controlplane_image_prebuilt: self.config.controlplane_image().is_prebuilt(),
             dataplane_source_enabled: !self.config.dataplane_ref().value.is_empty(),
             expected_controlplane_image: required_text(
                 self.config.controlplane_image().resolved(),
@@ -636,9 +674,10 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 .join("docker-compose.yml")
                 .is_file()
             {
-                let project =
-                    self.compose_project(mode)
-                        .with_profiles(["testing", "inspector", "sso"]);
+                let project = self
+                    .compose_project(mode)
+                    .with_profiles(["testing", "inspector", "sso"])
+                    .with_conformance_fixture(self.config.root());
                 let command = StackCommandPlan::cleanup(project, kind);
                 match self.compose_environment(command.command().clone(), mode, false) {
                     Ok(command) => {
@@ -760,5 +799,35 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) fn environment_flag(&self, key: &str, default: bool) -> bool {
         self.environment_text(key)
             .map_or(default, |value| matches!(value, "true" | "1"))
+    }
+}
+
+fn format_stack_endpoint_summary(
+    public_origin: &str,
+    public_mcp_endpoint: &url::Url,
+    conformance_endpoint: &url::Url,
+) -> String {
+    format!(
+        "Stack endpoints:\n  Gateway/API: {public_origin}\n  Public MCP: {public_mcp_endpoint}\n  Conformance MCP (direct): {conformance_endpoint}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_endpoint_summary_lists_public_and_conformance_addresses() {
+        let public_mcp =
+            url::Url::parse("http://127.0.0.1:8080/servers/server-id/mcp").expect("public URL");
+        let conformance = url::Url::parse("http://127.0.0.1:49152/mcp").expect("conformance URL");
+
+        let summary =
+            format_stack_endpoint_summary("http://127.0.0.1:8080", &public_mcp, &conformance);
+
+        assert_eq!(
+            summary,
+            "Stack endpoints:\n  Gateway/API: http://127.0.0.1:8080\n  Public MCP: http://127.0.0.1:8080/servers/server-id/mcp\n  Conformance MCP (direct): http://127.0.0.1:49152/mcp"
+        );
     }
 }

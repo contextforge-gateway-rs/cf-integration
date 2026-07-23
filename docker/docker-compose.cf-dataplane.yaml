@@ -4,7 +4,7 @@
 #   export CF_INTEGRATION_ROOT="$PWD"
 #   export CF_DATAPLANE_IMAGE="ghcr.io/contextforge-gateway-rs/contextforge-gateway-rs:0.1.0"
 #   export CF_DATAPLANE_PLATFORM="linux/amd64"
-#   # Or let `cf-integration stack up --mode dataplane` resolve `auto`.
+#   # Or let `cf-integration stack up --topology dataplane` resolve `auto`.
 #   docker compose \
 #     -f /path/to/cf-controlplane/docker-compose.yml \
 #     -f "$CF_INTEGRATION_ROOT/docker/docker-compose.cf-dataplane.yaml" \
@@ -35,11 +35,16 @@ services:
       # older images ignore the variable (60s behavior).
       DATAPLANE_PUBLISHER_INTERVAL_SECONDS: ${CF_DATAPLANE_PUBLISHER_INTERVAL_SECONDS:-2}
 
-  cf-dataplane:
+  dataplane:
     image: ${CF_DATAPLANE_IMAGE:?Set CF_DATAPLANE_IMAGE to the cf-dataplane image tag}
     platform: ${CF_DATAPLANE_PLATFORM:?Set CF_DATAPLANE_PLATFORM to the cf-dataplane image platform}
+    labels:
+      name: cf-dataplane
     restart: unless-stopped
-    networks: [mcpnet]
+    networks:
+      mcpnet:
+        aliases:
+          - cf-dataplane
     expose:
       - "4445"
     environment:
@@ -73,5 +78,5 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-      cf-dataplane:
+      dataplane:
         condition: service_started

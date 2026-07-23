@@ -1,14 +1,87 @@
-# Shared build metadata overlay for cf-controlplane images built by the harness.
+# Shared image and container metadata for cf-controlplane services.
 
 services:
   gateway:
+    labels:
+      name: cf-controlplane
     build:
       labels:
         org.opencontainers.image.revision: ${CF_CONTROLPLANE_CHECKOUT_REVISION:-unknown}
         org.opencontainers.image.ref.name: ${CF_CONTROLPLANE_CHECKOUT_REF:-unknown}
 
   migration:
+    labels:
+      name: cf-migration
     build:
       labels:
         org.opencontainers.image.revision: ${CF_CONTROLPLANE_CHECKOUT_REVISION:-unknown}
         org.opencontainers.image.ref.name: ${CF_CONTROLPLANE_CHECKOUT_REF:-unknown}
+
+  register_fast_time:
+    labels:
+      name: cf-register-fast-time
+
+  fast_time_server:
+    image: ${FAST_TIME_IMAGE:-ghcr.io/ibm/cfex-mcp-fast-time-server:latest}
+    labels:
+      name: cf-fast-time-server
+    # The current Rust image configures its listener and logging through
+    # BIND_ADDRESS and RUST_LOG. Clear the obsolete Go CLI arguments inherited
+    # from the control-plane Compose file.
+    command: []
+
+  nginx:
+    labels:
+      name: cf-nginx
+
+  postgres:
+    labels:
+      name: cf-postgres
+
+  pgbouncer:
+    labels:
+      name: cf-pgbouncer
+
+  redis:
+    labels:
+      name: cf-redis
+
+  locust:
+    labels:
+      name: cf-locust
+
+  locust_worker:
+    labels:
+      name: cf-locust-worker
+
+  locust_token:
+    labels:
+      name: cf-locust-token
+
+  fast_test_server:
+    labels:
+      name: cf-fast-test-server
+
+  register_fast_test:
+    labels:
+      name: cf-register-fast-test
+
+  a2a_echo_agent:
+    labels:
+      name: cf-a2a-echo-agent
+
+  a2a_echo_agent_v0_3_0:
+    labels:
+      name: cf-a2a-echo-agent-v0-3-0
+
+  register_a2a_echo:
+    labels:
+      name: cf-register-a2a-echo
+
+  mcp_inspector:
+    labels:
+      name: cf-mcp-inspector
+
+  keycloak:
+    labels:
+      name: cf-keycloak

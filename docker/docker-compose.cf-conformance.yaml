@@ -5,6 +5,8 @@ services:
   mcp_conformance_server:
     profiles: ["conformance"]
     image: cf-integration/mcp-conformance-server:0.2.0-alpha.9
+    labels:
+      name: cf-conformance-server
     build:
       context: ${CF_INTEGRATION_ROOT:?Set CF_INTEGRATION_ROOT to the integration harness root}
       dockerfile: docker/mcp-conformance-server.Dockerfile

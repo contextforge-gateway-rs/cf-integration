@@ -50,9 +50,11 @@ The workspace has one application package and four internal libraries:
   and three-lane comparison report
 - `cf-integration-load`: Locust and Goose load engines
 
-The official TypeScript fixture is exclusively for conformance. Fast Time
-remains the ordinary probe and load fixture; upstream live MCP tests also start
-and register the profile-gated Fast Test server on demand.
+The official TypeScript fixture is the conformance reference target. An
+explicit `stack up` starts it for direct MCP access; conformance runs still own
+their isolated fixture lifecycle. Fast Time remains the ordinary probe and load
+fixture, and upstream live MCP tests start and register the profile-gated Fast
+Test server on demand.
 
 ## Lanes and protocol versions
 
@@ -134,13 +136,21 @@ cf-integration stack up --topology dataplane --fresh
 cf-integration stack down --topology all
 cf-integration stack down --topology all --volumes
 cf-integration stack status --topology dataplane
-cf-integration stack logs --topology dataplane nginx cf-dataplane
+cf-integration stack logs --topology dataplane cf-nginx cf-dataplane
 cf-integration stack config --topology dataplane
 ```
 
 `stack down --volumes` is the explicit destructive cleanup operation.
 Diagnostic commands use the harness Compose project and overlays so callers do
-not need to reconstruct its Compose invocation.
+not need to reconstruct its Compose invocation. The dataplane topology defaults
+to the `cf` Compose project, so Docker resources use the `cf-*` prefix.
+Container viewers expose concise `cf-*` display names, and `stack logs` accepts
+those names while translating them to the underlying Compose service keys.
+
+After readiness succeeds, `stack up` prints the public gateway/API origin, the
+mode-correct public MCP endpoint, and the direct loopback address of the pinned
+conformance server. Its host port is assigned by Docker and can change after a
+fresh start.
 
 ### Probe
 
@@ -340,7 +350,8 @@ CF_MCP_STACK_MODE=dataplane
 CF_INTEGRATION_DIR=.integration
 
 CF_CONTROLPLANE_REPO=https://github.com/IBM/mcp-context-forge.git
-CF_CONTROLPLANE_REF=main
+CF_CONTROLPLANE_REF=v1.0.6
+CF_CONTROLPLANE_IMAGE=ghcr.io/ibm/mcp-context-forge:latest
 CF_CONTROLPLANE_VERSION=latest
 
 CF_DATAPLANE_REPO=https://github.com/contextforge-gateway-rs/contextforge-gateway-rs.git
@@ -357,14 +368,20 @@ MCP_PROTOCOL_VERSION=2025-11-25
 NGINX_PORT=8080
 ```
 
-Published dataplane images are the default. Set `CF_DATAPLANE_REF` to build an
-explicit local dataplane ref. `CF_COMPOSE_BUILD=auto` rebuilds missing or
-revision-stale local images; `true` always builds and `false` never builds.
+Published control-plane and dataplane images are the defaults. The control-plane
+checkout defaults to the release matching the current `latest` image. Set
+`CF_DATAPLANE_REF` to build an explicit local dataplane ref.
+`CF_COMPOSE_BUILD=auto` pulls or reuses prebuilt images and rebuilds a missing
+or revision-stale source dataplane; `true` always builds and `false` never
+builds.
 
 Token and endpoint overrides used by probe, load, and debug commands:
 
 ```bash
+# Optional overrides. Without them, stable random local values are generated
+# once under CF_INTEGRATION_DIR.
 JWT_SECRET_KEY=<integration-secret>
+AUTH_ENCRYPTION_SECRET=<integration-encryption-secret>
 MCP_JWT_SUBJECT=admin@example.com
 MCPGATEWAY_BEARER_TOKEN=<pre-minted-token>
 MCP_SERVER_ID=<virtual-server-id>

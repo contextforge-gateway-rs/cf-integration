@@ -41,7 +41,7 @@ fn ends_with(actual: &[OsString], expected: &[&str]) -> bool {
 
 fn auto_inputs() -> BuildInputs {
     BuildInputs {
-        controlplane_image_explicit: false,
+        controlplane_image_prebuilt: false,
         controlplane_image_present: true,
         controlplane_checkout_revision: Some("cp-head".to_owned()),
         controlplane_image_revision: Some("cp-head".to_owned()),
@@ -94,7 +94,7 @@ fn auto_builds_missing_or_stale_controlplane_unless_image_is_explicit() {
     inputs.controlplane_image_revision = Some("old".to_owned());
     assert!(resolve_build(BuildMode::Auto, &inputs).build);
 
-    inputs.controlplane_image_explicit = true;
+    inputs.controlplane_image_prebuilt = true;
     assert!(!resolve_build(BuildMode::Auto, &inputs).build);
 }
 
@@ -202,9 +202,55 @@ fn cleanup_status_logs_and_config_use_typed_compose_commands() {
     assert!(ends_with(
         &args(StackCommandPlan::logs(
             dataplane_project.clone(),
-            [OsString::from("cf-controlplane"), OsString::from("redis")]
+            [
+                OsString::from("cf-controlplane"),
+                OsString::from("cf-migration"),
+                OsString::from("cf-register-fast-time"),
+                OsString::from("cf-fast-time-server"),
+                OsString::from("cf-nginx"),
+                OsString::from("cf-postgres"),
+                OsString::from("cf-pgbouncer"),
+                OsString::from("cf-redis"),
+                OsString::from("cf-dataplane"),
+                OsString::from("cf-locust"),
+                OsString::from("cf-locust-worker"),
+                OsString::from("cf-locust-token"),
+                OsString::from("cf-fast-test-server"),
+                OsString::from("cf-register-fast-test"),
+                OsString::from("cf-a2a-echo-agent"),
+                OsString::from("cf-a2a-echo-agent-v0-3-0"),
+                OsString::from("cf-register-a2a-echo"),
+                OsString::from("cf-mcp-inspector"),
+                OsString::from("cf-keycloak"),
+                OsString::from("cf-conformance-server"),
+                OsString::from("custom-service"),
+            ]
         )),
-        &["logs", "-f", "gateway", "redis"]
+        &[
+            "logs",
+            "-f",
+            "gateway",
+            "migration",
+            "register_fast_time",
+            "fast_time_server",
+            "nginx",
+            "postgres",
+            "pgbouncer",
+            "redis",
+            "dataplane",
+            "locust",
+            "locust_worker",
+            "locust_token",
+            "fast_test_server",
+            "register_fast_test",
+            "a2a_echo_agent",
+            "a2a_echo_agent_v0_3_0",
+            "register_a2a_echo",
+            "mcp_inspector",
+            "keycloak",
+            "mcp_conformance_server",
+            "custom-service",
+        ]
     ));
     assert!(ends_with(
         &args(StackCommandPlan::config(
@@ -231,7 +277,7 @@ fn cleanup_status_logs_and_config_use_typed_compose_commands() {
 fn current_snapshot() -> FreshnessSnapshot {
     let running = [
         ("gateway", "cp-image", Some("cp-head")),
-        ("cf-dataplane", "dp-image", Some("dp-head")),
+        ("dataplane", "dp-image", Some("dp-head")),
         ("nginx", "nginx", None),
         ("postgres", "postgres", None),
         ("pgbouncer", "pgbouncer", None),
@@ -267,7 +313,7 @@ fn current_snapshot() -> FreshnessSnapshot {
         services: running.chain(completed).collect::<BTreeMap<_, _>>(),
         controlplane_checkout_revision: Some("cp-head".to_owned()),
         dataplane_checkout_revision: Some("dp-head".to_owned()),
-        controlplane_image_explicit: false,
+        controlplane_image_prebuilt: false,
         dataplane_source_enabled: true,
         expected_controlplane_image: "cp-image".to_owned(),
         expected_dataplane_image: "dp-image".to_owned(),
@@ -344,13 +390,13 @@ fn revision_checks_are_conditional_on_image_source() {
         snapshot.evaluate(),
         StackFreshness::Stale("cf-controlplane branch revision differs".to_owned())
     );
-    snapshot.controlplane_image_explicit = true;
+    snapshot.controlplane_image_prebuilt = true;
     assert_eq!(snapshot.evaluate(), StackFreshness::Current);
 
     let mut snapshot = current_snapshot();
     snapshot
         .services
-        .get_mut("cf-dataplane")
+        .get_mut("dataplane")
         .expect("dataplane")
         .image_revision = Some("old".to_owned());
     assert_eq!(
