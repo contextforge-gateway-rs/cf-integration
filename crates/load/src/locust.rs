@@ -46,8 +46,37 @@ impl LocustCommand {
         bearer_token: &str,
         server_id: Option<&str>,
     ) -> Result<Self> {
+        let protocol_version =
+            configured_text(config, "MCP_PROTOCOL_VERSION").unwrap_or(PROTOCOL_VERSION);
+        Self::new_with_protocol_version(
+            config,
+            mode,
+            settings,
+            bearer_token,
+            server_id,
+            protocol_version,
+        )
+    }
+
+    /// Builds a Locust invocation with an explicit MCP protocol version.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`] and rejects an empty protocol
+    /// version.
+    pub fn new_with_protocol_version(
+        config: &AppConfig,
+        mode: StackMode,
+        settings: &LoadSettings,
+        bearer_token: &str,
+        server_id: Option<&str>,
+        protocol_version: &str,
+    ) -> Result<Self> {
         if bearer_token.trim().is_empty() {
             bail!("Locust bearer token must not be empty");
+        }
+        if protocol_version.trim().is_empty() {
+            bail!("Locust MCP protocol version must not be empty");
         }
         if mode == StackMode::Dataplane && server_id.is_none_or(|value| value.trim().is_empty()) {
             bail!("dataplane Locust server ID must not be empty");
@@ -142,18 +171,15 @@ impl LocustCommand {
             .env("LOCUST_USERS", settings.users().get().to_string())
             .env("LOCUST_SPAWN_RATE", settings.spawn_rate().to_string())
             .env("LOCUST_RUN_TIME", settings.run_time())
-            .env(REQUEST_TIMEOUT_ENV, request_timeout.to_string());
+            .env(REQUEST_TIMEOUT_ENV, request_timeout.to_string())
+            .env("MCP_PROTOCOL_VERSION", protocol_version);
         match mode {
             StackMode::Dataplane => {
                 command = command.env("MCP_SERVER_ID", server_id.unwrap_or_default());
             }
             StackMode::Controlplane => {
-                let protocol_version =
-                    configured_text(config, "MCP_PROTOCOL_VERSION").unwrap_or(PROTOCOL_VERSION);
                 let tool_names = configured_text(config, "MCP_TOOL_NAMES").unwrap_or("");
-                command = command
-                    .env("MCP_PROTOCOL_VERSION", protocol_version)
-                    .env("MCP_TOOL_NAMES", tool_names);
+                command = command.env("MCP_TOOL_NAMES", tool_names);
             }
         }
 

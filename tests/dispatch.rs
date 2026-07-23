@@ -2,9 +2,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use cf_integration::app::{
-    Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, resolve_action,
+    Action, ConformanceAction, DebugAction, LiveLane, ResolvedLoadArgs, StackAction, resolve_action,
 };
-use cf_integration::cli::{Cli, LiveGroup, TokenKind, TopologySelection};
+use cf_integration::cli::{Cli, LiveGroup, ProtocolVersion, TokenKind, TopologySelection};
 use cf_integration_compliance::conformance::{ConformanceServerEra, ConformanceTarget};
 use cf_integration_load::{LoadEngine, LoadRequest};
 use cf_integration_platform::StackMode;
@@ -24,21 +24,39 @@ fn action(arguments: &[&str], environment: &[(&str, &str)]) -> Action {
 fn topology_precedence_is_cli_then_environment_then_dataplane() {
     assert_eq!(
         action(&["cf-integration", "probe"], &[]),
-        Action::Probe(StackMode::Dataplane)
+        Action::Probe {
+            topology: StackMode::Dataplane,
+            protocol_version: ProtocolVersion::default(),
+        }
     );
     assert_eq!(
         action(
             &["cf-integration", "probe"],
             &[("CF_MCP_STACK_MODE", "controlplane")],
         ),
-        Action::Probe(StackMode::Controlplane)
+        Action::Probe {
+            topology: StackMode::Controlplane,
+            protocol_version: ProtocolVersion::default(),
+        }
     );
     assert_eq!(
         action(
-            &["cf-integration", "probe", "--topology", "dataplane",],
+            &[
+                "cf-integration",
+                "probe",
+                "--lane",
+                "dataplane",
+                "--protocol-version",
+                "2025-06-18",
+            ],
             &[("CF_MCP_STACK_MODE", "invalid")],
         ),
-        Action::Probe(StackMode::Dataplane)
+        Action::Probe {
+            topology: StackMode::Dataplane,
+            protocol_version: "2025-06-18"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version"),
+        }
     );
 }
 
@@ -87,8 +105,10 @@ fn load_preserves_both_engines_and_explicit_settings() {
             &[
                 "cf-integration",
                 "load",
-                "--topology",
+                "--lane",
                 "controlplane",
+                "--protocol-version",
+                "2025-06-18",
                 "--engine",
                 "locust",
                 "--smoke",
@@ -103,6 +123,9 @@ fn load_preserves_both_engines_and_explicit_settings() {
         ),
         Action::Load(ResolvedLoadArgs {
             topology: StackMode::Controlplane,
+            protocol_version: "2025-06-18"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version"),
             request: LoadRequest {
                 engine: LoadEngine::Locust,
                 smoke: true,
@@ -115,17 +138,96 @@ fn load_preserves_both_engines_and_explicit_settings() {
 }
 
 #[test]
-fn live_resolves_topology_and_group() {
+fn live_resolves_lane_group_and_protocol_version() {
     assert_eq!(
         action(
             &["cf-integration", "live", "--group", "mcp"],
-            &[("CF_MCP_STACK_MODE", "controlplane")],
+            &[
+                ("CF_MCP_STACK_MODE", "controlplane"),
+                ("MCP_PROTOCOL_VERSION", "2025-06-18"),
+            ],
         ),
         Action::Live {
-            topology: StackMode::Controlplane,
+            lane: LiveLane::Controlplane,
             group: LiveGroup::Mcp,
+            protocol_version: "2025-06-18"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version"),
         }
     );
+}
+
+#[test]
+fn live_fixture_lane_bypasses_topology_and_cli_version_wins() {
+    assert_eq!(
+        action(
+            &[
+                "cf-integration",
+                "live",
+                "--lane",
+                "fixture-direct",
+                "--group",
+                "protocol",
+                "--protocol-version",
+                "2025-03-26",
+            ],
+            &[
+                ("CF_MCP_STACK_MODE", "invalid"),
+                ("MCP_PROTOCOL_VERSION", "2025-06-18"),
+            ],
+        ),
+        Action::Live {
+            lane: LiveLane::Fixture,
+            group: LiveGroup::Protocol,
+            protocol_version: "2025-03-26"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version"),
+        }
+    );
+}
+
+#[test]
+fn live_fixture_lane_rejects_non_protocol_groups() {
+    let cli = Cli::try_parse_from([
+        "cf-integration",
+        "live",
+        "--lane",
+        "fixture-direct",
+        "--group",
+        "mcp",
+    ])
+    .expect("CLI should parse before cross-field validation");
+    let error = resolve_action(cli, &Environment::new())
+        .expect_err("fixture lane should require protocol group");
+    assert!(
+        error
+            .to_string()
+            .contains("--lane fixture-direct requires --group protocol")
+    );
+}
+
+#[test]
+fn fixture_lane_is_rejected_by_workflows_without_a_direct_fixture() {
+    for arguments in [
+        vec!["cf-integration", "probe", "--lane", "fixture-direct"],
+        vec!["cf-integration", "load", "--lane", "fixture-direct"],
+        vec![
+            "cf-integration",
+            "debug",
+            "inspect",
+            "--lane",
+            "fixture-direct",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments).expect("shared lane syntax should parse");
+        let error = resolve_action(cli, &Environment::new())
+            .expect_err("fixture lane should require a direct-fixture workflow");
+        assert!(
+            error
+                .to_string()
+                .contains("only supported by live and conformance run")
+        );
+    }
 }
 
 #[test]
@@ -159,7 +261,7 @@ fn conformance_lanes_are_deduplicated_and_normalized() {
                 "fixture-direct",
                 "--lane",
                 "dataplane",
-                "--spec-version",
+                "--protocol-version",
                 "2025-06-18",
                 "--server-era",
                 "modern",
@@ -225,8 +327,10 @@ fn debug_token_and_inspector_remain_explicit_non_gate_operations() {
                 "cf-integration",
                 "debug",
                 "inspect",
-                "--topology",
+                "--lane",
                 "controlplane",
+                "--protocol-version",
+                "2025-06-18",
                 "--method",
                 "prompts/list",
             ],
@@ -234,6 +338,9 @@ fn debug_token_and_inspector_remain_explicit_non_gate_operations() {
         ),
         Action::Debug(DebugAction::Inspect {
             topology: StackMode::Controlplane,
+            protocol_version: "2025-06-18"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version"),
             method: "prompts/list".to_owned(),
             server_id: None,
         })

@@ -54,27 +54,36 @@ The official TypeScript fixture is exclusively for conformance. Fast Time
 remains the ordinary probe and load fixture; upstream live MCP tests also start
 and register the profile-gated Fast Test server on demand.
 
-## Topologies
+## Lanes and protocol versions
 
-`--topology controlplane` targets the stock control-plane topology and raw
-`/mcp`. `--topology dataplane` targets nginx, the Rust dataplane, and the
-virtual-server route.
+Probe, load, live, and Inspector use the same target options:
+`--lane controlplane|dataplane` and `--protocol-version YYYY-MM-DD`.
+`controlplane` targets the stock control-plane topology and raw `/mcp`;
+`dataplane` targets nginx, the Rust dataplane, and the virtual-server route.
 
-Single-topology commands resolve their topology in this order:
+Single-lane commands resolve their lane in this order:
 
-1. explicit `--topology`;
+1. explicit `--lane`;
 2. `CF_MCP_STACK_MODE`;
 3. `dataplane`.
 
-Cleanup defaults to both topologies. Conformance does not use topology
-selection: it exposes the three independently measured lanes directly.
+They resolve the protocol version from explicit `--protocol-version`, then
+`MCP_PROTOCOL_VERSION`, then `2025-11-25`. Live protocol tests and conformance
+also accept `fixture-direct`; other workflows reject it because they have no
+direct-fixture execution path. Conformance defaults to all three lanes and its
+pinned `2026-07-28` protocol version.
+
+`--topology` remains a compatibility alias for `--lane` on workflows.
+Conformance also retains `--client-version` and `--spec-version` as aliases for
+`--protocol-version`. Stack lifecycle commands continue to use `--topology`
+because they operate on physical stacks, not test lanes.
 
 ## Quick start
 
 Probe the dataplane public MCP route:
 
 ```bash
-cf-integration probe --topology dataplane
+cf-integration probe --lane dataplane --protocol-version 2025-11-25
 ```
 
 `stack up` synchronizes the required source checkouts, validates the Compose
@@ -82,10 +91,11 @@ contract, resolves local builds or published images, starts the selected
 topology, and waits for its public endpoint. It preserves existing volumes by
 default. Use `--fresh` when state must be discarded.
 
-Probe, load, live-test, and Inspector commands start their selected stack, wait
-for the fixture to be ready, and stop the stack when the command succeeds or
-fails. Explicit `stack` commands remain available when a persistent environment
-is needed.
+Probe, load, routed live-test, and Inspector commands start their selected
+stack, wait for the fixture to be ready, and stop the stack when the command
+succeeds or fails. The direct live fixture lane does not start a stack.
+Explicit `stack` commands remain available when a persistent environment is
+needed.
 
 The Fast Time backend is registered as virtual server
 `9779b6698cbd4b4995ee04a4fab38737`, so probe and load commands need no manual
@@ -135,7 +145,7 @@ not need to reconstruct its Compose invocation.
 ### Probe
 
 ```bash
-cf-integration probe --topology dataplane
+cf-integration probe --lane dataplane --protocol-version 2025-11-25
 ```
 
 The probe checks unauthenticated rejection, initialization,
@@ -148,12 +158,14 @@ The probe checks unauthenticated rejection, initialization,
 Both load engines exercise the same MCP lifecycle and remain first-class:
 
 ```bash
-cf-integration load --topology dataplane --engine locust --smoke
-cf-integration load --topology dataplane --engine goose --smoke
+cf-integration load --lane dataplane --protocol-version 2025-11-25 \
+  --engine locust --smoke
+cf-integration load --lane dataplane --protocol-version 2025-11-25 \
+  --engine goose --smoke
 
-cf-integration load --topology dataplane --engine locust \
+cf-integration load --lane dataplane --engine locust \
   --users 20 --spawn-rate 5 --run-time 2m
-cf-integration load --topology dataplane --engine goose \
+cf-integration load --lane dataplane --engine goose \
   --users 20 --spawn-rate 5 --run-time 2m
 ```
 
@@ -173,16 +185,28 @@ leakage.
 Run the control-plane repository's live gateway tests against either topology:
 
 ```bash
-cf-integration live --topology dataplane --group mcp
-cf-integration live --topology dataplane --group rbac
-cf-integration live --topology dataplane --group protocol
-cf-integration live --topology dataplane --group all
+cf-integration live --lane dataplane --group mcp
+cf-integration live --lane dataplane --group rbac
+cf-integration live --lane dataplane --group protocol
+cf-integration live --lane dataplane --group all
+
+# Run the upstream protocol suite directly against its reference fixture.
+cf-integration live \
+  --lane fixture-direct \
+  --group protocol \
+  --protocol-version 2025-06-18
 ```
 
 The `mcp` and `all` groups start the upstream profile-gated `fast_test_server`,
 run its one-shot registration job, and, for the dataplane topology, wait until
 the publisher snapshot contains its fixed virtual server before launching the
 tests. The base stack remains unchanged when other workflows run.
+
+`--lane fixture-direct` is valid with `--group protocol` and runs the upstream
+`test-protocol-compliance-reference` target without a gateway stack. The
+selected date-formatted version is applied to MCP SDK initialization, and the
+live run fails with the installed SDK's supported-version list when that SDK
+cannot emit it.
 
 ## Official MCP conformance
 
@@ -209,9 +233,8 @@ It always:
 - removes temporary API resources, fixture services, and stacks;
 - writes a comparison report even when a lane reports protocol failures.
 
-The official runner's client version and the upstream fixture's server era are
-independent. `--client-version` is the primary option; `--spec-version` remains
-supported as an alias. The fixture defaults to `--server-era dual`, preserving the
+The official runner's protocol version and the upstream fixture's server era
+are independent. The fixture defaults to `--server-era dual`, preserving the
 existing behavior where it selects the matching lifecycle from the incoming
 request.
 
@@ -219,10 +242,10 @@ Run the same-era baselines explicitly:
 
 ```bash
 cf-integration conformance run \
-  --client-version 2026-07-28 \
+  --protocol-version 2026-07-28 \
   --server-era modern
 cf-integration conformance run \
-  --client-version 2025-11-25 \
+  --protocol-version 2025-11-25 \
   --server-era legacy
 ```
 
@@ -231,12 +254,12 @@ Run the two cross-era paths:
 ```bash
 # Modern client-facing traffic against a legacy-only upstream.
 cf-integration conformance run \
-  --client-version 2026-07-28 \
+  --protocol-version 2026-07-28 \
   --server-era legacy
 
 # Legacy client-facing traffic against a modern-only upstream.
 cf-integration conformance run \
-  --client-version 2025-11-25 \
+  --protocol-version 2025-11-25 \
   --server-era modern
 ```
 
@@ -265,8 +288,8 @@ Supported client revisions are explicit and use the same pinned runner and
 fixture:
 
 ```bash
-cf-integration conformance run --spec-version 2025-11-25
-cf-integration conformance run --spec-version 2025-06-18
+cf-integration conformance run --protocol-version 2025-11-25
+cf-integration conformance run --protocol-version 2025-06-18
 ```
 
 Artifacts default below `CF_INTEGRATION_DIR`. Use `--results-dir` to place them
@@ -290,7 +313,8 @@ Debug commands are useful for manual diagnosis but are not compliance gates.
 
 ```bash
 cf-integration debug inspect \
-  --topology dataplane \
+  --lane dataplane \
+  --protocol-version 2025-11-25 \
   --method tools/list
 
 cf-integration debug token \
@@ -301,7 +325,8 @@ cf-integration debug token --kind admin
 ```
 
 Inspector is pinned to `@modelcontextprotocol/inspector@0.22.0` and uses the
-same loopback authentication proxy as conformance.
+same loopback authentication proxy as conformance. The proxy applies the
+selected protocol version to Inspector's initialize request.
 
 ## Configuration
 
@@ -328,7 +353,7 @@ CF_FAST_TIME_EXPECTED_IMAGE=ghcr.io/ibm/cfex-mcp-fast-time-server:latest
 CF_FAST_TIME_SERVER_ID=9779b6698cbd4b4995ee04a4fab38737
 
 MCP_CLI_BASE_URL=http://127.0.0.1:8080
-MCP_SPEC_VERSION=2025-11-25
+MCP_PROTOCOL_VERSION=2025-11-25
 NGINX_PORT=8080
 ```
 

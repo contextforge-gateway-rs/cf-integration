@@ -120,6 +120,20 @@ fn dataplane_compose_files_are_in_override_order() {
 }
 
 #[test]
+fn integration_overlay_clears_obsolete_fast_time_arguments() {
+    let compose =
+        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-integration.yaml"))
+            .expect("read integration Compose overlay");
+    let overlay: serde_yaml::Value =
+        serde_yaml::from_str(&compose).expect("parse integration Compose overlay");
+
+    assert_eq!(
+        overlay["services"]["fast_time_server"]["command"],
+        serde_yaml::Value::Sequence(Vec::new())
+    );
+}
+
+#[test]
 fn source_dataplane_adds_build_overlay_last() {
     let project = ComposeProject::dataplane(
         Path::new("/repo"),

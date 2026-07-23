@@ -5,19 +5,61 @@ use super::*;
 const FAST_TEST_SERVER_ID: &str = "b8e3f1a2c4d5e6f7a1b2c3d4e5f6a7b8";
 
 impl<R: ProcessRunner> RuntimeExecutor<R> {
-    pub(super) async fn run_live(&self, topology: StackMode, group: LiveGroup) -> AppResult<()> {
+    pub(super) async fn run_live(
+        &self,
+        lane: LiveLane,
+        group: LiveGroup,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<()> {
+        match lane {
+            LiveLane::Fixture => {
+                if group != LiveGroup::Protocol {
+                    return Err(AppFailure::from(anyhow!(
+                        "fixture-direct live lane requires the protocol group"
+                    )));
+                }
+                self.ensure_controlplane()?;
+                self.run_controlplane_make(
+                    StackMode::Controlplane,
+                    "test-protocol-compliance-reference",
+                    protocol_version,
+                )
+            }
+            LiveLane::Controlplane => {
+                self.run_routed_live(StackMode::Controlplane, group, protocol_version)
+                    .await
+            }
+            LiveLane::Dataplane => {
+                self.run_routed_live(StackMode::Dataplane, group, protocol_version)
+                    .await
+            }
+        }
+    }
+
+    async fn run_routed_live(
+        &self,
+        topology: StackMode,
+        group: LiveGroup,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<()> {
         let server_id = self.default_server_id().to_owned();
         self.with_managed_test_target(topology, &server_id, || async {
             if live_group_needs_fast_test(group) {
                 self.ensure_fast_test_fixture(topology).await?;
             }
             match group {
-                LiveGroup::Mcp => self.run_controlplane_make(topology, "test-mcp-protocol-e2e"),
-                LiveGroup::Rbac => self.run_controlplane_make(topology, "test-mcp-rbac"),
-                LiveGroup::Protocol => {
-                    self.run_controlplane_make(topology, "test-protocol-compliance-gateway")
+                LiveGroup::Mcp => {
+                    self.run_controlplane_make(topology, "test-mcp-protocol-e2e", protocol_version)
                 }
-                LiveGroup::All => self.run_live_all(topology),
+                LiveGroup::Rbac => {
+                    self.run_controlplane_make(topology, "test-mcp-rbac", protocol_version)
+                }
+                LiveGroup::Protocol => self.run_controlplane_make(
+                    topology,
+                    "test-protocol-compliance-gateway",
+                    protocol_version,
+                ),
+                LiveGroup::All => self.run_live_all(topology, protocol_version),
             }
         })
         .await
@@ -42,17 +84,27 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         Ok(())
     }
 
-    fn run_controlplane_make(&self, topology: StackMode, target: &str) -> AppResult<()> {
+    fn run_controlplane_make(
+        &self,
+        topology: StackMode,
+        target: &str,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<()> {
         let command = CommandSpec::new("make")
             .arg("-C")
             .arg(self.config.controlplane_dir().as_os_str())
             .arg(target);
+        let command = self.live_protocol_environment(command, protocol_version)?;
         Ok(self
             .runner
             .run(&self.compose_environment(command, topology, false)?)?)
     }
 
-    fn run_live_all(&self, topology: StackMode) -> AppResult<()> {
+    fn run_live_all(
+        &self,
+        topology: StackMode,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<()> {
         let pass_one = CommandSpec::new("uv")
             .args([
                 "run",
@@ -68,6 +120,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 "--tb=short",
             ])
             .cwd(self.config.controlplane_dir());
+        let pass_one = self.live_protocol_environment(pass_one, protocol_version)?;
         let pass_two = CommandSpec::new("uv")
             .args([
                 "run",
@@ -82,6 +135,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 "--tb=short",
             ])
             .cwd(self.config.controlplane_dir());
+        let pass_two = self.live_protocol_environment(pass_two, protocol_version)?;
 
         let first = self
             .runner
@@ -93,6 +147,45 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             .map_err(AppFailure::from);
         combine_live_results(first, second)
     }
+
+    fn live_protocol_environment(
+        &self,
+        command: CommandSpec,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<CommandSpec> {
+        let inherited_python_path = self
+            .config
+            .environment()
+            .get(OsStr::new("PYTHONPATH"))
+            .map(|value| value.value.as_os_str());
+        add_live_protocol_environment(
+            command,
+            &self.config.root().join("scripts/live_protocol"),
+            inherited_python_path,
+            protocol_version.as_str(),
+        )
+    }
+}
+
+fn add_live_protocol_environment(
+    command: CommandSpec,
+    hook_directory: &Path,
+    inherited_python_path: Option<&OsStr>,
+    protocol_version: &str,
+) -> AppResult<CommandSpec> {
+    let python_paths = std::iter::once(hook_directory.to_path_buf()).chain(
+        inherited_python_path
+            .into_iter()
+            .flat_map(std::env::split_paths),
+    );
+    let python_path = std::env::join_paths(python_paths)
+        .context("failed to construct live-test PYTHONPATH")
+        .map_err(AppFailure::from)?;
+    Ok(command
+        .env("PYTHONPATH", python_path)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("MCP_PROTOCOL_VERSION", protocol_version)
+        .env("CF_LIVE_MCP_PROTOCOL_VERSION", protocol_version))
 }
 
 const fn live_group_needs_fast_test(group: LiveGroup) -> bool {
@@ -132,5 +225,43 @@ mod tests {
 
         assert!(error.contains("first failure"));
         assert!(error.contains("second failure"));
+    }
+
+    #[test]
+    fn live_protocol_environment_prepends_hook_and_sets_selected_version() {
+        let command = add_live_protocol_environment(
+            CommandSpec::new("pytest"),
+            Path::new("/harness/live-protocol"),
+            Some(OsStr::new("/existing/python")),
+            "2025-06-18",
+        )
+        .expect("live protocol environment should be valid");
+
+        let environment = command.environment();
+        assert_eq!(
+            environment.get(OsStr::new("MCP_PROTOCOL_VERSION")),
+            Some(&OsString::from("2025-06-18"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("CF_LIVE_MCP_PROTOCOL_VERSION")),
+            Some(&OsString::from("2025-06-18"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
+            Some(&OsString::from("1"))
+        );
+        let paths = std::env::split_paths(
+            environment
+                .get(OsStr::new("PYTHONPATH"))
+                .expect("PYTHONPATH should be set"),
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/harness/live-protocol"),
+                PathBuf::from("/existing/python")
+            ]
+        );
     }
 }

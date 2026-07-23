@@ -21,6 +21,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub(super) async fn inspect(
         &self,
         mode: StackMode,
+        protocol_version: &ProtocolVersion,
         method: &str,
         server_id: Option<&str>,
     ) -> AppResult<()> {
@@ -35,10 +36,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     .map_err(AppFailure::from)?
                     .endpoint()
                     .clone();
-            let proxy = AuthProxy::start(endpoint, &token)
-                .await
-                .context("failed to start the Inspector authentication proxy")
-                .map_err(AppFailure::from)?;
+            let proxy = AuthProxy::start_with_protocol_version(
+                endpoint,
+                &token,
+                Some(protocol_version.as_str()),
+            )
+            .await
+            .context("failed to start the Inspector authentication proxy")
+            .map_err(AppFailure::from)?;
             let command = allowlisted_npx_environment(
                 inspector_command(proxy.url().as_str(), method).cwd(self.config.root()),
             );

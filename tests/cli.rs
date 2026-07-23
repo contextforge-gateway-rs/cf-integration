@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 
 use cf_integration::cli::{
-    Cli, CliConformanceLane, CliConformanceServerEra, CliConformanceVersion, CliLoadEngine,
-    CliTopology, Command, ConformanceArgs, ConformanceCommand, DebugArgs, DebugCommand, LiveGroup,
-    LoadArgs, StackArgs, StackCommand, TokenKind, TopologySelection,
+    Cli, CliConformanceServerEra, CliLane, CliLoadEngine, CliTopology, Command, ConformanceArgs,
+    ConformanceCommand, DebugArgs, DebugCommand, LiveGroup, LoadArgs, ProtocolVersion, StackArgs,
+    StackCommand, TokenKind, TopologySelection, WorkflowTargetArgs,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind};
 
@@ -131,6 +131,7 @@ fn load_keeps_locust_and_goose_with_validated_settings() {
         ("goose", CliLoadEngine::Goose),
     ] {
         let Command::Load(LoadArgs {
+            target,
             engine: actual,
             users,
             spawn_rate,
@@ -153,6 +154,8 @@ fn load_keeps_locust_and_goose_with_validated_settings() {
             panic!("expected load")
         };
         assert_eq!(actual, expected);
+        assert_eq!(target.lane, None);
+        assert_eq!(target.protocol_version, None);
         assert_eq!(users, Some(2));
         assert_eq!(spawn_rate, Some(0.5));
         assert_eq!(run_time.as_deref(), Some("1m30s"));
@@ -166,8 +169,9 @@ fn live_defaults_to_all_and_accepts_the_main_harness_groups() {
     let Command::Live(defaults) = parse(&["cf-integration", "live"]).command else {
         panic!("expected live workflow")
     };
-    assert_eq!(defaults.topology, None);
+    assert_eq!(defaults.target.lane, None);
     assert_eq!(defaults.group, LiveGroup::All);
+    assert_eq!(defaults.target.protocol_version, None);
 
     for (name, expected) in [
         ("mcp", LiveGroup::Mcp),
@@ -187,9 +191,112 @@ fn live_defaults_to_all_and_accepts_the_main_harness_groups() {
         else {
             panic!("expected live workflow")
         };
-        assert_eq!(args.topology, Some(CliTopology::Dataplane));
+        assert_eq!(args.target.lane, Some(CliLane::Dataplane));
         assert_eq!(args.group, expected);
     }
+}
+
+#[test]
+fn live_accepts_fixture_lane_and_explicit_protocol_version() {
+    let Command::Live(args) = parse(&[
+        "cf-integration",
+        "live",
+        "--lane",
+        "fixture-direct",
+        "--group",
+        "protocol",
+        "--protocol-version",
+        "2025-06-18",
+    ])
+    .command
+    else {
+        panic!("expected live workflow")
+    };
+
+    assert_eq!(args.target.lane, Some(CliLane::FixtureDirect));
+    assert_eq!(args.group, LiveGroup::Protocol);
+    assert_eq!(
+        args.target.protocol_version,
+        Some(
+            "2025-06-18"
+                .parse::<ProtocolVersion>()
+                .expect("valid protocol version")
+        )
+    );
+
+    rejected(&["cf-integration", "live", "--protocol-version", "latest"]);
+
+    let Command::Live(alias) = parse(&["cf-integration", "live", "--lane", "fixture"]).command
+    else {
+        panic!("expected live workflow")
+    };
+    assert_eq!(alias.target.lane, Some(CliLane::FixtureDirect));
+}
+
+#[test]
+fn operational_workflows_share_canonical_lane_and_protocol_version_flags() {
+    fn assert_target(target: &WorkflowTargetArgs) {
+        assert_eq!(target.lane, Some(CliLane::Controlplane));
+        assert_eq!(
+            target.protocol_version,
+            Some(
+                "2025-06-18"
+                    .parse::<ProtocolVersion>()
+                    .expect("valid protocol version")
+            )
+        );
+    }
+
+    let common = ["--lane", "controlplane", "--protocol-version", "2025-06-18"];
+    let Command::Probe(probe) = parse(
+        &["cf-integration", "probe"]
+            .into_iter()
+            .chain(common)
+            .collect::<Vec<_>>(),
+    )
+    .command
+    else {
+        panic!("expected probe workflow")
+    };
+    assert_target(&probe);
+
+    let Command::Load(load) = parse(
+        &["cf-integration", "load"]
+            .into_iter()
+            .chain(common)
+            .collect::<Vec<_>>(),
+    )
+    .command
+    else {
+        panic!("expected load workflow")
+    };
+    assert_target(&load.target);
+
+    let Command::Live(live) = parse(
+        &["cf-integration", "live"]
+            .into_iter()
+            .chain(common)
+            .collect::<Vec<_>>(),
+    )
+    .command
+    else {
+        panic!("expected live workflow")
+    };
+    assert_target(&live.target);
+
+    let Command::Debug(DebugArgs {
+        command: DebugCommand::Inspect(inspect),
+    }) = parse(
+        &["cf-integration", "debug", "inspect"]
+            .into_iter()
+            .chain(common)
+            .collect::<Vec<_>>(),
+    )
+    .command
+    else {
+        panic!("expected inspect workflow")
+    };
+    assert_target(&inspect.target);
 }
 
 #[test]
@@ -201,7 +308,12 @@ fn conformance_defaults_to_all_lanes_and_july_revision_at_resolution_time() {
         panic!("expected conformance run")
     };
     assert!(args.lane.is_empty());
-    assert_eq!(args.spec_version, CliConformanceVersion::July2026);
+    assert_eq!(
+        args.protocol_version,
+        "2026-07-28"
+            .parse::<ProtocolVersion>()
+            .expect("valid protocol version")
+    );
     assert_eq!(args.server_era, CliConformanceServerEra::Dual);
     assert!(args.results_dir.is_none());
 }
@@ -218,7 +330,7 @@ fn conformance_accepts_repeatable_exact_lanes_and_supported_revisions() {
         "fixture-direct",
         "--lane",
         "dataplane",
-        "--client-version",
+        "--protocol-version",
         "2025-11-25",
         "--server-era",
         "legacy",
@@ -227,14 +339,13 @@ fn conformance_accepts_repeatable_exact_lanes_and_supported_revisions() {
     else {
         panic!("expected conformance run")
     };
+    assert_eq!(args.lane, [CliLane::FixtureDirect, CliLane::Dataplane]);
     assert_eq!(
-        args.lane,
-        [
-            CliConformanceLane::FixtureDirect,
-            CliConformanceLane::Dataplane
-        ]
+        args.protocol_version,
+        "2025-11-25"
+            .parse::<ProtocolVersion>()
+            .expect("valid protocol version")
     );
-    assert_eq!(args.spec_version, CliConformanceVersion::November2025);
     assert_eq!(args.server_era, CliConformanceServerEra::Legacy);
     let Command::Conformance(ConformanceArgs {
         command: ConformanceCommand::Run(compatibility_args),
@@ -250,8 +361,10 @@ fn conformance_accepts_repeatable_exact_lanes_and_supported_revisions() {
         panic!("expected conformance run")
     };
     assert_eq!(
-        compatibility_args.spec_version,
-        CliConformanceVersion::November2025
+        compatibility_args.protocol_version,
+        "2025-11-25"
+            .parse::<ProtocolVersion>()
+            .expect("valid protocol version")
     );
     assert_eq!(compatibility_args.server_era, CliConformanceServerEra::Dual);
     rejected(&["cf-integration", "conformance", "run", "--suite", "active"]);

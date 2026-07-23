@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::header::{
     AUTHORIZATION, CONNECTION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue,
 };
 use axum::http::{HeaderMap, Method, Response, StatusCode};
 use reqwest::Client;
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -60,6 +61,7 @@ struct ProxyState {
     proxy_path: String,
     loopback_authority: String,
     require_dataplane_backend: bool,
+    protocol_version: Option<String>,
     client: Client,
 }
 
@@ -89,6 +91,19 @@ impl AuthProxy {
         upstream: Url,
         bearer_token: impl AsRef<str>,
     ) -> Result<Self, AuthProxyError> {
+        Self::start_with_protocol_version(upstream, bearer_token, None).await
+    }
+
+    /// Starts a proxy that also rewrites MCP initialize requests to one version.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::start`].
+    pub async fn start_with_protocol_version(
+        upstream: Url,
+        bearer_token: impl AsRef<str>,
+        protocol_version: Option<&str>,
+    ) -> Result<Self, AuthProxyError> {
         validate_upstream(&upstream)?;
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", bearer_token.as_ref()))
             .map_err(|_| AuthProxyError::InvalidBearerToken)?;
@@ -116,6 +131,7 @@ impl AuthProxy {
             proxy_path,
             loopback_authority,
             client,
+            protocol_version: protocol_version.map(str::to_owned),
         });
         let application = Router::new().fallback(forward).with_state(state);
         let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -193,6 +209,11 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
         Ok(body) => body,
         Err(_) => return empty_response(StatusCode::PAYLOAD_TOO_LARGE),
     };
+    let body = if let Some(protocol_version) = state.protocol_version.as_deref() {
+        rewrite_initialize_protocol_version(body, protocol_version)
+    } else {
+        body
+    };
     let mut headers = end_to_end_headers(parts.headers, true);
     if headers
         .get(HOST)
@@ -233,6 +254,23 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+fn rewrite_initialize_protocol_version(body: Bytes, protocol_version: &str) -> Bytes {
+    let Ok(mut request) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    if request.get("method").and_then(Value::as_str) != Some("initialize") {
+        return body;
+    }
+    let Some(params) = request.get_mut("params").and_then(Value::as_object_mut) else {
+        return body;
+    };
+    params.insert(
+        "protocolVersion".to_owned(),
+        Value::String(protocol_version.to_owned()),
+    );
+    serde_json::to_vec(&request).map_or(body, Bytes::from)
 }
 
 fn validate_upstream(upstream: &Url) -> Result<(), AuthProxyError> {

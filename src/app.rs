@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Result, bail};
 use cf_integration_compliance::conformance::{ConformanceServerEra, ConformanceTarget};
@@ -11,20 +12,25 @@ use cf_integration_platform::StackMode;
 use cf_integration_platform::config::Environment;
 
 use crate::cli::{
-    Cli, CliTopology, Command, ConformanceCommand, DebugCommand, LiveGroup, StackCommand,
-    TokenKind, TopologySelection,
+    Cli, CliLane, CliTopology, Command, ConformanceCommand, DebugCommand, LiveGroup,
+    ProtocolVersion, StackCommand, TokenKind, TopologySelection,
 };
 const STACK_MODE_ENV: &str = "CF_MCP_STACK_MODE";
+const PROTOCOL_VERSION_ENV: &str = "MCP_PROTOCOL_VERSION";
 
 /// Fully resolved application operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Stack(StackAction),
-    Probe(StackMode),
+    Probe {
+        topology: StackMode,
+        protocol_version: ProtocolVersion,
+    },
     Load(ResolvedLoadArgs),
     Live {
-        topology: StackMode,
+        lane: LiveLane,
         group: LiveGroup,
+        protocol_version: ProtocolVersion,
     },
     Conformance(ConformanceAction),
     Debug(DebugAction),
@@ -53,7 +59,16 @@ pub enum StackAction {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLoadArgs {
     pub topology: StackMode,
+    pub protocol_version: ProtocolVersion,
     pub request: LoadRequest,
+}
+
+/// One upstream live-test execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveLane {
+    Fixture,
+    Controlplane,
+    Dataplane,
 }
 
 /// Fully resolved official conformance operation.
@@ -76,6 +91,7 @@ pub enum ConformanceAction {
 pub enum DebugAction {
     Inspect {
         topology: StackMode,
+        protocol_version: ProtocolVersion,
         method: String,
         server_id: Option<String>,
     },
@@ -94,9 +110,13 @@ pub enum DebugAction {
 pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
     match cli.command {
         Command::Stack(args) => resolve_stack(args.command, environment).map(Action::Stack),
-        Command::Probe(args) => resolve_topology(args.topology, environment).map(Action::Probe),
+        Command::Probe(args) => Ok(Action::Probe {
+            topology: resolve_routed_lane(args.lane, environment)?,
+            protocol_version: resolve_protocol_version(args.protocol_version, environment)?,
+        }),
         Command::Load(args) => Ok(Action::Load(ResolvedLoadArgs {
-            topology: resolve_topology(args.topology, environment)?,
+            topology: resolve_routed_lane(args.target.lane, environment)?,
+            protocol_version: resolve_protocol_version(args.target.protocol_version, environment)?,
             request: LoadRequest {
                 engine: args.engine.into(),
                 smoke: args.smoke,
@@ -105,14 +125,24 @@ pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
                 run_time: args.run_time,
             },
         })),
-        Command::Live(args) => Ok(Action::Live {
-            topology: resolve_topology(args.topology, environment)?,
-            group: args.group,
-        }),
+        Command::Live(args) => {
+            let lane = resolve_live_lane(args.target.lane, environment)?;
+            if lane == LiveLane::Fixture && args.group != LiveGroup::Protocol {
+                bail!("--lane fixture-direct requires --group protocol");
+            }
+            Ok(Action::Live {
+                lane,
+                group: args.group,
+                protocol_version: resolve_protocol_version(
+                    args.target.protocol_version,
+                    environment,
+                )?,
+            })
+        }
         Command::Conformance(args) => Ok(Action::Conformance(match args.command {
             ConformanceCommand::Run(args) => ConformanceAction::Run {
                 lanes: resolve_lanes(args.lane.into_iter().map(Into::into)),
-                spec_version: args.spec_version.spec_version().to_owned(),
+                spec_version: args.protocol_version.to_string(),
                 server_era: args.server_era.into(),
                 results_dir: args.results_dir,
             },
@@ -123,7 +153,11 @@ pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
         })),
         Command::Debug(args) => Ok(Action::Debug(match args.command {
             DebugCommand::Inspect(args) => DebugAction::Inspect {
-                topology: resolve_topology(args.topology, environment)?,
+                topology: resolve_routed_lane(args.target.lane, environment)?,
+                protocol_version: resolve_protocol_version(
+                    args.target.protocol_version,
+                    environment,
+                )?,
                 method: args.method,
                 server_id: args.server_id,
             },
@@ -138,6 +172,48 @@ pub fn resolve_action(cli: Cli, environment: &Environment) -> Result<Action> {
             }
         })),
     }
+}
+
+fn resolve_live_lane(lane: Option<CliLane>, environment: &Environment) -> Result<LiveLane> {
+    Ok(match lane {
+        Some(CliLane::FixtureDirect) => LiveLane::Fixture,
+        Some(CliLane::Controlplane) => LiveLane::Controlplane,
+        Some(CliLane::Dataplane) => LiveLane::Dataplane,
+        None => match resolve_topology(None, environment)? {
+            StackMode::Controlplane => LiveLane::Controlplane,
+            StackMode::Dataplane => LiveLane::Dataplane,
+        },
+    })
+}
+
+fn resolve_routed_lane(lane: Option<CliLane>, environment: &Environment) -> Result<StackMode> {
+    match resolve_live_lane(lane, environment)? {
+        LiveLane::Fixture => {
+            bail!("--lane fixture-direct is only supported by live and conformance run")
+        }
+        LiveLane::Controlplane => Ok(StackMode::Controlplane),
+        LiveLane::Dataplane => Ok(StackMode::Dataplane),
+    }
+}
+
+fn resolve_protocol_version(
+    explicit: Option<ProtocolVersion>,
+    environment: &Environment,
+) -> Result<ProtocolVersion> {
+    if let Some(version) = explicit {
+        return Ok(version);
+    }
+    let Some(value) = environment.get(OsStr::new(PROTOCOL_VERSION_ENV)) else {
+        return Ok(ProtocolVersion::default());
+    };
+    let value = value
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{PROTOCOL_VERSION_ENV} must be UTF-8"))?;
+    if value.is_empty() {
+        return Ok(ProtocolVersion::default());
+    }
+    ProtocolVersion::from_str(value)
+        .map_err(|error| anyhow::anyhow!("invalid {PROTOCOL_VERSION_ENV}: {error}"))
 }
 
 fn resolve_stack(command: StackCommand, environment: &Environment) -> Result<StackAction> {

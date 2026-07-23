@@ -116,6 +116,25 @@ fn controlplane_configuration_targets_raw_mcp_and_needs_no_server_id() {
 }
 
 #[test]
+fn explicit_protocol_version_is_retained_by_goose_configuration() {
+    let root = repository_root();
+    let config = app_config(root.path(), &Environment::new());
+    let settings = load_settings(&config, "1s");
+
+    let goose = GooseLoadConfig::new_with_protocol_version(
+        &config,
+        StackMode::Controlplane,
+        &settings,
+        TOKEN,
+        None,
+        "2025-06-18",
+    )
+    .expect("control-plane Goose configuration should build");
+
+    assert_eq!(goose.protocol_version(), "2025-06-18");
+}
+
+#[test]
 fn configuration_rejects_missing_credentials_and_dataplane_server_id() {
     let root = repository_root();
     let config = app_config(root.path(), &Environment::new());
@@ -151,6 +170,7 @@ struct MockState {
     backend_marker: Option<&'static str>,
     delete_status: StatusCode,
     initialize_result: Option<Value>,
+    protocol_version: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +182,7 @@ struct Observation {
     authenticated: bool,
     session: Option<String>,
     protocol_version: Option<String>,
+    initialize_protocol_version: Option<String>,
     called_tool: Option<String>,
 }
 
@@ -194,6 +215,11 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             == Some("Bearer secret.goose.jwt"),
         session: header(&parts.headers, "mcp-session-id"),
         protocol_version: header(&parts.headers, "mcp-protocol-version"),
+        initialize_protocol_version: payload
+            .as_ref()
+            .and_then(|value| value.pointer("/params/protocolVersion"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         called_tool,
     };
     state
@@ -209,7 +235,7 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
     }
 
     if parts.method == Method::DELETE {
-        return if has_session_headers(&parts.headers) {
+        return if has_session_headers(&parts.headers, state.protocol_version) {
             response(state.delete_status, "text/plain", "")
         } else {
             response(StatusCode::BAD_REQUEST, "text/plain", "bad delete headers")
@@ -233,7 +259,7 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             }
             let result = state.initialize_result.clone().unwrap_or_else(|| {
                 json!({
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": state.protocol_version,
                     "capabilities": {},
                     "serverInfo": {"name": "mock", "version": "1"}
                 })
@@ -259,7 +285,9 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             if state.reject_notification {
                 return response(StatusCode::INTERNAL_SERVER_ERROR, "application/json", "");
             }
-            if has_session_headers(&parts.headers) && payload.get("id").is_none() {
+            if has_session_headers(&parts.headers, state.protocol_version)
+                && payload.get("id").is_none()
+            {
                 response(
                     StatusCode::ACCEPTED,
                     "application/json",
@@ -274,7 +302,7 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             }
         }
         Some("tools/list") => {
-            if !has_session_headers(&parts.headers) {
+            if !has_session_headers(&parts.headers, state.protocol_version) {
                 return response(StatusCode::BAD_REQUEST, "text/plain", "bad list headers");
             }
             json_response(json!({
@@ -289,7 +317,7 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             }))
         }
         Some("tools/call") => {
-            if !has_session_headers(&parts.headers)
+            if !has_session_headers(&parts.headers, state.protocol_version)
                 || payload.pointer("/params/name").and_then(Value::as_str) != Some("echo")
                 || payload
                     .pointer("/params/arguments/message")
@@ -312,7 +340,7 @@ async fn mcp_handler(State(state): State<MockState>, request: Request<Body>) -> 
             )
         }
         Some("ping") => {
-            if !has_session_headers(&parts.headers) {
+            if !has_session_headers(&parts.headers, state.protocol_version) {
                 return response(StatusCode::BAD_REQUEST, "text/plain", "bad ping headers");
             }
             json_response(json!({"jsonrpc": "2.0", "id": id, "result": {}}))
@@ -343,9 +371,9 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn has_session_headers(headers: &HeaderMap) -> bool {
+fn has_session_headers(headers: &HeaderMap, protocol_version: &str) -> bool {
     header(headers, "mcp-session-id").as_deref() == Some(SESSION_ID)
-        && header(headers, "mcp-protocol-version").as_deref() == Some(PROTOCOL_VERSION)
+        && header(headers, "mcp-protocol-version").as_deref() == Some(protocol_version)
 }
 
 fn response(status: StatusCode, content_type: &str, body: &str) -> Response<Body> {
@@ -391,6 +419,7 @@ async fn spawn_mock_with_marker(
         backend_marker,
         StatusCode::NO_CONTENT,
         None,
+        PROTOCOL_VERSION,
     )
     .await
 }
@@ -402,6 +431,7 @@ async fn spawn_mock_with_options(
     backend_marker: Option<&'static str>,
     delete_status: StatusCode,
     initialize_result: Option<Value>,
+    protocol_version: &'static str,
 ) -> (String, MockState, tokio::task::JoinHandle<()>) {
     let state = MockState {
         observations: Arc::new(Mutex::new(Vec::new())),
@@ -411,6 +441,7 @@ async fn spawn_mock_with_options(
         backend_marker,
         delete_status,
         initialize_result,
+        protocol_version,
     };
     let app = Router::new()
         .route("/{*path}", any(marked_mcp_handler))
@@ -439,6 +470,7 @@ async fn spawn_mock_with_initialize_result(
         Some("dataplane"),
         StatusCode::NO_CONTENT,
         Some(initialize_result),
+        PROTOCOL_VERSION,
     )
     .await
 }
@@ -590,6 +622,10 @@ async fn execute_runs_strict_session_flow_with_dynamic_safe_tools_and_reports() 
     );
     assert!(observations[0].session.is_none());
     assert!(observations[0].protocol_version.is_none());
+    assert_eq!(
+        observations[0].initialize_protocol_version.as_deref(),
+        Some(PROTOCOL_VERSION)
+    );
     assert!(
         observations[1..]
             .iter()
@@ -599,6 +635,54 @@ async fn execute_runs_strict_session_flow_with_dynamic_safe_tools_and_reports() 
         observations[1..]
             .iter()
             .all(|value| value.protocol_version.as_deref() == Some(PROTOCOL_VERSION))
+    );
+}
+
+#[tokio::test]
+async fn execute_emits_the_selected_protocol_version_in_body_and_headers() {
+    const SELECTED_VERSION: &str = "2025-06-18";
+    let (host, state, server) = spawn_mock_with_options(
+        false,
+        false,
+        false,
+        Some("dataplane"),
+        StatusCode::NO_CONTENT,
+        None,
+        SELECTED_VERSION,
+    )
+    .await;
+    let root = repository_root();
+    let config = app_config(root.path(), &environment(&[("MCP_CLI_BASE_URL", &host)]));
+    let settings = load_settings(&config, "1s");
+    let goose = GooseLoadConfig::new_with_protocol_version(
+        &config,
+        StackMode::Controlplane,
+        &settings,
+        TOKEN,
+        None,
+        SELECTED_VERSION,
+    )
+    .expect("Goose configuration should build");
+
+    let outcome = goose
+        .execute()
+        .await
+        .expect("selected protocol flow should pass");
+    server.abort();
+    assert_eq!(outcome.failed_requests(), 0);
+
+    let observations = state
+        .observations
+        .lock()
+        .expect("mock observation lock should not be poisoned");
+    assert_eq!(
+        observations[0].initialize_protocol_version.as_deref(),
+        Some(SELECTED_VERSION)
+    );
+    assert!(
+        observations[1..]
+            .iter()
+            .all(|value| value.protocol_version.as_deref() == Some(SELECTED_VERSION))
     );
 }
 
@@ -638,9 +722,16 @@ async fn dataplane_goose_rejects_absent_fallback_forged_and_duplicate_backend_ma
 #[tokio::test]
 async fn goose_accepts_absent_or_unsupported_session_delete_responses() {
     for delete_status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
-        let (host, _state, server) =
-            spawn_mock_with_options(false, false, false, Some("dataplane"), delete_status, None)
-                .await;
+        let (host, _state, server) = spawn_mock_with_options(
+            false,
+            false,
+            false,
+            Some("dataplane"),
+            delete_status,
+            None,
+            PROTOCOL_VERSION,
+        )
+        .await;
         let root = repository_root();
         let config = app_config(root.path(), &environment(&[("MCP_CLI_BASE_URL", &host)]));
         let settings = load_settings(&config, "1s");

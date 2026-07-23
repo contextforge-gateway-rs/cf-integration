@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::routing::any;
 use cf_integration_mcp::auth_proxy::{AuthProxy, MAX_REQUEST_BODY_BYTES};
 use reqwest::{Client, Method, Url};
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -215,6 +216,38 @@ async fn injects_auth_and_preserves_mcp_request_and_response_contract() {
     );
     assert!(request.headers.get("x-remove-me").is_none());
     assert_eq!(request.body, r#"{"jsonrpc":"2.0","id":1}"#);
+
+    proxy.shutdown().await.expect("proxy should shut down");
+    upstream.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_protocol_version_rewrites_only_the_initialize_payload() {
+    let (upstream, capture) = start_capture_server().await;
+    let proxy = AuthProxy::start_with_protocol_version(
+        upstream.url.clone(),
+        INJECTED_TOKEN,
+        Some("2025-06-18"),
+    )
+    .await
+    .expect("proxy should start");
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"inspector","version":"1"}}}"#;
+
+    client()
+        .post(proxy.url().clone())
+        .header(CONTENT_TYPE, "application/json")
+        .body(initialize)
+        .send()
+        .await
+        .expect("initialize request should complete");
+
+    let requests = capture.take();
+    let payload: Value =
+        serde_json::from_slice(&requests[0].body).expect("forwarded body should remain JSON");
+    assert_eq!(
+        payload["params"]["protocolVersion"],
+        Value::String("2025-06-18".to_owned())
+    );
 
     proxy.shutdown().await.expect("proxy should shut down");
     upstream.shutdown().await;

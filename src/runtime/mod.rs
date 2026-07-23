@@ -26,7 +26,7 @@ use cf_integration_mcp::GatewayTopology;
 use cf_integration_mcp::auth_proxy::AuthProxy;
 use cf_integration_mcp::gateway::GatewayClient;
 use cf_integration_mcp::http_transport::ReqwestProbeTransport;
-use cf_integration_mcp::mcp::{ACCEPT as MCP_ACCEPT, PROTOCOL_VERSION};
+use cf_integration_mcp::mcp::ACCEPT as MCP_ACCEPT;
 use cf_integration_mcp::probe::{ProbeConfig, run_probe};
 use cf_integration_platform::checkout::{CheckoutManager, CheckoutRequest};
 use cf_integration_platform::compose::{ComposeProject, validate_integration_contract};
@@ -40,10 +40,10 @@ use cf_integration_platform::{PlatformError, StackMode};
 
 use crate::OutputStyle;
 use crate::app::{
-    Action, ConformanceAction, DebugAction, ResolvedLoadArgs, StackAction, selected_topologies,
-    topology_selection,
+    Action, ConformanceAction, DebugAction, LiveLane, ResolvedLoadArgs, StackAction,
+    selected_topologies, topology_selection,
 };
-use crate::cli::{LiveGroup, TokenKind as CliTokenKind, TopologySelection};
+use crate::cli::{LiveGroup, ProtocolVersion, TokenKind as CliTokenKind, TopologySelection};
 use crate::error::AppFailure;
 use crate::token::{TokenKind, make_token};
 
@@ -89,18 +89,29 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     pub async fn execute(&mut self, action: Action) -> AppResult<()> {
         match action {
             Action::Stack(action) => self.execute_stack(action).await,
-            Action::Probe(topology) => self.run_probe(topology).await,
+            Action::Probe {
+                topology,
+                protocol_version,
+            } => self.run_probe(topology, &protocol_version).await,
             Action::Load(args) => self.run_load(args).await,
-            Action::Live { topology, group } => self.run_live(topology, group).await,
+            Action::Live {
+                lane,
+                group,
+                protocol_version,
+            } => self.run_live(lane, group, &protocol_version).await,
             Action::Conformance(action) => self.execute_conformance(action).await,
             Action::Debug(DebugAction::Token { kind, server_id }) => {
                 self.print_token(kind, server_id)
             }
             Action::Debug(DebugAction::Inspect {
                 topology,
+                protocol_version,
                 method,
                 server_id,
-            }) => self.inspect(topology, &method, server_id.as_deref()).await,
+            }) => {
+                self.inspect(topology, &protocol_version, &method, server_id.as_deref())
+                    .await
+            }
         }
     }
 }

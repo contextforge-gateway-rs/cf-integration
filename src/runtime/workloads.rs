@@ -19,14 +19,14 @@ return 0
 "#;
 
 impl<R: ProcessRunner> RuntimeExecutor<R> {
-    pub(super) async fn run_probe(&self, topology: StackMode) -> AppResult<()> {
+    pub(super) async fn run_probe(
+        &self,
+        topology: StackMode,
+        protocol_version: &ProtocolVersion,
+    ) -> AppResult<()> {
         let server_id = self.default_server_id().to_owned();
         self.with_managed_test_target(topology, &server_id, || async {
             let token = self.bearer_token(topology, &server_id)?;
-            let protocol_version = self
-                .environment_text("MCP_SPEC_VERSION")
-                .unwrap_or(PROTOCOL_VERSION)
-                .to_owned();
             let config = ProbeConfig {
                 mode: gateway_topology(topology),
                 base_url: self.base_url()?.to_owned(),
@@ -39,7 +39,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 request_timeout: Duration::from_secs(
                     self.environment_u64("CF_PROBE_REQUEST_TIMEOUT", 30)?,
                 ),
-                protocol_version,
+                protocol_version: protocol_version.to_string(),
             };
             let transport = ReqwestProbeTransport::new().map_err(AppFailure::from)?;
             let stdout = std::io::stdout();
@@ -59,12 +59,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                 LoadSettings::resolve(&self.config, &args.request).map_err(AppFailure::from)?;
             match args.request.engine {
                 LoadEngine::Locust => {
-                    let command = LocustCommand::new(
+                    let command = LocustCommand::new_with_protocol_version(
                         &self.config,
                         args.topology,
                         &settings,
                         &token,
                         (args.topology == StackMode::Dataplane).then_some(server_id.as_str()),
+                        args.protocol_version.as_str(),
                     )
                     .map_err(AppFailure::from)?;
                     let process_result = self
@@ -78,8 +79,14 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
                     finalize_locust_run(process_result, command.report_dir(), &token)
                 }
                 LoadEngine::Goose => {
-                    self.run_goose(args.topology, &settings, &token, &server_id)
-                        .await
+                    self.run_goose(
+                        args.topology,
+                        &settings,
+                        &token,
+                        &server_id,
+                        &args.protocol_version,
+                    )
+                    .await
                 }
             }
         })
@@ -181,13 +188,15 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
         settings: &LoadSettings,
         token: &str,
         server_id: &str,
+        protocol_version: &ProtocolVersion,
     ) -> AppResult<()> {
-        let run = GooseLoadConfig::new(
+        let run = GooseLoadConfig::new_with_protocol_version(
             &self.config,
             topology,
             settings,
             token,
             (topology == StackMode::Dataplane).then_some(server_id),
+            protocol_version.as_str(),
         )
         .map_err(AppFailure::from)?;
         let outcome = run

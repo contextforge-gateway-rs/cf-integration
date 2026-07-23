@@ -212,6 +212,7 @@ fn dataplane_locust_command_has_exact_compose_shape_and_environment() {
         ("MCPGATEWAY_BEARER_TOKEN", OsStr::new("scoped.jwt.value")),
         ("MCP_SERVER_ID", OsStr::new("server-id")),
         ("MCP_STACK_MODE", OsStr::new("dataplane")),
+        ("MCP_PROTOCOL_VERSION", OsStr::new("2025-11-25")),
     ]);
     for (key, expected) in expected_environment {
         assert_eq!(
@@ -220,7 +221,7 @@ fn dataplane_locust_command_has_exact_compose_shape_and_environment() {
             "environment mismatch for {key}"
         );
     }
-    assert_eq!(run.command().environment().len(), 11);
+    assert_eq!(run.command().environment().len(), 12);
     assert!(
         !run.command()
             .environment()
@@ -240,12 +241,13 @@ fn controlplane_uses_the_same_harness_mcp_adapter_and_does_not_require_server_id
     let config = config(root.path(), &process);
     let settings = LoadSettings::resolve(&config, &args(true)).expect("settings should resolve");
 
-    let run = LocustCommand::new(
+    let run = LocustCommand::new_with_protocol_version(
         &config,
         StackMode::Controlplane,
         &settings,
         "admin.jwt.value",
         None,
+        "2025-06-18",
     )
     .expect("control-plane Locust command should build");
 
@@ -276,7 +278,7 @@ fn controlplane_uses_the_same_harness_mcp_adapter_and_does_not_require_server_id
         run.command()
             .environment()
             .get(OsStr::new("MCP_PROTOCOL_VERSION")),
-        Some(&OsString::from("2025-11-25"))
+        Some(&OsString::from("2025-06-18"))
     );
     assert_eq!(
         run.command()

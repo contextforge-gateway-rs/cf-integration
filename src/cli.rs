@@ -1,15 +1,17 @@
 //! Command-line argument model.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
-use cf_integration_compliance::{
-    DEFAULT_MCP_SPEC_VERSION, LEGACY_MCP_SPEC_VERSION, STABLE_MCP_SPEC_VERSION,
-};
+use cf_integration_compliance::DEFAULT_MCP_SPEC_VERSION;
+use cf_integration_mcp::mcp::PROTOCOL_VERSION;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 const RUN_TIME_ERROR: &str =
     "must be one or more positive integer+unit groups using ms, s, m, h, or d";
+const PROTOCOL_VERSION_ERROR: &str = "must use the MCP YYYY-MM-DD version format";
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
@@ -84,7 +86,7 @@ pub enum Command {
     /// Manage Compose stacks.
     Stack(StackArgs),
     /// Probe one public MCP route.
-    Probe(TopologyArgs),
+    Probe(WorkflowTargetArgs),
     /// Run an MCP load test.
     Load(LoadArgs),
     /// Run upstream live gateway tests.
@@ -150,6 +152,18 @@ pub struct TopologyArgs {
     pub topology: Option<CliTopology>,
 }
 
+/// Shared target selection for MCP workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WorkflowTargetArgs {
+    /// Execution lane; defaults to CF_MCP_STACK_MODE, then dataplane.
+    #[arg(long, value_enum, visible_alias = "topology")]
+    pub lane: Option<CliLane>,
+
+    /// MCP protocol version; defaults to MCP_PROTOCOL_VERSION, then 2025-11-25.
+    #[arg(long)]
+    pub protocol_version: Option<ProtocolVersion>,
+}
+
 /// Options for following stack logs.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct StackLogsArgs {
@@ -194,9 +208,9 @@ pub enum TopologySelection {
 /// Load-test options.
 #[derive(Debug, Clone, PartialEq, Args)]
 pub struct LoadArgs {
-    /// Stack topology; defaults to CF_MCP_STACK_MODE, then dataplane.
-    #[arg(long, value_enum)]
-    pub topology: Option<CliTopology>,
+    /// Shared lane and protocol-version selection.
+    #[command(flatten)]
+    pub target: WorkflowTargetArgs,
 
     /// Load-test engine.
     #[arg(long, value_enum, default_value = "locust")]
@@ -240,13 +254,25 @@ impl From<CliLoadEngine> for cf_integration_load::LoadEngine {
 /// Upstream live-test options.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct LiveArgs {
-    /// Stack topology; defaults to CF_MCP_STACK_MODE, then dataplane.
-    #[arg(long, value_enum)]
-    pub topology: Option<CliTopology>,
+    /// Shared lane and protocol-version selection.
+    #[command(flatten)]
+    pub target: WorkflowTargetArgs,
 
     /// Upstream live-test group.
     #[arg(long, value_enum, default_value = "all")]
     pub group: LiveGroup,
+}
+
+/// One MCP workflow execution lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliLane {
+    /// Run directly against the workflow's reference fixture.
+    #[value(alias = "fixture")]
+    FixtureDirect,
+    /// Run against the Python control-plane stack.
+    Controlplane,
+    /// Run through nginx and the Rust dataplane.
+    Dataplane,
 }
 
 /// Upstream live-test group.
@@ -260,6 +286,50 @@ pub enum LiveGroup {
     Protocol,
     /// Every upstream live gateway test.
     All,
+}
+
+/// A syntactically valid date-based MCP protocol version shared by workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolVersion(String);
+
+impl ProtocolVersion {
+    /// Returns the exact selected MCP protocol version.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        Self(PROTOCOL_VERSION.to_owned())
+    }
+}
+
+impl fmt::Display for ProtocolVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for ProtocolVersion {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = value.as_bytes();
+        let valid = bytes.len() == 10
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+        if valid {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(String::from(PROTOCOL_VERSION_ERROR))
+        }
+    }
 }
 
 /// Conformance command selection.
@@ -284,16 +354,15 @@ pub enum ConformanceCommand {
 pub struct ConformanceRunArgs {
     /// Lane to run; repeat to select multiple lanes, defaults to all three.
     #[arg(long, value_enum, action = ArgAction::Append)]
-    pub lane: Vec<CliConformanceLane>,
+    pub lane: Vec<CliLane>,
 
-    /// MCP revision used by the official client.
+    /// MCP protocol version used by the official client.
     #[arg(
-        long = "client-version",
-        visible_alias = "spec-version",
-        value_enum,
+        long = "protocol-version",
+        visible_aliases = ["client-version", "spec-version"],
         default_value = DEFAULT_MCP_SPEC_VERSION
     )]
-    pub spec_version: CliConformanceVersion,
+    pub protocol_version: ProtocolVersion,
 
     /// Protocol era exposed by the upstream fixture server.
     #[arg(long, value_enum, default_value = "dual")]
@@ -304,49 +373,12 @@ pub struct ConformanceRunArgs {
     pub results_dir: Option<PathBuf>,
 }
 
-/// Independently measured conformance path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum CliConformanceLane {
-    /// Official oracle connected directly to the official fixture.
-    FixtureDirect,
-    /// Official oracle routed through the Python control plane.
-    Controlplane,
-    /// Official oracle routed through the Rust dataplane.
-    Dataplane,
-}
-
-impl From<CliConformanceLane> for cf_integration_compliance::conformance::ConformanceTarget {
-    fn from(lane: CliConformanceLane) -> Self {
+impl From<CliLane> for cf_integration_compliance::conformance::ConformanceTarget {
+    fn from(lane: CliLane) -> Self {
         match lane {
-            CliConformanceLane::FixtureDirect => Self::Fixture,
-            CliConformanceLane::Controlplane => Self::Controlplane,
-            CliConformanceLane::Dataplane => Self::Dataplane,
-        }
-    }
-}
-
-/// MCP protocol revision supported by the pinned official conformance package.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum CliConformanceVersion {
-    /// June 2025 stable protocol revision.
-    #[value(name = "2025-06-18")]
-    June2025,
-    /// November 2025 stable protocol revision.
-    #[value(name = "2025-11-25")]
-    November2025,
-    /// July 2026 draft protocol revision.
-    #[value(name = "2026-07-28")]
-    July2026,
-}
-
-impl CliConformanceVersion {
-    /// Returns the exact protocol revision selected for the command.
-    #[must_use]
-    pub const fn spec_version(self) -> &'static str {
-        match self {
-            Self::June2025 => LEGACY_MCP_SPEC_VERSION,
-            Self::November2025 => STABLE_MCP_SPEC_VERSION,
-            Self::July2026 => DEFAULT_MCP_SPEC_VERSION,
+            CliLane::FixtureDirect => Self::Fixture,
+            CliLane::Controlplane => Self::Controlplane,
+            CliLane::Dataplane => Self::Dataplane,
         }
     }
 }
@@ -406,9 +438,9 @@ pub enum DebugCommand {
 /// Official Inspector options.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct InspectArgs {
-    /// Stack topology; defaults to CF_MCP_STACK_MODE, then dataplane.
-    #[arg(long, value_enum)]
-    pub topology: Option<CliTopology>,
+    /// Shared lane and protocol-version selection.
+    #[command(flatten)]
+    pub target: WorkflowTargetArgs,
 
     /// Inspector method such as tools/list.
     #[arg(long, default_value = "tools/list")]

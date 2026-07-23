@@ -27,7 +27,8 @@ use cf_integration_platform::config::AppConfig;
 
 use cf_integration_mcp::backend_identity::BackendIdentity;
 use cf_integration_mcp::mcp::{
-    ACCEPT, PROTOCOL_VERSION, initialize_with_id, jsonrpc_with_id, parse_mcp_body, tool_call_args,
+    ACCEPT, PROTOCOL_VERSION, initialize_with_id_and_version, jsonrpc_with_id, parse_mcp_body,
+    tool_call_args,
 };
 
 use super::LoadSettings;
@@ -82,6 +83,7 @@ pub struct GooseLoadConfig {
     reports: GooseReportPaths,
     bearer_token: BearerToken,
     require_dataplane_backend: bool,
+    protocol_version: String,
 }
 
 impl fmt::Debug for GooseLoadConfig {
@@ -96,6 +98,7 @@ impl fmt::Debug for GooseLoadConfig {
             .field("reports", &self.reports)
             .field("bearer_token", &self.bearer_token)
             .field("require_dataplane_backend", &self.require_dataplane_backend)
+            .field("protocol_version", &self.protocol_version)
             .finish()
     }
 }
@@ -114,8 +117,35 @@ impl GooseLoadConfig {
         bearer_token: &str,
         server_id: Option<&str>,
     ) -> Result<Self> {
+        Self::new_with_protocol_version(
+            config,
+            mode,
+            settings,
+            bearer_token,
+            server_id,
+            PROTOCOL_VERSION,
+        )
+    }
+
+    /// Resolves a Goose run with an explicit MCP protocol version.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`] and rejects an empty protocol
+    /// version.
+    pub fn new_with_protocol_version(
+        config: &AppConfig,
+        mode: StackMode,
+        settings: &LoadSettings,
+        bearer_token: &str,
+        server_id: Option<&str>,
+        protocol_version: &str,
+    ) -> Result<Self> {
         if bearer_token.trim().is_empty() {
             bail!("Goose bearer token must not be empty");
+        }
+        if protocol_version.trim().is_empty() {
+            bail!("Goose MCP protocol version must not be empty");
         }
 
         let host = normalized_host(
@@ -154,6 +184,7 @@ impl GooseLoadConfig {
             },
             bearer_token: BearerToken(bearer_token.to_owned()),
             require_dataplane_backend: mode == StackMode::Dataplane,
+            protocol_version: protocol_version.to_owned(),
         })
     }
 
@@ -185,6 +216,12 @@ impl GooseLoadConfig {
     #[must_use]
     pub fn run_time(&self) -> &str {
         &self.run_time
+    }
+
+    /// Returns the MCP protocol version emitted by each virtual user.
+    #[must_use]
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_version
     }
 
     /// Returns both report paths.
@@ -226,6 +263,7 @@ impl GooseLoadConfig {
             endpoint: self.endpoint,
             bearer_token: bearer_token.clone(),
             require_dataplane_backend: self.require_dataplane_backend,
+            protocol_version: self.protocol_version,
         });
         let scenario = build_scenario(shared).map_err(|source| GooseRunError::Execution {
             source,
@@ -363,6 +401,7 @@ struct SharedRunConfig {
     endpoint: String,
     bearer_token: BearerToken,
     require_dataplane_backend: bool,
+    protocol_version: String,
 }
 
 #[derive(Clone)]
@@ -374,6 +413,7 @@ struct UserSession {
     next_tool: usize,
     next_request_id: u64,
     require_dataplane_backend: bool,
+    protocol_version: String,
 }
 
 impl fmt::Debug for UserSession {
@@ -387,6 +427,7 @@ impl fmt::Debug for UserSession {
             .field("next_tool", &self.next_tool)
             .field("next_request_id", &self.next_request_id)
             .field("require_dataplane_backend", &self.require_dataplane_backend)
+            .field("protocol_version", &self.protocol_version)
             .finish()
     }
 }
@@ -489,11 +530,13 @@ async fn initialize_user(user: &mut GooseUser, config: &SharedRunConfig) -> Tran
         next_tool: 0,
         next_request_id: 2,
         require_dataplane_backend: config.require_dataplane_backend,
+        protocol_version: config.protocol_version.clone(),
     });
 
     let state = session(user)?.clone();
     let request_id = json!(1);
-    let payload = initialize_with_id(request_id.clone());
+    let payload =
+        initialize_with_id_and_version(request_id.clone(), config.protocol_version.as_str());
     let mut response = send_mcp_request(
         user,
         &state,
@@ -508,7 +551,9 @@ async fn initialize_user(user: &mut GooseUser, config: &SharedRunConfig) -> Tran
         Ok(result) => result,
         Err(tag) => return fail_request(user, &mut response.request, tag),
     };
-    if result.get("protocolVersion").and_then(Value::as_str) != Some(PROTOCOL_VERSION) {
+    if result.get("protocolVersion").and_then(Value::as_str)
+        != Some(config.protocol_version.as_str())
+    {
         return fail_request(
             user,
             &mut response.request,
@@ -818,7 +863,7 @@ async fn send_mcp_request(
             .ok_or_else(|| custom_error("MCP request requires an initialized session"))?;
         request_builder = request_builder
             .header("mcp-session-id", session_id)
-            .header("mcp-protocol-version", PROTOCOL_VERSION);
+            .header("mcp-protocol-version", state.protocol_version.as_str());
     }
 
     let request = GooseRequest::builder()

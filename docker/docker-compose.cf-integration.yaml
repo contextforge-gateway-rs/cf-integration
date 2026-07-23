@@ -5,6 +5,10 @@
 services:
   fast_time_server:
     image: ${FAST_TIME_IMAGE:-ghcr.io/ibm/cfex-mcp-fast-time-server:latest}
+    # The current Rust image configures its listener and logging through
+    # BIND_ADDRESS and RUST_LOG. Clear the obsolete Go CLI arguments inherited
+    # from the control-plane Compose file.
+    command: []
 
   # Fast Time registration is stock upstream; the dataplane waits for it so
   # the publisher has the fixed virtual server to publish.
