@@ -134,6 +134,34 @@ fn integration_overlay_clears_obsolete_fast_time_arguments() {
 }
 
 #[test]
+fn integration_overlay_assigns_short_container_display_names() {
+    let compose =
+        fs::read_to_string(workspace_root().join("docker/docker-compose.cf-integration.yaml"))
+            .expect("read integration Compose overlay");
+    let overlay: serde_yaml::Value =
+        serde_yaml::from_str(&compose).expect("parse integration Compose overlay");
+
+    for (service, expected_name) in [
+        ("gateway", "cf-controlplane"),
+        ("migration", "cf-migration"),
+        ("register_fast_time", "cf-register-fast-time"),
+        ("fast_time_server", "cf-fast-time-server"),
+        ("nginx", "cf-nginx"),
+        ("postgres", "cf-postgres"),
+        ("pgbouncer", "cf-pgbouncer"),
+        ("redis", "cf-redis"),
+        ("cf-dataplane", "cf-dataplane"),
+        ("locust", "cf-locust"),
+    ] {
+        assert_eq!(
+            overlay["services"][service]["labels"]["name"].as_str(),
+            Some(expected_name),
+            "{service} must expose a concise container display name"
+        );
+    }
+}
+
+#[test]
 fn source_dataplane_adds_build_overlay_last() {
     let project = ComposeProject::dataplane(
         Path::new("/repo"),
