@@ -87,6 +87,7 @@ class MakeCliTests(unittest.TestCase):
         self.assertNotIn("Cloning", completed.stdout)
 
     def test_probe_endpoints_preserve_topology_and_encode_server_ids(self):
+        self.assertEqual(cf_probe.AUTH_REJECTION_STATUSES, (401, 403))
         self.assertEqual(
             cf_probe.endpoint("http://127.0.0.1:8080", "controlplane", "ignored"),
             "http://127.0.0.1:8080/mcp",
@@ -95,6 +96,36 @@ class MakeCliTests(unittest.TestCase):
             cf_probe.endpoint("http://127.0.0.1:8080/", "dataplane", "a/b c"),
             "http://127.0.0.1:8080/servers/a%2Fb%20c/mcp",
         )
+
+    def test_shell_orchestration_supports_macos_bash(self):
+        script = (ROOT / "scripts" / "cf-integration.sh").read_text()
+        self.assertNotIn("mapfile", script)
+        self.assertNotIn("readarray", script)
+        self.assertIn('${build_args[@]+"${build_args[@]}"}', script)
+        self.assertNotIn("cleanup_args", script)
+        completed = subprocess.run(
+            ["/bin/bash", str(ROOT / "scripts" / "cf-integration.sh"), "help"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_controlplane_base_does_not_activate_test_profiles(self):
+        script = (ROOT / "scripts" / "cf-integration.sh").read_text()
+        function = script.split("controlplane_compose() {", 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("--profile testing", function)
+        self.assertNotIn("--profile inspector", function)
+
+    def test_live_suites_apply_only_the_dataplane_gap_overlay(self):
+        script = (ROOT / "scripts" / "cf-integration.sh").read_text()
+        overlay = (ROOT / "scripts" / "cf_pytest_dataplane.py").read_text()
+        self.assertIn('run_live_pytest "$mode"', script)
+        self.assertIn("--ignore=tests/live_gateway/plugins", script)
+        self.assertIn("CF_INTEGRATION_DATAPLANE_EXPECTED_GAPS", overlay)
+        self.assertIn("test_list_tools_returns_all_stubs[gateway_virtual-http]", overlay)
+        self.assertIn("test_subscribe_unsubscribe_roundtrip[gateway_virtual-http]", overlay)
 
     def test_auth_proxy_injects_token_and_accepts_dataplane_identity(self):
         observed = {}

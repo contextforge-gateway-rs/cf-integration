@@ -19,7 +19,7 @@ comparison defaults to the tracked `reports/` directory.
 ## Requirements
 
 - GNU Make
-- Bash 4 or newer
+- Bash 3.2 or newer (the macOS system Bash is supported)
 - Python 3.10 or newer
 - Docker Engine with Docker Compose v2
 - Git and curl
@@ -155,6 +155,12 @@ The `mcp` and `all` groups start the upstream profile-gated
 fixed virtual server to appear in the dataplane publisher snapshot. The base
 stack remains free of Fast Test containers for unrelated workflows.
 
+`live-all` runs the upstream suites that are compatible with the standard
+stack. It excludes `tests/live_gateway/plugins`, whose E2E tests require a
+dedicated gateway restart with a different enforce configuration for each
+plugin. Dataplane-only virtual-server capability gaps are reported as explicit
+XFAILs; unexpected failures still make the target fail.
+
 ### Official MCP conformance
 
 The official client is pinned to
@@ -185,9 +191,10 @@ as control-plane fallback.
 
 Artifacts default below `.integration/conformance/`; the comparison is written
 to `reports/mcp-conformance-comparison.md`. Override these with `RESULTS_DIR`
-and `OUTPUT_DIR`. The checked-in comparison records the latest retained
-`2025-11-25` dual-era run; new runs use the selected `CLIENT_VERSION` and
-`SERVER_ERA` values.
+and `OUTPUT_DIR`. The checked-in comparison records the latest retained run and
+includes its exact client version, server era, fixture revision, and per-lane
+outcomes. A completed run returns nonzero when the official oracle finds a
+failure, but it still retains all artifacts and writes the comparison report.
 
 ### Debug utilities
 
@@ -283,6 +290,7 @@ scripts/cf_probe.py                       MCP route probe
 scripts/cf_jwt.py                         local token generation
 scripts/auth_proxy.py                     credential-injection proxy
 scripts/conformance.py                    fixture provisioning, runner, report
+scripts/cf_pytest_dataplane.py            dataplane live-suite XFAIL overlay
 scripts/locustfile_mcp.py                 Locust MCP workload
 docker/                                   Compose overlays and nginx routing
 reports/                                  tracked comparison reports

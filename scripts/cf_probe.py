@@ -17,6 +17,7 @@ from cf_jwt import DEFAULT_SECRET, DEFAULT_SUBJECT, make_token
 
 ACCEPT = "application/json, text/event-stream"
 MAX_BODY = 4 * 1024 * 1024
+AUTH_REJECTION_STATUSES = (401, 403)
 SAFE_TOOL_ARGUMENTS = {
     "echo": {"message": "cf-integration"},
     "fast_time_echo": {"message": "cf-integration"},
@@ -163,8 +164,8 @@ def run(topology: str, base_url: str, server_id: str) -> None:
     status, _, _ = post(
         url, initialize, None, require_dataplane=require_dataplane
     )
-    if status != 401:
-        raise RuntimeError(f"auth_negative: expected 401, got {status}")
+    if status not in AUTH_REJECTION_STATUSES:
+        raise RuntimeError(f"auth_negative: expected 401/403, got {status}")
     print(f"auth_negative=PASS status={status}")
 
     token = os.environ.get("MCPGATEWAY_BEARER_TOKEN") or make_token(

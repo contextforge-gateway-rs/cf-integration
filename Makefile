@@ -74,7 +74,7 @@ live-rbac: ## Run upstream MCP RBAC/multi-transport tests.
 live-protocol: ## Run upstream gateway protocol-compliance tests.
 	@TOPOLOGY="$(TOPOLOGY)" GROUP=protocol $(HARNESS) live
 
-live-all: ## Run the complete upstream live-gateway suite.
+live-all: ## Run the stack-compatible upstream live-gateway suite.
 	@TOPOLOGY="$(TOPOLOGY)" GROUP=all $(HARNESS) live
 
 conformance: ## Run official MCP conformance lanes.

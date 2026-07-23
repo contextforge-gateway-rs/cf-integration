@@ -114,7 +114,7 @@ integration_compose() {
 }
 
 controlplane_compose() {
-  local args=(-p "$CF_CONTROLPLANE_PROJECT" -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml" --profile testing --profile inspector)
+  local args=(-p "$CF_CONTROLPLANE_PROJECT" -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml")
   truthy "${CONTROLPLANE_ENABLE_SSO:-false}" && args+=(--profile sso)
   docker compose "${args[@]}" "$@"
 }
@@ -133,7 +133,9 @@ conformance_compose() {
     [[ -z "$CF_DATAPLANE_REF" ]] || args+=(-f "$ROOT/docker/docker-compose.cf-dataplane-build.yaml")
     docker compose "${args[@]}" --profile conformance "$@"
   else
-    docker compose -p "$CF_CONTROLPLANE_PROJECT" -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml" -f "$ROOT/docker/docker-compose.cf-conformance.yaml" --profile testing --profile inspector --profile conformance "$@"
+    local args=(-p "$CF_CONTROLPLANE_PROJECT" -f "$CF_CONTROLPLANE_DIR/docker-compose.yml" -f "$ROOT/docker/docker-compose.cf-controlplane-build-labels.yaml" -f "$ROOT/docker/docker-compose.cf-conformance.yaml")
+    truthy "${CONTROLPLANE_ENABLE_SSO:-false}" && args+=(--profile sso)
+    docker compose "${args[@]}" --profile conformance "$@"
   fi
 }
 
@@ -248,24 +250,31 @@ stack_up() {
   truthy "${CF_FORCE_STACK_RESTART:-false}" && build_args+=(--force-recreate)
   if [[ "$mode" == dataplane ]]; then
     integration_compose config --format json | python3 "$ROOT/scripts/validate_compose.py" || return
-    integration_compose up -d --remove-orphans "${build_args[@]}" || return
+    integration_compose up -d --remove-orphans "${build_args[@]+"${build_args[@]}"}" || return
   else
-    controlplane_compose up -d "${build_args[@]}" --scale locust=0 --scale locust_worker=0 || return
+    controlplane_compose up -d --remove-orphans "${build_args[@]+"${build_args[@]}"}" || return
   fi
   wait_public_endpoint "$mode" || return
   printf '%s stack started\n' "$mode"
 }
 
 remove_project_by_label() {
-  local project="$1" remove_volumes="$2" ids=() id
-  mapfile -t ids < <(docker ps -aq --filter "label=com.docker.compose.project=$project")
-  for id in "${ids[@]}"; do docker rm -f "$id"; done
-  mapfile -t ids < <(docker network ls -q --filter "label=com.docker.compose.project=$project")
-  for id in "${ids[@]}"; do docker network rm "$id" >/dev/null 2>&1 || true; done
+  local project="$1" remove_volumes="$2" container_ids network_ids volume_ids id failure=0
+  container_ids="$(docker ps -aq --filter "label=com.docker.compose.project=$project")" || return
+  while IFS= read -r id; do
+    [[ -z "$id" ]] || docker rm -f "$id" || failure=1
+  done <<<"$container_ids"
+  network_ids="$(docker network ls -q --filter "label=com.docker.compose.project=$project")" || return
+  while IFS= read -r id; do
+    [[ -z "$id" ]] || docker network rm "$id" >/dev/null 2>&1 || true
+  done <<<"$network_ids"
   if truthy "$remove_volumes"; then
-    mapfile -t ids < <(docker volume ls -q --filter "label=com.docker.compose.project=$project")
-    for id in "${ids[@]}"; do docker volume rm "$id"; done
+    volume_ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$project")" || return
+    while IFS= read -r id; do
+      [[ -z "$id" ]] || docker volume rm "$id" || failure=1
+    done <<<"$volume_ids"
   fi
+  return "$failure"
 }
 
 stack_down_one() {
@@ -275,7 +284,7 @@ stack_down_one() {
     if [[ "$mode" == dataplane ]]; then
       integration_compose --profile testing --profile inspector --profile sso --profile conformance "${args[@]}" || true
     else
-      controlplane_compose --profile conformance "${args[@]}" || true
+      controlplane_compose --profile testing --profile inspector --profile sso --profile conformance "${args[@]}" || true
     fi
   fi
   if [[ "$mode" == dataplane ]]; then remove_project_by_label "$CF_INTEGRATION_PROJECT" "$remove_volumes"; else remove_project_by_label "$CF_CONTROLPLANE_PROJECT" "$remove_volumes"; fi
@@ -375,6 +384,19 @@ ensure_fast_test() {
   [[ "$mode" != dataplane ]] || wait_publisher  b8e3f1a2c4d5e6f7a1b2c3d4e5f6a7b8
 }
 
+run_live_pytest() {
+  local mode="$1"
+  shift
+  if [[ "$mode" == dataplane ]]; then
+    CF_INTEGRATION_DATAPLANE_EXPECTED_GAPS=1 \
+      PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+      PYTEST_PLUGINS="${PYTEST_PLUGINS:+$PYTEST_PLUGINS,}cf_pytest_dataplane" \
+      "$@"
+  else
+    "$@"
+  fi
+}
+
 live_operation() {
   local mode="$1" group="${GROUP:-all}" first=0 second=0
   case "$group" in mcp|rbac|protocol|all) ;; *) printf 'GROUP must be mcp, rbac, protocol, or all\n' >&2; return 2 ;; esac
@@ -382,10 +404,10 @@ live_operation() {
   case "$group" in
     mcp) make -C "$CF_CONTROLPLANE_DIR" test-mcp-protocol-e2e ;;
     rbac) make -C "$CF_CONTROLPLANE_DIR" test-mcp-rbac ;;
-    protocol) make -C "$CF_CONTROLPLANE_DIR" test-protocol-compliance-gateway ;;
+    protocol) run_live_pytest "$mode" make -C "$CF_CONTROLPLANE_DIR" test-protocol-compliance-gateway ;;
     all)
-      (cd "$CF_CONTROLPLANE_DIR" && uv run --extra plugins pytest -p no:playwright tests/live_gateway/ --ignore=tests/live_gateway/sso --ignore=tests/live_gateway/mcp/test_mcp_rbac_transport.py -v --tb=short) || first=$?
-      (cd "$CF_CONTROLPLANE_DIR" && uv run --extra plugins pytest -p playwright tests/live_gateway/sso tests/live_gateway/mcp/test_mcp_rbac_transport.py -v --tb=short) || second=$?
+      (cd "$CF_CONTROLPLANE_DIR" && run_live_pytest "$mode" uv run --extra plugins pytest -p no:playwright tests/live_gateway/ --ignore=tests/live_gateway/plugins --ignore=tests/live_gateway/sso --ignore=tests/live_gateway/mcp/test_mcp_rbac_transport.py -v --tb=short) || first=$?
+      (cd "$CF_CONTROLPLANE_DIR" && run_live_pytest "$mode" uv run --extra plugins pytest -p playwright tests/live_gateway/sso tests/live_gateway/mcp/test_mcp_rbac_transport.py -v --tb=short) || second=$?
       [[ "$first" == 0 ]] || return "$first"
       return "$second"
       ;;
@@ -420,7 +442,7 @@ run_conformance_lane() {
 }
 
 conformance_topology() {
-  local mode="$1" artifact_root="$2" run_direct="$3" run_routed="$4" failure=0 lane_failure=0 gateway_id="" admin_token endpoint route token cleanup_args=()
+  local mode="$1" artifact_root="$2" run_direct="$3" run_routed="$4" failure=0 lane_failure=0 gateway_id="" admin_token endpoint route token
   stack_up "$mode" 1 || failure=$?
   if [[ "$failure" == 0 ]]; then start_conformance_service "$mode" || failure=$?; fi
   if [[ "$failure" == 0 && "$run_direct" == 1 ]]; then
@@ -438,8 +460,11 @@ conformance_topology() {
     fi
   fi
   if [[ -n "$admin_token" ]]; then
-    [[ -z "$gateway_id" ]] || cleanup_args=(--gateway-id "$gateway_id")
-    MCPGATEWAY_BEARER_TOKEN="$admin_token" python3 "$ROOT/scripts/conformance.py" cleanup --base-url "$MCP_CLI_BASE_URL" "${cleanup_args[@]}" || true
+    if [[ -n "$gateway_id" ]]; then
+      MCPGATEWAY_BEARER_TOKEN="$admin_token" python3 "$ROOT/scripts/conformance.py" cleanup --base-url "$MCP_CLI_BASE_URL" --gateway-id "$gateway_id" || true
+    else
+      MCPGATEWAY_BEARER_TOKEN="$admin_token" python3 "$ROOT/scripts/conformance.py" cleanup --base-url "$MCP_CLI_BASE_URL" || true
+    fi
   fi
   stop_conformance_service "$mode"
   stack_down_one "$mode" 0
@@ -489,9 +514,13 @@ case "${1:-}" in
   status) require_checkouts; mode_compose "$(topology)" ps ;;
   logs)
     require_checkouts
-    read -r -a log_services <<<"${SERVICES:-}"
-    for index in "${!log_services[@]}"; do [[ "${log_services[index]}" != cf-controlplane ]] || log_services[index]=gateway; done
-    mode_compose "$(topology)" logs -f "${log_services[@]}"
+    if [[ -n "${SERVICES:-}" ]]; then
+      read -r -a log_services <<<"$SERVICES"
+      for index in "${!log_services[@]}"; do [[ "${log_services[index]}" != cf-controlplane ]] || log_services[index]=gateway; done
+      mode_compose "$(topology)" logs -f "${log_services[@]}"
+    else
+      mode_compose "$(topology)" logs -f
+    fi
     ;;
   config)
     require_checkouts
