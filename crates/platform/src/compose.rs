@@ -80,7 +80,7 @@ impl ComposeProject {
         project_name: OsString,
         enable_sso: bool,
     ) -> Self {
-        let mut profiles = vec![OsString::from("testing"), OsString::from("inspector")];
+        let mut profiles = Vec::new();
         if enable_sso {
             profiles.push(OsString::from("sso"));
         }

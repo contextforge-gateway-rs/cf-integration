@@ -530,6 +530,7 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             &self.config.integration_project().value,
             "CF_INTEGRATION_PROJECT",
         )?;
+        let dataplane_source_enabled = !self.config.dataplane_ref().value.is_empty();
         let mut services = std::collections::BTreeMap::new();
         for service in [
             "gateway",
@@ -553,10 +554,11 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
             services,
             controlplane_checkout_revision: self
                 .git_optional(self.config.controlplane_dir(), ["rev-parse", "HEAD"]),
-            dataplane_checkout_revision: self
-                .git_optional(self.config.dataplane_dir(), ["rev-parse", "HEAD"]),
+            dataplane_checkout_revision: optional_source_revision(dataplane_source_enabled, || {
+                self.git_optional(self.config.dataplane_dir(), ["rev-parse", "HEAD"])
+            }),
             controlplane_image_prebuilt: self.config.controlplane_image().is_prebuilt(),
-            dataplane_source_enabled: !self.config.dataplane_ref().value.is_empty(),
+            dataplane_source_enabled,
             expected_controlplane_image: required_text(
                 self.config.controlplane_image().resolved(),
                 "CF_CONTROLPLANE_IMAGE",
@@ -802,6 +804,13 @@ impl<R: ProcessRunner> RuntimeExecutor<R> {
     }
 }
 
+fn optional_source_revision(
+    source_enabled: bool,
+    revision: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    source_enabled.then(revision).flatten()
+}
+
 fn format_stack_endpoint_summary(
     public_origin: &str,
     public_mcp_endpoint: &url::Url,
@@ -829,5 +838,14 @@ mod tests {
             summary,
             "Stack endpoints:\n  Gateway/API: http://127.0.0.1:8080\n  Public MCP: http://127.0.0.1:8080/servers/server-id/mcp\n  Conformance MCP (direct): http://127.0.0.1:49152/mcp"
         );
+    }
+
+    #[test]
+    fn published_image_mode_does_not_query_a_dataplane_checkout() {
+        let revision = optional_source_revision(false, || {
+            panic!("published image mode must not query a dataplane checkout")
+        });
+
+        assert_eq!(revision, None);
     }
 }

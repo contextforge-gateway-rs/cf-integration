@@ -173,18 +173,9 @@ impl StackCommandPlan {
         if build {
             arguments.push(OsString::from("--build"));
         }
-        if mode == StackMode::Controlplane {
-            if start_locust_ui {
-                arguments.push(OsString::from("--scale"));
-                arguments.push(OsString::from(format!("locust_worker={locust_workers}")));
-            } else {
-                arguments.extend([
-                    OsString::from("--scale"),
-                    OsString::from("locust=0"),
-                    OsString::from("--scale"),
-                    OsString::from("locust_worker=0"),
-                ]);
-            }
+        if mode == StackMode::Controlplane && start_locust_ui {
+            arguments.push(OsString::from("--scale"));
+            arguments.push(OsString::from(format!("locust_worker={locust_workers}")));
         }
         Self {
             command: project.command(arguments),
