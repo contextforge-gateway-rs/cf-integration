@@ -252,6 +252,24 @@ async fn happy_path_uses_public_route_auth_session_and_deterministic_ids() {
 }
 
 #[tokio::test]
+async fn forbidden_unauthenticated_response_is_accepted_as_auth_rejection() {
+    let transport = FakeTransport::new([
+        ProbeResponse::new(403, None, None),
+        initialize_success(Some("session-forbidden")),
+        initialized_success(),
+        tools_success(json!([{"name": "custom_tool"}])),
+    ]);
+    let mut output = Vec::new();
+
+    run_probe(&transport, &config(), &mut output)
+        .await
+        .expect("403 should be accepted as an unauthenticated rejection");
+
+    let output = String::from_utf8(output).expect("probe output should be UTF-8");
+    assert!(output.contains("auth_negative=PASS status=403"));
+}
+
+#[tokio::test]
 async fn requested_version_drives_initialize_payload_and_negotiated_version_drives_headers() {
     let transport = FakeTransport::new([
         ProbeResponse::new(401, None, None),
@@ -412,7 +430,7 @@ async fn every_transport_step_is_bounded_by_the_request_timeout() {
 }
 
 #[tokio::test]
-async fn unauthenticated_initialize_must_return_401() {
+async fn unauthenticated_initialize_must_return_authentication_rejection() {
     let transport = FakeTransport::new([ProbeResponse::new(200, None, None)]);
     let mut output = Vec::new();
 
@@ -420,7 +438,7 @@ async fn unauthenticated_initialize_must_return_401() {
         .await
         .expect_err("an unprotected public route should fail the probe");
 
-    assert!(error.to_string().contains("expected 401"));
+    assert!(error.to_string().contains("expected 401 or 403"));
     assert!(error.to_string().contains("got 200"));
     assert_eq!(transport.requests().len(), 1);
 }

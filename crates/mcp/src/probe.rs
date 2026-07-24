@@ -183,15 +183,15 @@ pub async fn run_probe<T: ProbeTransport, W: Write>(
         config.mode,
     )
     .await?;
-    if unauthenticated.status != 401 {
+    if !matches!(unauthenticated.status, 401 | 403) {
         bail!(
-            "auth_negative=FAIL expected 401 without Authorization, got {}",
+            "auth_negative=FAIL expected 401 or 403 without Authorization, got {}",
             unauthenticated.status
         );
     }
     write_line(
         output,
-        "auth_negative=PASS status=401",
+        &format!("auth_negative=PASS status={}", unauthenticated.status),
         "failed to write negative authentication result",
     )?;
 

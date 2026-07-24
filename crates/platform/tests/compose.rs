@@ -382,7 +382,7 @@ fn conformance_fixture_patch_is_fail_closed_and_adds_server_era_routing() {
 }
 
 #[test]
-fn controlplane_profiles_are_explicit_and_sso_is_optional() {
+fn controlplane_default_excludes_optional_profiles_and_sso_is_explicit() {
     let without_sso = ComposeProject::controlplane(
         Path::new("/repo"),
         Path::new("/checkout"),
@@ -396,8 +396,8 @@ fn controlplane_profiles_are_explicit_and_sso_is_optional() {
         true,
     );
 
-    assert_eq!(without_sso.profiles(), ["testing", "inspector"]);
-    assert_eq!(with_sso.profiles(), ["testing", "inspector", "sso"]);
+    assert!(without_sso.profiles().is_empty());
+    assert_eq!(with_sso.profiles(), ["sso"]);
     assert_eq!(
         without_sso.files(),
         [

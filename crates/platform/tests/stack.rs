@@ -140,7 +140,7 @@ fn dataplane_up_always_removes_orphans_and_optionally_builds() {
 }
 
 #[test]
-fn controlplane_up_scales_locust_services_coherently() {
+fn controlplane_up_does_not_activate_locust_profile_when_ui_is_disabled() {
     let disabled = args(StackCommandPlan::up(
         project(StackMode::Controlplane),
         StackMode::Controlplane,
@@ -148,17 +148,12 @@ fn controlplane_up_scales_locust_services_coherently() {
         false,
         3,
     ));
-    assert!(ends_with(
-        &disabled,
-        &[
-            "up",
-            "-d",
-            "--scale",
-            "locust=0",
-            "--scale",
-            "locust_worker=0"
-        ]
-    ));
+    assert!(ends_with(&disabled, &["up", "-d"]));
+    assert!(
+        disabled
+            .iter()
+            .all(|argument| !argument.to_string_lossy().starts_with("locust"))
+    );
 
     let enabled = args(StackCommandPlan::up(
         project(StackMode::Controlplane),
