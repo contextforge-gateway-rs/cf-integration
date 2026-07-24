@@ -1,0 +1,27 @@
+meta {
+  name: MCP DIsconnect
+  type: http
+  seq: 18
+}
+
+delete {
+  url: http://127.0.0.1:{{port}}/{{path}}
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  mcp-session-id: {{mcp-session-id}}
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+  x-correlation-id: {{x-correlation-id}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

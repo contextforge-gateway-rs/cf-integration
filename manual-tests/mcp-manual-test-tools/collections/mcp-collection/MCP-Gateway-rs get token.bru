@@ -1,0 +1,29 @@
+meta {
+  name: MCP-Gateway-rs get token
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://127.0.0.1:{{port}}/contextforge-rs/admin/tokens/admin@example.com
+  body: none
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  ~Authorization: Bearer {{token}}
+  Connection: {{connection_action}}
+}
+
+script:post-response {
+  bru.setVar("token", `Bearer ${res.body}`);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

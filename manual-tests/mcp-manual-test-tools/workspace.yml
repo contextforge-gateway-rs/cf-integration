@@ -1,0 +1,9 @@
+opencollection: 1.0.0
+info:
+  name: MCP Manual Test Tools
+  type: workspace
+collections:
+  - name: MCP Collection
+    path: collections/mcp-collection
+specs: []
+docs: ""
