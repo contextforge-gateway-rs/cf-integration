@@ -1,0 +1,32 @@
+meta {
+  name: MCP Call Tools A Get val
+  type: http
+  seq: 11
+}
+
+post {
+  url: http://127.0.0.1:{{port1}}/{{path}}
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  mcp-session-id: {{mcp-session-id}}
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+  x-correlation-id: {{x-correlation-id}}
+}
+
+body:json {
+  
+  {"method":"tools/call","params":{"name":"counter-one-get-value","arguments":{},"_meta":{"progressToken":1}},"jsonrpc":"2.0","id":6}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

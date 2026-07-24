@@ -1,0 +1,31 @@
+meta {
+  name: MCP Get Prompt
+  type: http
+  seq: 8
+}
+
+post {
+  url: http://127.0.0.1:{{port}}/{{path}}
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  mcp-session-id: {{mcp-session-id}}
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+  ~x-correlation-id: {{x-correlation-id}}
+}
+
+body:json {
+  {"method":"prompts/get","params":{"name":"{{prompt_name}}","arguments":{"message":"hello from bruno"},"_meta":{"progressToken":5}},"jsonrpc":"2.0","id":5}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

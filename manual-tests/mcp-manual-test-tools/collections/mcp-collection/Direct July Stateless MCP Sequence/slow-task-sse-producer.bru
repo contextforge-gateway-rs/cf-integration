@@ -1,0 +1,58 @@
+meta {
+  name: Slow Task SSE Producer
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{tower_mcp_url}}
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+  MCP-Protocol-Version: 2026-07-28
+  Mcp-Method: tools/call
+  Mcp-Name: slow_task
+}
+
+body:json {
+  {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "tools/call",
+    "params": {
+      "name": "slow_task",
+      "arguments": {
+        "delay_ms": 1000,
+        "steps": 4
+      },
+      "_meta": {
+        "progressToken": "bruno-sse-1",
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          "name": "bruno-july-stateless-client",
+          "version": "0.1.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }
+}
+
+tests {
+  const sessionId = res.headers["mcp-session-id"] || res.headers["MCP-Session-Id"] || res.headers["Mcp-Session-Id"];
+  const content = res.body.result && Array.isArray(res.body.result.content) ? res.body.result.content : [];
+  const text = content.map((item) => item.text || "").join("\n");
+
+  test("runs slow_task as a stateless tools/call", function () {
+    expect(res.status).to.equal(200);
+    expect(text.toLowerCase()).to.contain("completed");
+  });
+
+  test("does not require or return a session", function () {
+    expect(sessionId).to.be.undefined;
+  });
+}

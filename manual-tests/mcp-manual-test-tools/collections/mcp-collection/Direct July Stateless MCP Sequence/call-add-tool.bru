@@ -1,0 +1,57 @@
+meta {
+  name: Call Add Tool
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{tower_mcp_url}}
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  Content-Type: application/json
+  MCP-Protocol-Version: 2026-07-28
+  Mcp-Method: tools/call
+  Mcp-Name: add
+}
+
+body:json {
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "add",
+      "arguments": {
+        "a": 10,
+        "b": 32
+      },
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          "name": "bruno-july-stateless-client",
+          "version": "0.1.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }
+}
+
+tests {
+  const sessionId = res.headers["mcp-session-id"] || res.headers["MCP-Session-Id"] || res.headers["Mcp-Session-Id"];
+  const content = res.body.result && Array.isArray(res.body.result.content) ? res.body.result.content : [];
+  const text = content.map((item) => item.text || "").join("\n");
+
+  test("calls add through tools/call with Mcp-Name", function () {
+    expect(res.status).to.equal(200);
+    expect(text).to.contain("42");
+  });
+
+  test("does not require or return a session", function () {
+    expect(sessionId).to.be.undefined;
+  });
+}

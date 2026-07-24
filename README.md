@@ -103,6 +103,19 @@ The Fast Time backend is registered as virtual server
 `9779b6698cbd4b4995ee04a4fab38737`, so probe and load commands need no manual
 UI setup.
 
+## Manual Bruno tests
+
+The vendored Bruno workspace under
+`manual-tests/mcp-manual-test-tools/` provides requests for manually exercising
+MCP gateway and server flows. Open that directory as a workspace in Bruno,
+select an environment, and set a fresh token where the selected flow requires
+authentication.
+
+The collection was imported from
+[`lucarlig/mcp-manual-test-tools`](https://github.com/lucarlig/mcp-manual-test-tools).
+Its exact source revision is recorded in the vendored directory's
+`UPSTREAM.md`.
+
 ## CLI
 
 The public CLI contains only distinct workflows:
@@ -405,6 +418,7 @@ docker/docker-compose.cf-dataplane.yaml   dataplane service and nginx override
 docker/docker-compose.cf-integration.yaml Fast Time and Locust overlay
 docker/docker-compose.cf-conformance.yaml official fixture overlay
 scripts/locustfile_mcp.py                  Locust MCP adapter
+manual-tests/mcp-manual-test-tools/        vendored Bruno workspace
 reports/mcp-conformance-comparison.md      tracked three-lane comparison
 .integration/                              ignored checkout/build/runtime state
 ```

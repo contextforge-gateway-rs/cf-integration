@@ -1,0 +1,31 @@
+meta {
+  name: MCP List Tools B
+  type: http
+  seq: 14
+}
+
+post {
+  url: http://127.0.0.1:{{port2}}/{{path}}
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  mcp-session-id: {{mcp-session-id}}
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+  x-correlation-id: {{x-correlation-id}}
+}
+
+body:json {
+  {"method":"tools/list","params":{"_meta":{"progressToken":2}},"jsonrpc":"2.0","id":2}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

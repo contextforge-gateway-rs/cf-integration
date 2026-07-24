@@ -1,0 +1,36 @@
+meta {
+  name: Messages Listen SSE
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{tower_mcp_url}}
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: text/event-stream
+  Content-Type: application/json
+  MCP-Protocol-Version: 2026-07-28
+  Mcp-Method: messages/listen
+}
+
+body:json {
+  {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "messages/listen",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          "name": "bruno-july-stateless-client",
+          "version": "0.1.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }
+}

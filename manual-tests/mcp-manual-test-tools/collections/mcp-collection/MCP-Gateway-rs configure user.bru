@@ -1,0 +1,57 @@
+meta {
+  name: MCP-Gateway-rs configure user
+  type: http
+  seq: 2
+}
+
+post {
+  url: http://127.0.0.1:{{port}}/contextforge-rs/admin/userconfigs/admin@example.com
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+}
+
+body:json {
+  {
+    "virtual_hosts": {
+      "c0ffee00f001f00lf00ldeadbeefdead": {
+        "backends": {
+          "gateway-one": {
+            "name": "gateway-one",
+            "url": "http://127.0.0.1:5555/mcp",
+            "transport": "STREAMABLEHTTP",
+            "passthrough_headers": [],
+            "allowed_tool_names": [],
+            "allowed_resource_names": [],
+            "allowed_prompt_names": []
+          },
+          "gateway-two": {
+            "name": "gateway-two",
+            "url": "http://127.0.0.1:5556/mcp",
+            "transport": "STREAMABLEHTTP",
+            "passthrough_headers": [],
+            "allowed_tool_names": [],
+            "allowed_resource_names": [],
+            "allowed_prompt_names": []
+          }
+        }
+      }
+    }
+  }
+}
+
+script:post-response {
+  bru.setVar("mcp-session-id", res.headers['mcp-session-id']);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}

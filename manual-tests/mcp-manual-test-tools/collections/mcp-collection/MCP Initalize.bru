@@ -1,0 +1,34 @@
+meta {
+  name: MCP Initalize
+  type: http
+  seq: 3
+}
+
+post {
+  url: http://127.0.0.1:{{port}}/{{path}}
+  body: json
+  auth: inherit
+}
+
+headers {
+  Accept: application/json; text/event-stream
+  Content-Type: application/json
+  Authorization: {{token}}
+  Connection: {{connection_action}}
+}
+
+body:json {
+  {"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"sampling":{},"elicitation":{},"roots":{"listChanged":true},"tasks":{"list":{},"cancel":{},"requests":{"sampling":{"createMessage":{}},"elicitation":{"create":{}}}}},"clientInfo":{"name":"inspector-client","version":"0.21.1"}},"jsonrpc":"2.0","id":0}
+}
+
+script:post-response {
+  bru.setVar("mcp-session-id", res.headers['mcp-session-id']);
+  bru.setVar("x-correlation-id",res.headers['x-correlation-id']);
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+}
